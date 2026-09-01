@@ -2,7 +2,7 @@
 
 A browser UI for managing llama.cpp GGUF models and containers on a personal homelab box. FastAPI + HTMX + Alpine + Tailwind, no build step, one Docker container.
 
-![screenshot placeholder — hit /dashboard after install]
+![The Model Loader overview page: disk and backend summary, live GPU utilisation and VRAM sparklines, per-GPU breakdown, recent downloads, and the models.ini sections](docs/model_loader.png)
 
 ## What it does
 
