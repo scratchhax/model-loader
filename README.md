@@ -30,7 +30,32 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 - **Docker Engine + Compose plugin (v2)**
 - **At least one running llama.cpp server container**, see below
 - **A shared models directory** bind-mounted into both llama.cpp and Model Loader
-- **NVIDIA GPU** with `nvidia-container-toolkit`, **AMD** with ROCm passthrough, or **CPU-only** — all work; vendor is auto-detected per container
+- **A GPU backend** — NVIDIA (CUDA), AMD (ROCm), Vulkan, or CPU-only. See the support table below; what differs between them is how much Model Loader can *measure*, not whether it works.
+
+### Backend support
+
+Model Loader manages any llama.cpp container. What varies is whether it can read GPU telemetry, because that depends on a vendor tool being present *inside* the image.
+
+| | NVIDIA (`server-cuda`) | AMD (`server-rocm`) | Vulkan (`server-vulkan`) | CPU (`server`) |
+|---|---|---|---|---|
+| Discovery, restart, logs | yes | yes | yes | yes |
+| `models.ini` editing | yes | yes | yes | yes |
+| Live util / VRAM / temp / power | yes | yes | only if an SMI tool is present | n/a |
+| Autoconfig sizing | yes | yes | **needs `GPU_VRAM`** | n/a |
+| Per-card fit + `tensor-split` | yes | yes | no per-card data | n/a |
+
+Vendor is detected from the image tag, so a custom-built image may need `LLAMA_CONTAINERS` to be discovered and `GPU_VRAM` to be sized.
+
+**Vulkan needs one extra setting.** The Vulkan image ships neither `nvidia-smi` nor `rocm-smi`, so there is nothing to query for VRAM. Declare it on the model-loader service:
+
+```yaml
+    environment:
+      - GPU_VRAM=llama-vulkan:16      # container name : GB
+```
+
+Without it, Autoconfig says so plainly rather than claiming the model doesn't fit. You still get everything except live telemetry and the per-card split, which falls back to dividing pooled VRAM evenly.
+
+**A note on testing.** The CUDA path is what this has been developed and calibrated against. ROCm and Vulkan are implemented and exercised in code, but have had far less real-world use — if something looks wrong on those, it probably is, and a bug report is welcome.
 
 ### The llama.cpp container
 

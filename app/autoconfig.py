@@ -796,6 +796,26 @@ def analyze(*,
                   "This is not a statement about whether the model would fit.",
         )
 
+    # A backend that is discovered but reports 0 GB is a DIFFERENT failure from one that is
+    # genuinely too small, and it must not be reported as the latter. Sizing against zero
+    # produces a negative budget, so every context fails and the panel says "doesn't fit at
+    # any context" — which reads as a verdict on the model when it is really a missing probe.
+    # Vulkan images are the common case: they carry neither nvidia-smi nor rocm-smi, so there
+    # is nothing to read and GPU_VRAM has to supply the number.
+    _sized = [b for b in backends if float(b.get("vram_gb") or 0) > 0]
+    if not _sized:
+        _names = ", ".join(str(b.get("name") or "?") for b in backends)
+        return Recommendation(
+            plans=[], recommended_backend="", recommended_ctx=0,
+            error=f"Backend(s) found ({_names}) but none report their VRAM, so there is nothing "
+                  "to size against. This is usually a Vulkan build: the image ships no vendor "
+                  "SMI tool, so VRAM cannot be probed. Declare it instead — set "
+                  "GPU_VRAM=<container>:<GB> on the model-loader service (e.g. "
+                  "GPU_VRAM=llama-vulkan:16) and restart it. Nothing here says the model "
+                  "does not fit; the size of the card is simply unknown.",
+        )
+    backends = _sized
+
     # HARD STOP if the KV cache cannot be sized from this GGUF's metadata.
     #
     # kv_cache_bytes() returns 0 when block_count / attention_head_count_kv / head_dim are

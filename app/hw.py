@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import docker
 from docker.errors import DockerException, NotFound
@@ -103,10 +103,18 @@ def _detect_vendor(container) -> str:
         image = ((container.image.tags or [container.image.short_id]) or [""])[0].lower()
     except DockerException:
         pass
-    if "rocm" in image:
+    # Vendor decides which probe to run, and it is read off the image tag because that is
+    # the only thing available without exec'ing into a container that may not be running.
+    if "rocm" in image or "hip" in image:
         vendor = "amd"
     elif "cuda" in image or "nvidia" in image:
         vendor = "nvidia"
+    elif "vulkan" in image:
+        # Vulkan is a rendering API, not a vendor: the card underneath may be AMD, NVIDIA or
+        # Intel, and the image ships neither rocm-smi nor nvidia-smi as a rule. Treated as its
+        # own case so it can try both probes and then degrade to a declared VRAM figure,
+        # rather than falling into "unknown" and reporting no GPU at all.
+        vendor = "vulkan"
     else:
         vendor = "unknown"
     with _LOCK:
@@ -175,6 +183,40 @@ def _read_nvidia(container) -> GpuStats | None:
         )
     except (ValueError, IndexError):
         return None
+
+
+def _read_vulkan(container, container_name: str) -> GpuStats | None:
+    """Best-effort stats for a Vulkan backend.
+
+    Vulkan says nothing about the vendor underneath, and the llama.cpp Vulkan image carries
+    no vendor SMI tool, so there is usually nothing to query. Order of attempts:
+
+      1. rocm-smi, then nvidia-smi — occasionally present on images built on a vendor base,
+         and if either answers we get real utilisation for free.
+      2. The GPU_VRAM declaration. No utilisation, temperature or power, but it makes
+         vram_total_gb non-zero, which is the number Autoconfig actually needs. Without it
+         Autoconfig sees a 0 GB budget and reports "doesn't fit at any context" for every
+         model, which reads as a broken app rather than a missing setting.
+
+    Returns None only when we have neither a probe nor a declared size — the caller then
+    surfaces the "declare GPU_VRAM" message instead of silently showing nothing.
+    """
+    probed = _read_amd(container, container_name) or _read_nvidia(container)
+    if probed is not None:
+        return replace(probed, vendor="vulkan")
+
+    declared = float(settings.gpu_vram_map.get(container_name, 0) or 0)
+    if declared <= 0:
+        return None
+    return GpuStats(
+        vendor="vulkan",
+        name="Vulkan device (no SMI tool in image — VRAM from GPU_VRAM)",
+        util_pct=0.0,
+        vram_used_gb=0.0,
+        vram_total_gb=round(declared, 1),
+        temp_c=0.0,
+        power_w=0.0,
+    )
 
 
 def _read_amd(container, container_name: str) -> GpuStats | None:
@@ -257,7 +299,14 @@ def _collect(name: str) -> BackendStats:
         return BackendStats(ok=False, error=f"container is {c.status}")
 
     vendor = _detect_vendor(c)
-    gpu = _read_nvidia(c) if vendor == "nvidia" else _read_amd(c, name) if vendor == "amd" else None
+    if vendor == "nvidia":
+        gpu = _read_nvidia(c)
+    elif vendor == "amd":
+        gpu = _read_amd(c, name)
+    elif vendor == "vulkan":
+        gpu = _read_vulkan(c, name)
+    else:
+        gpu = None
     cont = _read_container_runtime(c)
     return BackendStats(ok=True, gpu=gpu, container=cont)
 
