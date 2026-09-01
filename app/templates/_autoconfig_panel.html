@@ -1,0 +1,212 @@
+{% from "_icons.html" import icon %}
+{% if rec.error %}
+<div class="mt-4 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">
+  Autoconfig failed: {{ rec.error }}
+</div>
+{% else %}
+<div id="autoconfig-panel"
+     data-values='{{ values_json }}'
+     data-values-minimal='{{ values_minimal_json }}'
+     class="mt-4 rounded-xl border border-sky-200 dark:border-sky-900 bg-sky-50/40 dark:bg-sky-950/20 p-4">
+
+  <div class="flex items-baseline justify-between gap-3">
+    <h3 class="text-sm font-semibold inline-flex items-center gap-1.5">
+      {{ icon('sparkles', 14) }} Autoconfig recommendation
+    </h3>
+    <button type="button" onclick="document.getElementById('autoconfig-panel').remove()"
+            class="text-xs text-slate-500 hover:text-slate-900 dark:hover:text-slate-100">dismiss</button>
+  </div>
+
+  {# top summary #}
+  <div class="mt-3 text-sm">
+    Model file: <span class="font-mono">{{ model_display }}</span>
+    &middot; <span class="tabular-nums">{{ '%.2f' % (file_size / (1024**3)) }} GB</span>
+    &middot; arch <span class="font-mono">{{ arch or '?' }}</span>
+    {% if params %}&middot; <span class="font-mono">{{ params }}</span>{% endif %}
+  </div>
+
+  {# MoE preset picker — only when the model is MoE and offload is needed #}
+  {% if rec.presets %}
+  <div class="mt-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">Priority</div>
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+      {% for p in rec.presets %}
+      <button type="button"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ p.key }}"
+              hx-target="#autoconfig-slot"
+              hx-swap="innerHTML"
+              class="text-left rounded-md border px-3 py-2 transition
+                     {% if p.key == rec.active_preset %}bg-sky-100 dark:bg-sky-950/60 border-sky-400 dark:border-sky-700 ring-1 ring-sky-500
+                     {% else %}bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400{% endif %}">
+        <div class="flex items-center gap-1.5 text-sm font-medium">
+          {{ icon(p.icon, 14) }} {{ p.label }}
+          {% if p.key == rec.active_preset %}<span class="ml-auto text-[10px] text-sky-700 dark:text-sky-300">selected</span>{% endif %}
+        </div>
+        <div class="mt-1.5 grid grid-cols-2 gap-x-2 text-[11px] font-mono text-slate-600 dark:text-slate-300 tabular-nums">
+          <div><span class="text-slate-400">ctx</span> {{ format_ctx(p.ctx) }}</div>
+          <div class="text-right"><span class="text-slate-400">GPU</span> {{ p.gpu_layers }}/{{ p.total_layers }}L</div>
+          <div>
+            {% if p.offload_kind == 'cpu-moe' %}<span class="text-slate-400">cpu-moe</span> true
+            {% elif p.offload_kind == 'n-cpu-moe' %}<span class="text-slate-400">ncm</span> {{ p.n_cpu_moe }}
+            {% else %}<span class="text-slate-400">no offload</span>{% endif %}
+          </div>
+          <div class="text-right"><span class="text-slate-400">~</span>{{ '%.0f' % (p.speed_score * 100) }}% speed</div>
+        </div>
+      </button>
+      {% endfor %}
+    </div>
+    <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+      Speed % is a rough relative estimate (share of layers with experts on GPU).
+      Click a chip to update the values below.
+    </p>
+  </div>
+  {% endif %}
+
+  {# per-backend fit table #}
+  <div class="mt-4 overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead class="text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-wide">
+        <tr>
+          <th class="text-left py-1 pr-3 font-medium">Backend</th>
+          <th class="text-right py-1 px-2 font-medium">Total VRAM</th>
+          <th class="text-right py-1 px-2 font-medium">Model</th>
+          {% for ctx in ctx_columns %}
+          <th class="text-right py-1 px-2 font-medium">{{ format_ctx(ctx) }}</th>
+          {% endfor %}
+          <th class="text-right py-1 px-2 font-medium">Max ctx that fits</th>
+        </tr>
+      </thead>
+      <tbody class="font-mono">
+        {% for p in rec.plans %}
+        <tr class="border-t border-slate-200 dark:border-slate-800">
+          <td class="py-1.5 pr-3">
+            <span class="font-medium">{{ p.name }}</span>
+            <span class="text-slate-500 dark:text-slate-400">({{ p.vendor }})</span>
+          </td>
+          <td class="py-1.5 px-2 text-right tabular-nums">{{ '%.1f' % p.vram_gb }} GB</td>
+          <td class="py-1.5 px-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+            {{ '%.1f' % p.rows[0].model_gb }} GB
+          </td>
+          {% for ctx in ctx_columns %}
+            {% set row = plan_row_map[p.name].get(ctx) %}
+            {% if row %}
+              {% set title = ('%.2f GB total (%.2f model + %.2f KV) · free %.2f GB' % (row.total_gb, row.model_gb, row.kv_gb, row.free_gb)) %}
+              <td class="py-1.5 px-2 text-right tabular-nums {% if row.fits %}text-emerald-600 dark:text-emerald-400{% else %}text-red-500 dark:text-red-400{% endif %}"
+                  title="{{ title }}{% if row.offload_kind %} · via {{ row.offload_kind }}{% if row.n_cpu_moe %}={{ row.n_cpu_moe }}{% endif %}{% endif %}">
+                {% if row.fits %}✓ {{ '%.1f' % row.total_gb }}{% else %}✗ {{ '%.1f' % row.total_gb }}{% endif %}
+                {% if row.offload_kind == 'cpu-moe' %}<sup class="text-[9px] text-slate-500 font-sans">cpu-moe</sup>
+                {% elif row.offload_kind == 'n-cpu-moe' %}<sup class="text-[9px] text-slate-500 font-sans">ncm={{ row.n_cpu_moe }}</sup>
+                {% endif %}
+              </td>
+            {% else %}
+              <td class="py-1.5 px-2 text-right text-slate-400">—</td>
+            {% endif %}
+          {% endfor %}
+          <td class="py-1.5 px-2 text-right font-medium
+            {% if p.name == rec.recommended_backend %}text-sky-700 dark:text-sky-300{% endif %}">
+            {% if p.max_ctx %}{{ format_ctx(p.max_ctx) }}{% else %}<span class="text-red-500">none</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="mt-3 text-xs text-slate-600 dark:text-slate-300">
+    Cell format: total VRAM used at that ctx (model + KV cache).
+    Hover any cell to see the KV cache breakdown.
+  </p>
+
+  {# recommendation summary #}
+  {% if rec.recommended_backend %}
+  <div class="mt-4 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+    <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Recommendation</div>
+    <div class="mt-1 text-sm">
+      Assign to <span class="font-mono font-semibold text-sky-700 dark:text-sky-300">{{ rec.recommended_backend }}</span>
+      at ctx <span class="font-mono font-semibold">{{ format_ctx(rec.recommended_ctx) }}</span>
+    </div>
+  </div>
+  {% else %}
+  <div class="mt-4 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-3 py-2 text-sm">
+    Model doesn't fit on any configured backend even at the smallest sensible ctx.
+    Consider `cpu-moe`, `n-cpu-moe`, a smaller quant, or a bigger GPU.
+  </div>
+  {% endif %}
+
+  {# values to apply #}
+  <div class="mt-4 grid gap-3 md:grid-cols-2">
+    <div class="rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+      <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Values to set</div>
+      <table class="mt-2 w-full text-xs font-mono">
+        {% for k, v in rec.values.items() %}
+        <tr>
+          <td class="pr-3 text-slate-500 dark:text-slate-400">{{ k }}</td>
+          <td>= {{ v }}</td>
+          {% if k in rec.baseline_redundant %}
+          <td class="pl-2 text-[10px] text-slate-400 normal-case font-sans">already baseline</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div class="rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+      <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Not applicable</div>
+      <ul class="mt-2 text-xs text-slate-600 dark:text-slate-300 space-y-1 list-disc list-inside">
+        {% for u in rec.unavailable %}<li>{{ u }}</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  {% if rec.quirks %}
+  <ul class="mt-4 rounded-md bg-slate-100 dark:bg-slate-950/40 text-slate-700 dark:text-slate-300 px-3 py-2 text-xs list-disc list-inside space-y-1">
+    {% for q in rec.quirks %}<li>{{ q }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if rec.current_diff %}
+  <div class="mt-4 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-3 py-2 text-xs">
+    <div class="font-semibold mb-1">Compared to current section:</div>
+    <ul class="list-disc list-inside space-y-0.5 font-mono">
+      {% for d in rec.current_diff %}<li>{{ d }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# action buttons #}
+  <div class="mt-4 flex flex-wrap items-center gap-2">
+    <button type="button" onclick="applyAutoconfig('full')"
+            class="inline-flex items-center gap-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
+      {{ icon('sparkles', 12) }} Fill form ({{ rec.values | length }} values)
+    </button>
+    <button type="button" onclick="applyAutoconfig('minimal')"
+            class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs">
+      Fill minimal ({{ rec.values_minimal | length }} values, skips baseline)
+    </button>
+    <span class="text-xs text-slate-500 dark:text-slate-400 ml-auto">nothing saves until you click Save at the bottom</span>
+  </div>
+</div>
+
+<script>
+function applyAutoconfig(mode) {
+  const panel = document.getElementById('autoconfig-panel');
+  if (!panel) return;
+  const key = mode === 'minimal' ? 'valuesMinimal' : 'values';
+  let values;
+  try { values = JSON.parse(panel.dataset[key]); } catch (e) { console.error(e); return; }
+  for (const [k, v] of Object.entries(values)) {
+    const sel = 'input[name="fld_' + CSS.escape(k) + '"], select[name="fld_' + CSS.escape(k) + '"], textarea[name="fld_' + CSS.escape(k) + '"]';
+    const els = document.querySelectorAll(sel);
+    for (const el of els) {
+      if (el.type === 'checkbox') {
+        el.checked = ['true','on','yes','1'].includes(String(v).toLowerCase());
+      } else {
+        el.value = v;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+  panel.remove();
+}
+</script>
+{% endif %}

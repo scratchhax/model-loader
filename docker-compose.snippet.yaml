@@ -1,0 +1,24 @@
+# Paste this service block into your ai-lab docker-compose.yaml (or wherever your
+# llama.cpp containers are defined) — needs to share the same compose project
+# so it lands on the same docker network as the llama containers.
+#
+# Adjust: build context path, port, and any env vars you want to set.
+
+  model-loader:
+    build: ./model_loader           # path to this repo's clone
+    container_name: model-loader
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      - MODELS_DIR=/models
+      - MODELS_INI_PATH=/models/models.ini
+      - DATA_DIR=/data
+      # Optional whitelist. Leave unset to auto-discover any llama.cpp container.
+      # - LLAMA_CONTAINERS=llama-7900xt,llama-5070
+      # Optional VRAM overrides — otherwise probed from nvidia-smi / rocm-smi
+      # - GPU_VRAM=llama-7900xt:20,llama-5070:12
+    volumes:
+      - ./models:/models
+      - ./model_loader_data:/data          # sqlite prefs, avatar cache, HF token
+      - /var/run/docker.sock:/var/run/docker.sock  # for docker exec + auto-discovery

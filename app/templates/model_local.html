@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% from "_avatar.html" import avatar %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'models' %}
+{% block title %}{{ filename }} · Model Loader{% endblock %}
+{% block content %}
+
+<div class="flex items-center gap-3">
+  <a href="/models" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">← Models</a>
+</div>
+
+<div class="mt-3 flex items-start gap-4">
+  {% set identity = owner or filename %}
+  {{ avatar(identity, avatar_url or '', size=56) }}
+  <div class="min-w-0 flex-1">
+    <h1 class="font-mono text-lg font-semibold truncate">{{ filename }}</h1>
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-2">
+      {% if owner %}
+        <span>from</span>
+        <a href="https://huggingface.co/{{ owner }}" target="_blank" rel="noopener" class="hover:underline">{{ owner }}</a>
+      {% endif %}
+      <span>·</span>
+      <span class="tabular-nums">{{ size_h }}</span>
+      <span>·</span>
+      <span class="tabular-nums">{{ mtime }}</span>
+      {% if summary.general.quant %}
+        <span>·</span>
+        <span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono">{{ summary.general.quant }}</span>
+      {% endif %}
+      {% if summary.general.params %}
+        <span>·</span>
+        <span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono">{{ summary.general.params }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="mt-4 flex flex-wrap items-center gap-2">
+  {% if in_ini %}
+    <a href="/config/section/{{ stem }}/edit"
+       class="inline-flex items-center gap-1.5 rounded-md bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 px-2.5 py-1 text-xs">
+      {{ icon('check-circle', 12) }} in models.ini — edit
+    </a>
+  {% else %}
+    <a href="/config"
+       class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+      {{ icon('plus', 12) }} Add to models.ini
+    </a>
+  {% endif %}
+  {% for bn in loaded_on %}
+    <span class="inline-flex items-center rounded-md bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 px-2.5 py-1 text-xs">
+      loaded · {{ bn }}
+    </span>
+  {% endfor %}
+  {% if loaded_on %}
+    <a href="/containers" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">test prompt →</a>
+  {% endif %}
+</div>
+
+{% if summary._error %}
+<p class="mt-6 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-4 py-3 text-sm">Failed to parse GGUF: {{ summary._error }}</p>
+{% else %}
+
+<div class="mt-8 grid gap-4 md:grid-cols-2">
+
+  <section class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</h2>
+    <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+      {% macro row(label, value, mono=True) %}
+        <dt class="text-slate-500 dark:text-slate-400">{{ label }}</dt>
+        <dd class="{% if mono %}font-mono{% endif %} tabular-nums truncate">
+          {% if value is none %}<span class="text-slate-400 dark:text-slate-600">—</span>{% else %}{{ value }}{% endif %}
+        </dd>
+      {% endmacro %}
+      {{ row('architecture', summary.arch or none, mono=True) }}
+      {{ row('context length', '{:,}'.format(summary.model.context_length) if summary.model.context_length else none) }}
+      {{ row('embedding size', '{:,}'.format(summary.model.embedding_length) if summary.model.embedding_length else none) }}
+      {{ row('layers', summary.model.block_count) }}
+      {{ row('FFN size', '{:,}'.format(summary.model.feed_forward_length) if summary.model.feed_forward_length else none) }}
+      {{ row('attn heads', summary.model.attention_head_count) }}
+      {{ row('KV heads', summary.model.attention_head_count_kv) }}
+      {{ row('vocab size', '{:,}'.format(summary.model.vocab_size) if summary.model.vocab_size else none) }}
+      {{ row('RoPE freq base', summary.model.rope_freq_base) }}
+      {{ row('RoPE scaling', summary.model.rope_scaling_type) }}
+      {% if summary.model.rope_scaling_factor %}
+        {{ row('RoPE factor', summary.model.rope_scaling_factor) }}
+      {% endif %}
+      {% if summary.model.rope_scaling_original_context %}
+        {{ row('RoPE orig ctx', '{:,}'.format(summary.model.rope_scaling_original_context)) }}
+      {% endif %}
+    </dl>
+  </section>
+
+  <section class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">General</h2>
+    <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+      {{ row('name', summary.general.name, mono=True) }}
+      {{ row('author', summary.general.author, mono=True) }}
+      {{ row('license', summary.general.license, mono=True) }}
+      {{ row('quant', summary.general.quant, mono=True) }}
+      {{ row('params', summary.general.params, mono=True) }}
+      {{ row('tensors', '{:,}'.format(summary.general.tensor_count) if summary.general.tensor_count else none) }}
+      {{ row('KV pairs', summary.general.kv_count) }}
+      {{ row('GGUF version', summary.general.gguf_version) }}
+    </dl>
+    {% if summary.general.description %}
+    <p class="mt-4 text-sm text-slate-600 dark:text-slate-300">{{ summary.general.description }}</p>
+    {% endif %}
+    {% if summary.general.url %}
+    <p class="mt-2 text-xs"><a href="{{ summary.general.url }}" target="_blank" rel="noopener" class="hover:underline break-all">{{ summary.general.url }}</a></p>
+    {% endif %}
+  </section>
+
+</div>
+
+<section class="mt-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+  <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Tokenizer</h2>
+  <dl class="mt-3 grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+    {{ row('model', summary.tokenizer.model, mono=True) }}
+    {{ row('pre', summary.tokenizer.pre, mono=True) }}
+    {{ row('BOS id', summary.tokenizer.bos_token_id) }}
+    {{ row('EOS id', summary.tokenizer.eos_token_id) }}
+    {{ row('unknown id', summary.tokenizer.unknown_token_id) }}
+    {{ row('padding id', summary.tokenizer.padding_token_id) }}
+    {{ row('add BOS', summary.tokenizer.add_bos_token) }}
+    {{ row('add EOS', summary.tokenizer.add_eos_token) }}
+  </dl>
+</section>
+
+{% if summary.chat_template %}
+<details class="mt-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+  <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Chat template</summary>
+  <pre class="px-4 pb-4 text-[11px] font-mono whitespace-pre-wrap overflow-x-auto text-slate-700 dark:text-slate-300">{{ summary.chat_template }}</pre>
+</details>
+{% endif %}
+
+<details class="mt-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+  <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">All GGUF keys ({{ raw | length }})</summary>
+  <div class="px-4 pb-4 overflow-x-auto">
+    <table class="w-full text-xs font-mono">
+      <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+        {% for k, v in raw.items() | sort %}
+        <tr>
+          <td class="py-1 pr-3 align-top text-slate-500 dark:text-slate-400 whitespace-nowrap">{{ k }}</td>
+          <td class="py-1 break-all">{% if v is mapping and v.get('_array') %}[array, {{ v.count }} items] sample: {{ v.sample }}{% else %}{{ v }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+<div class="mt-6 text-xs text-slate-500 dark:text-slate-400 font-mono break-all">{{ path }}</div>
+{% endblock %}

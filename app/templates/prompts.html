@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'prompts' %}
+{% block title %}Prompts · Model Loader{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold tracking-tight">Prompt library</h1>
+<p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Saved prompts are available from the "Load" dropdown in every container's test-prompt panel.</p>
+
+{% if flash %}
+<div class="mt-4 rounded-md px-4 py-3 text-sm
+  {% if flash.ok %}bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300
+  {% else %}bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300{% endif %}">
+  {{ flash.msg }}
+</div>
+{% endif %}
+
+<form method="post" action="/prompts" class="mt-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
+  <h2 class="text-sm font-semibold">Save a new prompt</h2>
+  <div>
+    <label class="block text-xs font-medium">Name</label>
+    <input name="name" required class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm">
+  </div>
+  <div>
+    <label class="block text-xs font-medium">Body</label>
+    <textarea name="body" rows="4" required class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm font-mono"></textarea>
+  </div>
+  <button class="inline-flex items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-4 py-2 text-sm font-medium shadow-card">{{ icon('save', 14) }} Save</button>
+</form>
+
+<div class="mt-6 space-y-3">
+{% if prompts %}
+  {% for p in prompts %}
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+    <div class="flex items-baseline justify-between gap-3">
+      <h3 class="font-medium">{{ p.name }}</h3>
+      <button hx-post="/prompts/{{ p.id }}/delete" hx-target="body" hx-swap="innerHTML"
+              hx-confirm="Delete prompt {{ p.name }}?"
+              class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">{{ icon('trash-2', 12) }} Delete</button>
+    </div>
+    <pre class="mt-2 text-xs font-mono whitespace-pre-wrap text-slate-700 dark:text-slate-300">{{ p.body }}</pre>
+  </div>
+  {% endfor %}
+{% else %}
+  <p class="text-sm text-slate-500 dark:text-slate-400">No saved prompts yet.</p>
+{% endif %}
+</div>
+{% endblock %}

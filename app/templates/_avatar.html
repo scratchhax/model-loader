@@ -1,0 +1,15 @@
+{# usage: {% from "_avatar.html" import avatar %}  ...  {{ avatar(owner, url, size=24) }} #}
+{% macro avatar(owner, url='', size=24) -%}
+<span class="relative inline-block rounded-full shrink-0 overflow-hidden align-middle"
+      style="width:{{ size }}px;height:{{ size }}px" title="{{ owner }}">
+  <span class="absolute inset-0 flex items-center justify-center text-white font-bold"
+        style="background:hsl({{ hue(owner) }},60%,45%);font-size:{{ (size * 0.5) | int }}px">
+    {{ (owner[:1] or '?') | upper }}
+  </span>
+  {% if url %}
+  <img src="{{ url }}" alt="{{ owner }}" referrerpolicy="no-referrer"
+       onerror="this.style.display='none'"
+       class="absolute inset-0 w-full h-full object-cover">
+  {% endif %}
+</span>
+{%- endmacro %}

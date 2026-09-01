@@ -1,0 +1,79 @@
+{% if not backends %}
+<p class="text-sm text-slate-500 dark:text-slate-400">No llama containers configured (see <span class="font-mono">LLAMA_CONTAINERS</span> env).</p>
+{% else %}
+<div class="grid gap-4 md:grid-cols-2">
+  {% for b in backends %}
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+
+    {# the polling zone — refreshes every 2s independently #}
+    <div hx-get="/containers/{{ b.name }}/dashboard"
+         hx-trigger="load, every 2s"
+         hx-swap="innerHTML">
+      {% include "_container_dashboard.html" %}
+    </div>
+
+    {# everything below is static — never touched by the auto-refresh above #}
+
+    {% if b.status == 'running' and b.loaded_model %}
+    <details class="mt-4">
+      <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">Test prompt</summary>
+      <form hx-post="/containers/{{ b.name }}/test"
+            hx-target="#test-out-{{ b.name }}"
+            hx-swap="innerHTML"
+            hx-indicator="#test-ind-{{ b.name }}"
+            x-data="{}"
+            class="mt-2 space-y-2">
+        {% if prompts %}
+        <div class="flex items-center gap-2 text-xs">
+          <label class="text-slate-500 dark:text-slate-400">Load:</label>
+          <select @change="if($event.target.value){fetch('/prompts/'+$event.target.value+'/body').then(r=>r.text()).then(t=>$refs.pbox.value=t); $event.target.value=''}"
+                  class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1">
+            <option value="">— saved prompt —</option>
+            {% for p in prompts %}
+            <option value="{{ p.id }}">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+          <a href="/prompts" class="text-slate-500 dark:text-slate-400 hover:underline">manage →</a>
+        </div>
+        {% endif %}
+        <textarea x-ref="pbox" name="prompt" rows="2" required placeholder="e.g. Write a haiku about GPUs."
+                  class="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm"></textarea>
+        <div class="flex items-center gap-2 flex-wrap">
+          <label class="text-xs text-slate-500 dark:text-slate-400">max tokens</label>
+          <input type="number" name="max_tokens" value="256" min="1" max="4096"
+                 class="w-24 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-xs font-mono">
+          {% from "_icons.html" import icon %}
+          <button class="inline-flex items-center gap-1 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1 text-xs font-medium shadow-card">{{ icon('send', 12) }} Send</button>
+          <button type="button"
+                  @click="const n=prompt('Save this prompt as:'); if(n){const fd=new FormData(); fd.append('name',n); fd.append('body',$refs.pbox.value); fetch('/prompts',{method:'POST',body:fd}).then(()=>location.reload())}"
+                  class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">{{ icon('save', 12) }} Save</button>
+          <span id="test-ind-{{ b.name }}" class="htmx-indicator text-xs text-slate-500 dark:text-slate-400">generating…</span>
+        </div>
+      </form>
+      <div id="test-out-{{ b.name }}" class="mt-2"></div>
+    </details>
+    {% endif %}
+
+    <details class="mt-4">
+      <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">Show logs (last 200 lines)</summary>
+      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <input name="q" placeholder="filter text (substring)"
+               class="flex-1 min-w-40 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 font-mono">
+        <select name="level" class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1">
+          <option value="">all</option>
+          <option value="error">errors</option>
+          <option value="warn">warnings+</option>
+        </select>
+      </div>
+      <pre data-log-pane
+           hx-get="/containers/{{ b.name }}/logs"
+           hx-include="closest details input[name='q'], closest details select[name='level']"
+           hx-trigger="load, every 3s, keyup changed delay:400ms from:(closest details input[name='q']), change from:(closest details select[name='level'])"
+           hx-swap="innerHTML"
+           class="mt-2 rounded-lg bg-slate-950 text-slate-100 dark:bg-black text-[11px] leading-snug p-3 overflow-x-auto max-h-72 overflow-y-auto font-mono whitespace-pre"><span class="skeleton inline-block w-64 h-3 opacity-40"></span></pre>
+    </details>
+
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

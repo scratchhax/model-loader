@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% set active_nav = 'models' %}
+{% block title %}Models · Model Loader{% endblock %}
+{% block content %}
+
+{% from "_icons.html" import icon %}
+<div class="flex items-baseline justify-between gap-3">
+  <h1 class="text-xl font-semibold tracking-tight">Models directory</h1>
+  <div class="flex items-center gap-3">
+    <button hx-post="/models/check-updates" hx-target="#models-list" hx-swap="innerHTML"
+            hx-indicator="#upd-ind"
+            class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs">
+      {{ icon('refresh-cw', 13) }} Check for updates
+    </button>
+    <span id="upd-ind" class="htmx-indicator text-xs text-slate-500 dark:text-slate-400">checking HF…</span>
+    <span class="text-xs text-slate-500 dark:text-slate-400 font-mono">{{ snap.path }}</span>
+  </div>
+</div>
+
+{% if snap.error and not snap.ggufs %}
+  <p class="mt-4 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-4 py-3 text-sm">{{ snap.error }}</p>
+{% endif %}
+
+{% if snap.disk %}
+<div class="mt-5 grid grid-cols-4 gap-3 text-sm">
+  <div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+    <div class="text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">Free</div>
+    <div class="mt-1 font-semibold">{{ snap.disk.free_h }}</div>
+  </div>
+  <div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+    <div class="text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">Total</div>
+    <div class="mt-1 font-semibold">{{ snap.disk.total_h }}</div>
+  </div>
+  <div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+    <div class="text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">Used</div>
+    <div class="mt-1 font-semibold">{{ snap.disk.used_pct }}%</div>
+  </div>
+  <div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+    <div class="text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">GGUFs</div>
+    <div class="mt-1 font-semibold">{{ snap.ggufs | length }}</div>
+  </div>
+</div>
+{% endif %}
+
+<div id="models-list" class="mt-6">
+  {% include "_models_list.html" %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+model_loader_data/
+*.db
+*.db-wal
+*.db-shm
+
+# Downloaded models (never)
+*.gguf
+*.gguf.download
+
+# Local overrides
+docker-compose.override.yaml
+docker-compose.override.yml
+.env.local

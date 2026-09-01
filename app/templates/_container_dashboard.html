@@ -1,0 +1,75 @@
+{% from "_icons.html" import icon %}
+{# The dynamic bits of a container card: status pill, stats pills, loaded model, error. Polled every 2s. #}
+<div class="flex items-start justify-between gap-3">
+  <div class="min-w-0">
+    <div class="flex items-center gap-2">
+      <span class="font-mono text-sm font-medium truncate">{{ b.name }}</span>
+      <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
+        {% if b.status == 'running' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+        {% elif b.status == 'restarting' %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
+        {% elif b.status == 'not_found' %}bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400
+        {% else %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300{% endif %}">
+        {{ b.status }}
+      </span>
+    </div>
+    {% if b.found %}
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 truncate">{{ b.image }} · {{ b.short_id }}</div>
+    {% endif %}
+  </div>
+  {% if b.found %}
+  <button hx-post="/containers/{{ b.name }}/restart"
+          hx-swap="none"
+          hx-confirm="Restart {{ b.name }}? Any in-flight completions will drop; model reload can take 30–60s."
+          class="inline-flex items-center gap-1.5 shrink-0 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+    {{ icon('rotate-cw', 13) }} Restart
+  </button>
+  {% endif %}
+</div>
+
+{% set st = stats.get(b.name) if stats else None %}
+{% if b.found and st and st.ok %}
+<div class="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+  {% if st.gpu %}
+  <span class="inline-flex items-center gap-1 rounded bg-sky-100 dark:bg-sky-950 text-sky-800 dark:text-sky-300 px-1.5 py-0.5"
+        title="{{ st.gpu.name }} ({{ st.gpu.vendor }})">{{ icon('zap', 11) }} {{ '%.0f' % st.gpu.util_pct }}%</span>
+  <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="VRAM">
+    {{ icon('hard-drive', 11) }} {{ '%.1f' % st.gpu.vram_used_gb }}/{{ '%.1f' % st.gpu.vram_total_gb }} GB
+  </span>
+  <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="temperature">{{ icon('thermometer', 11) }} {{ '%.0f' % st.gpu.temp_c }}°C</span>
+  <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="power">{{ '%.0f' % st.gpu.power_w }} W</span>
+  {% endif %}
+  {% if st.container %}
+  <span class="ml-2 inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="container CPU">{{ icon('cpu', 11) }} {{ '%.0f' % st.container.cpu_pct }}%</span>
+  <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="container RSS">{{ icon('gauge', 11) }} {{ '%.1f' % st.container.mem_used_gb }} GB</span>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if b.found %}
+<dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+  <dt class="text-slate-500 dark:text-slate-400">Loaded model</dt>
+  <dd class="font-mono truncate">
+    {% if b.loaded_model %}{{ b.loaded_model }}
+    {% elif b.probe_error %}<span class="text-amber-600 dark:text-amber-400">{{ b.probe_error }}</span>
+    {% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
+  </dd>
+
+  <dt class="text-slate-500 dark:text-slate-400">Uptime</dt>
+  <dd class="tabular-nums">{{ b.uptime or '—' }}</dd>
+
+  <dt class="text-slate-500 dark:text-slate-400">Started</dt>
+  <dd class="tabular-nums text-slate-600 dark:text-slate-300">{{ b.started_at or '—' }}</dd>
+
+  <dt class="text-slate-500 dark:text-slate-400">Host ports</dt>
+  <dd class="font-mono">
+    {% if b.host_ports %}{{ b.host_ports | join(', ') }}
+    {% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
+  </dd>
+</dl>
+{% endif %}
+
+{% if b.last_restart_error %}
+<div class="mt-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-xs">
+  last restart: {{ b.last_restart_error }}
+</div>
+{% endif %}

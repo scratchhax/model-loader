@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'settings' %}
+{% block title %}Settings · Model Loader{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold tracking-tight">Settings</h1>
+
+<form method="post" action="/settings" class="mt-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4 max-w-2xl">
+  <div>
+    <label class="text-sm font-medium">Hugging Face access token</label>
+    <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">
+      Needed only for gated / private repos (Llama, Gemma, etc). Stored locally in sqlite. Leave blank to use anonymous access.
+    </p>
+    <input name="hf_token" type="password" autocomplete="off" value="{{ token }}"
+           class="mt-2 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono"
+           placeholder="hf_...">
+  </div>
+
+  {% if flash %}
+  <div class="rounded-md px-3 py-2 text-sm
+    {% if flash.ok %}bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300
+    {% else %}bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300{% endif %}">
+    {{ flash.msg }}
+  </div>
+  {% endif %}
+
+  <div class="flex gap-2">
+    <button name="action" value="save" class="inline-flex items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-4 py-2 text-sm font-medium shadow-card">{{ icon('save', 14) }} Save</button>
+    <button name="action" value="test" class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-800">{{ icon('check-circle', 14) }} Save & test</button>
+  </div>
+</form>
+{% endblock %}

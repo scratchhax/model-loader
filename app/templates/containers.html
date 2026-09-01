@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'containers' %}
+{% block title %}Containers · Model Loader{% endblock %}
+{% block content %}
+
+<div class="flex items-baseline justify-between">
+  <h1 class="text-xl font-semibold tracking-tight">llama.cpp containers</h1>
+  <span class="text-xs text-slate-500 dark:text-slate-400">auto-discovered + stats refresh every 2s</span>
+</div>
+
+{% if openwebui and openwebui.found %}
+<div class="mt-4 rounded-xl border {% if openwebui.missing_backends %}border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20{% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900{% endif %} p-4 flex items-start justify-between gap-3">
+  <div class="min-w-0">
+    <div class="text-sm font-medium inline-flex items-center gap-2">
+      {{ icon('link', 14) }} OpenWebUI
+      <span class="text-xs text-slate-500 dark:text-slate-400 font-mono">{{ openwebui.container_name }} · {{ openwebui.status }}</span>
+    </div>
+    {% if openwebui.missing_backends %}
+    <div class="mt-1 text-xs text-amber-800 dark:text-amber-300">
+      {{ openwebui.missing_backends | length }} llama backend(s) missing from OpenWebUI's connections:
+      {% for m in openwebui.missing_backends %}
+      <span class="inline-block font-mono bg-amber-100 dark:bg-amber-950 px-1.5 py-0.5 rounded">{{ m.name }}</span>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+      All {{ openwebui.current_urls | length }} llama backend(s) already connected: {{ openwebui.current_urls | join(', ') }}
+    </div>
+    {% endif %}
+  </div>
+  {% if openwebui.missing_backends %}
+  <div class="shrink-0" x-data="{ syncing: false }">
+    <button type="button"
+            hx-post="/containers/sync-openwebui"
+            hx-target="#openwebui-toast"
+            hx-swap="innerHTML"
+            hx-confirm="Recreate open-webui with {{ openwebui.missing_backends | length }} new backend(s) added? This restarts open-webui (usually ~5s downtime)."
+            @click="syncing=true"
+            hx-on::after-request="Alpine.$data(this.parentElement).syncing=false; setTimeout(()=>location.reload(),1000)"
+            class="inline-flex items-center gap-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
+      <template x-if="!syncing">
+        <span class="inline-flex items-center gap-1">{{ icon('refresh-cw', 12) }} Sync to OpenWebUI</span>
+      </template>
+      <template x-if="syncing">
+        <span class="inline-flex items-center gap-1"><span class="skeleton inline-block w-3 h-3 rounded-full"></span> syncing…</span>
+      </template>
+    </button>
+  </div>
+  {% endif %}
+</div>
+<div id="openwebui-toast" class="mt-2"></div>
+{% endif %}
+
+<div id="backends" class="mt-5">
+  {% include "_container_cards.html" %}
+</div>
+
+<details class="mt-8 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
+         x-data="{ tab: 'cuda', copied: '' }">
+  <summary class="cursor-pointer px-4 py-3 text-sm font-medium inline-flex items-center gap-2">
+    {{ icon('plus', 14) }} Add another backend
+  </summary>
+  <div class="px-4 pb-4 space-y-3">
+    <p class="text-xs text-slate-500 dark:text-slate-400">
+      Model Loader auto-discovers any container running <span class="font-mono">ghcr.io/ggml-org/llama.cpp:*</span> — no config change here needed.
+      Just add a service to your compose file and <span class="font-mono">docker compose up -d &lt;service-name&gt;</span>.
+      Templates below; edit the port and name, paste into your compose.
+    </p>
+    <div class="flex items-center gap-1 text-xs">
+      <button type="button" @click="tab='cuda'" :class="tab==='cuda' ? 'bg-slate-100 dark:bg-slate-800 font-medium' : 'text-slate-500'"
+              class="px-3 py-1 rounded-md">NVIDIA (CUDA)</button>
+      <button type="button" @click="tab='rocm'" :class="tab==='rocm' ? 'bg-slate-100 dark:bg-slate-800 font-medium' : 'text-slate-500'"
+              class="px-3 py-1 rounded-md">AMD (ROCm)</button>
+      <button type="button" @click="tab='cpu'" :class="tab==='cpu' ? 'bg-slate-100 dark:bg-slate-800 font-medium' : 'text-slate-500'"
+              class="px-3 py-1 rounded-md">CPU only</button>
+      <button type="button" @click="tab='vulkan'" :class="tab==='vulkan' ? 'bg-slate-100 dark:bg-slate-800 font-medium' : 'text-slate-500'"
+              class="px-3 py-1 rounded-md">Vulkan (any GPU)</button>
+    </div>
+    {% macro tmpl(key, body) %}
+    <div x-show="tab === '{{ key }}'" class="relative">
+      <button type="button"
+              @click="navigator.clipboard.writeText($refs.snip_{{ key }}.innerText).then(()=>{copied='{{ key }}'; setTimeout(()=>copied='',1500)})"
+              class="absolute top-2 right-2 inline-flex items-center gap-1 rounded-md bg-white/90 dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 px-2 py-0.5 text-[10px]">
+        <template x-if="copied !== '{{ key }}'"><span class="inline-flex items-center gap-1">{{ icon('copy', 11) }} copy</span></template>
+        <template x-if="copied === '{{ key }}'"><span class="inline-flex items-center gap-1 text-emerald-600">{{ icon('check', 11) }} copied</span></template>
+      </button>
+      <pre x-ref="snip_{{ key }}" class="rounded-lg bg-slate-950 text-slate-100 dark:bg-black text-[11px] leading-snug p-3 overflow-x-auto font-mono whitespace-pre">{{ body }}</pre>
+    </div>
+    {% endmacro %}
+    {{ tmpl('cuda',
+'  llama-newgpu:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-newgpu
+    restart: unless-stopped
+    ports:
+      - "8084:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./models:/models
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 999 --models-max 1 -fa on -ctk q8_0 -ctv q8_0 -np 1') }}
+    {{ tmpl('rocm',
+'  llama-newamd:
+    image: ghcr.io/ggml-org/llama.cpp:server-rocm
+    container_name: llama-newamd
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    privileged: true
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0   # match your card
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    volumes:
+      - ./models:/models
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 999 --models-max 1 -fa on -ctk q8_0 -ctv q8_0 -np 1') }}
+    {{ tmpl('cpu',
+'  llama-cpu:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: llama-cpu
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./models:/models
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 0 --models-max 1 -t 16
+    # tune -t to your physical core count (not threads). -ngl 0 keeps everything on CPU.') }}
+    {{ tmpl('vulkan',
+'  llama-vulkan:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    container_name: llama-vulkan
+    restart: unless-stopped
+    ports:
+      - "8086:8080"
+    devices:
+      - "/dev/dri:/dev/dri"
+    volumes:
+      - ./models:/models
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 999 --models-max 1') }}
+    <p class="text-[11px] text-slate-500 dark:text-slate-400">
+      Then: <span class="font-mono">docker compose up -d &lt;service-name&gt;</span>. The new backend appears on this page automatically within 2s.
+    </p>
+  </div>
+</details>
+
+{% endblock %}

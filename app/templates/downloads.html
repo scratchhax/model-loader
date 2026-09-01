@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% set active_nav = 'downloads' %}
+{% block title %}Downloads · Model Loader{% endblock %}
+{% block content %}
+{% from "_icons.html" import icon %}
+<div class="flex items-baseline justify-between">
+  <h1 class="text-xl font-semibold tracking-tight">Downloads</h1>
+  <div class="flex items-center gap-3 text-sm">
+    <span class="text-xs text-slate-500 dark:text-slate-400">refreshes every 1s</span>
+    <button hx-post="/downloads/clear" hx-target="#dl-rows" hx-swap="innerHTML"
+            class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs">
+      {{ icon('check', 13) }} Clear finished
+    </button>
+  </div>
+</div>
+
+<details class="mt-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-card">
+  <summary class="cursor-pointer px-4 py-3 text-sm font-medium inline-flex items-center gap-2">{{ icon('upload', 14) }} Import from URL</summary>
+  <form hx-post="/download/url"
+        hx-target="#url-import-toast"
+        hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful){this.reset()}"
+        class="px-4 pb-4 space-y-3">
+    <div>
+      <label class="block text-xs font-medium">GGUF URL</label>
+      <input name="url" required type="url" placeholder="https://example.com/model.gguf"
+             class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono">
+    </div>
+    <div>
+      <label class="block text-xs font-medium">Filename <span class="opacity-60">(optional; derived from URL)</span></label>
+      <input name="filename" placeholder="my-model.gguf"
+             class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono">
+    </div>
+    <div class="flex items-center gap-3">
+      <button class="rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-4 py-2 text-sm font-medium">Queue download</button>
+      <p class="text-xs text-slate-500 dark:text-slate-400">Uses the same pipeline as HF downloads (resume, cancel, sparkline). HF token is only sent to <span class="font-mono">huggingface.co</span> URLs.</p>
+    </div>
+    <div id="url-import-toast"></div>
+  </form>
+</details>
+
+<div id="dl-rows"
+     hx-get="/downloads/rows"
+     hx-trigger="load, every 1s"
+     hx-swap="innerHTML"
+     class="mt-5">
+  {% include "_download_rows.html" %}
+</div>
+{% endblock %}

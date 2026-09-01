@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_avatar.html" import avatar %}
+{% set active_nav = 'dashboard' %}
+{% block title %}Dashboard · Model Loader{% endblock %}
+{% block content %}
+
+<div class="flex flex-wrap items-end justify-between gap-4">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
+    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Everything live at a glance.</p>
+  </div>
+  <div class="flex items-center gap-2">
+    <a href="/search" class="inline-flex items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium shadow-card hover:shadow-card-lg">
+      {{ icon('search', 14) }} Search HF
+    </a>
+    <a href="/config" class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">
+      {{ icon('file-cog', 14) }} Edit models.ini
+    </a>
+  </div>
+</div>
+
+{# top stat strip #}
+<div class="mt-6 grid gap-3 md:grid-cols-4">
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
+    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
+      {{ icon('hard-drive', 13) }} Disk free
+    </div>
+    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ snap.disk.free_h if snap.disk else '—' }}</div>
+    {% if snap.disk %}
+    <div class="mt-2 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+      <div class="h-full bg-gradient-to-r from-sky-500 to-indigo-600" style="width: {{ snap.disk.used_pct }}%"></div>
+    </div>
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 tabular-nums">{{ snap.disk.used_pct }}% of {{ snap.disk.total_h }} used</div>
+    {% endif %}
+  </div>
+
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
+    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
+      {{ icon('layers-3', 13) }} GGUFs
+    </div>
+    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ snap.ggufs | length }}</div>
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ ini_sections | length }} in models.ini</div>
+  </div>
+
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
+    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
+      {{ icon('server', 13) }} Backends
+    </div>
+    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ backends | length }}</div>
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+      {% set running = backends | selectattr('status', 'equalto', 'running') | list | length %}
+      {{ running }} running
+    </div>
+  </div>
+
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
+    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
+      {{ icon('download', 13) }} Active downloads
+    </div>
+    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ active_downloads }}</div>
+    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400"><a href="/downloads" class="hover:underline">Downloads →</a></div>
+  </div>
+</div>
+
+<div class="mt-6 grid gap-4 md:grid-cols-2">
+
+  {# LEFT: llama backends #}
+  <section>
+    <div class="flex items-baseline justify-between mb-3">
+      <h2 class="text-sm font-semibold tracking-tight uppercase text-slate-500 dark:text-slate-400">Backends</h2>
+      <a href="/containers" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">details →</a>
+    </div>
+    <div class="grid gap-3">
+      {% for b in backends %}
+      <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card"
+           hx-get="/containers/{{ b.name }}/dashboard"
+           hx-trigger="load, every 2s"
+           hx-swap="innerHTML">
+        {% include "_container_dashboard.html" %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# RIGHT: quick lists #}
+  <section class="space-y-4">
+    <div>
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-sm font-semibold tracking-tight uppercase text-slate-500 dark:text-slate-400">Recent downloads</h2>
+        <a href="/downloads" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">all →</a>
+      </div>
+      <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
+        {% if recent_downloads %}
+        <ul class="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+          {% for r in recent_downloads %}
+          <li class="py-2 flex items-center justify-between gap-3">
+            <div class="min-w-0 flex items-center gap-2">
+              {% if r.owner %}{{ avatar(r.owner, r.avatar_url or '', size=20) }}{% else %}<span class="w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-800"></span>{% endif %}
+              <span class="font-mono text-xs truncate">{{ r.filename }}</span>
+            </div>
+            <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400 tabular-nums">{{ r.size_h }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-sm text-slate-500 dark:text-slate-400">Nothing yet. <a href="/search" class="underline">Search Hugging Face</a> to get started.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div>
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-sm font-semibold tracking-tight uppercase text-slate-500 dark:text-slate-400">Configured (models.ini)</h2>
+        <a href="/config" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">edit →</a>
+      </div>
+      <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
+        {% if ini_sections %}
+        <ul class="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+          {% for s in ini_sections %}
+          <li class="py-2 flex items-center justify-between gap-3">
+            <a href="/config/section/{{ s.name }}/edit"
+               hx-get="/config/section/{{ s.name }}/edit" hx-target="body" hx-swap="none"
+               class="font-mono text-xs truncate hover:underline">{{ s.name }}</a>
+            <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
+              {% if s.has_file %}{{ icon('check-circle', 11) }}{% else %}<span class="text-amber-500">{{ icon('alert-triangle', 11) }}</span>{% endif %}
+              {{ s.items | length }} opts
+            </span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-sm text-slate-500 dark:text-slate-400">No sections yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+</div>
+
+{% endblock %}

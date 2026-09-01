@@ -1,0 +1,73 @@
+{% from "_icons.html" import icon %}
+{% macro fit_chips(chips) %}
+  {% for c in chips %}
+    <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono
+      {% if c.verdict == 'fits' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+      {% elif c.verdict == 'tight' %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
+      {% else %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300{% endif %}"
+      title="{{ c.ratio_pct }}% of {{ c.vram_gb }} GiB VRAM">
+      {% if c.verdict == 'fits' %}✓{% elif c.verdict == 'tight' %}~{% else %}✗{% endif %}
+      {{ c.name }} ({{ c.vram_gb }}G)
+    </span>
+  {% endfor %}
+{% endmacro %}
+
+{% if error %}
+<p class="mx-4 mb-4 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">{{ error }}</p>
+{% else %}
+<div class="border-t border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800">
+  {# group by shard_base #}
+  {% for group in groups %}
+  <div class="px-4 py-3">
+    {% if group.shard_total %}
+    <div class="flex items-center justify-between gap-3">
+      <div class="min-w-0">
+        <div class="font-mono text-sm truncate">{{ group.shard_base }}</div>
+        <div class="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1.5">
+          <span>{{ group.shard_total }} shards ·</span>
+          <span class="tabular-nums">{{ group.total_size_h }}</span>
+          {% if group.quant %}<span>·</span><span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5">{{ group.quant }}</span>{% endif %}
+          {% if group.fit_chips %}<span>·</span>{{ fit_chips(group.fit_chips) }}{% endif %}
+        </div>
+      </div>
+      <button hx-post="/download/multi"
+              hx-vals='{"repo_id": "{{ repo_id }}", "shard_base": "{{ group.shard_base }}"}'
+              hx-swap="outerHTML"
+              class="inline-flex items-center gap-1.5 shrink-0 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
+        {{ icon('download', 12) }} Download all shards
+      </button>
+    </div>
+    <details class="mt-2">
+      <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">show individual shards</summary>
+      <ul class="mt-2 space-y-1">
+        {% for f in group.files %}
+        <li class="flex items-center justify-between gap-3 text-xs">
+          <span class="font-mono truncate">{{ f.path }}</span>
+          <span class="tabular-nums text-slate-500 dark:text-slate-400">{{ f.size_h }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% else %}
+    {% set f = group.files[0] %}
+    <div class="flex items-center justify-between gap-3">
+      <div class="min-w-0">
+        <div class="font-mono text-sm truncate">{{ f.path }}</div>
+        <div class="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1.5">
+          <span class="tabular-nums">{{ f.size_h }}</span>
+          {% if f.quant %}<span>·</span><span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5">{{ f.quant }}</span>{% endif %}
+          {% if group.fit_chips %}<span>·</span>{{ fit_chips(group.fit_chips) }}{% endif %}
+        </div>
+      </div>
+      <button hx-post="/download"
+              hx-vals='{"repo_id": "{{ repo_id }}", "path": "{{ f.path }}", "size": {{ f.size }} }'
+              hx-swap="outerHTML"
+              class="inline-flex items-center gap-1.5 shrink-0 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
+        {{ icon('download', 12) }} Download
+      </button>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

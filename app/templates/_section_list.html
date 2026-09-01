@@ -1,0 +1,28 @@
+{# New-section row #}
+<div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 mb-4">
+  {% if unregistered %}
+  <form hx-get="/config/section/new" hx-target="#section-list" hx-swap="innerHTML"
+        class="flex flex-wrap items-center gap-3">
+    <label class="text-sm font-medium">Add entry for:</label>
+    <select name="name" class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-1.5 text-sm font-mono">
+      {% for stem in unregistered %}
+      <option value="{{ stem }}">{{ stem }}</option>
+      {% endfor %}
+    </select>
+    <button class="rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm">New</button>
+    <span class="text-xs text-slate-500 dark:text-slate-400">{{ unregistered | length }} unregistered GGUF{{ 's' if unregistered | length != 1 else '' }}</span>
+  </form>
+  {% else %}
+  <p class="text-sm text-slate-500 dark:text-slate-400">Every GGUF in the models directory already has a section. Download more from <a href="/search" class="underline">Search HF</a>.</p>
+  {% endif %}
+</div>
+
+{% if sections %}
+<ul class="space-y-3">
+  {% for s in sections %}
+  <li>{% include "_section_card.html" %}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="text-sm text-slate-500 dark:text-slate-400">No sections yet.</p>
+{% endif %}

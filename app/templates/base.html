@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Model Loader{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+          },
+          colors: {
+            ink: {
+              50:  '#f8fafc',
+              100: '#f1f5f9',
+              200: '#e2e8f0',
+              300: '#cbd5e1',
+              400: '#94a3b8',
+              500: '#64748b',
+              600: '#475569',
+              700: '#334155',
+              800: '#1e293b',
+              900: '#0f172a',
+              950: '#020617',
+            },
+          },
+          boxShadow: {
+            'card': '0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.06)',
+            'card-lg': '0 8px 24px -8px rgb(15 23 42 / 0.10), 0 4px 10px -6px rgb(15 23 42 / 0.10)',
+          },
+        },
+      },
+    };
+    (function () {
+      const stored = localStorage.getItem('theme');
+      if (stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark');
+      }
+    })();
+  </script>
+  <style>
+    :root {
+      --ml-radius: 12px;
+    }
+    html {
+      font-feature-settings: "cv11", "ss03", "cv02";  /* Inter: single-story a, open 4/6/9 */
+    }
+    body {
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    /* tabular numerals wherever numbers show up */
+    .font-mono, code, pre, .tabular-nums { font-variant-numeric: tabular-nums; }
+    [x-cloak] { display: none !important; }
+
+    /* nicer focus ring: subtle, brand-adjacent */
+    :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+      outline: 2px solid rgb(56 189 248 / 0.6);
+      outline-offset: 2px;
+      border-radius: 6px;
+    }
+
+    /* smooth all default color transitions */
+    a, button, summary, [role="button"] { transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease, box-shadow 120ms ease; }
+
+    /* skeleton shimmer */
+    @keyframes ml-shimmer {
+      0%   { background-position: -400px 0; }
+      100% { background-position: 400px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg,
+        rgb(226 232 240) 0%,
+        rgb(241 245 249) 40%,
+        rgb(226 232 240) 80%);
+      background-size: 800px 100%;
+      animation: ml-shimmer 1.4s linear infinite;
+      border-radius: 6px;
+    }
+    .dark .skeleton {
+      background: linear-gradient(90deg,
+        rgb(30 41 59) 0%,
+        rgb(51 65 85) 40%,
+        rgb(30 41 59) 80%);
+      background-size: 800px 100%;
+    }
+
+    /* fade-in animation for freshly-inserted content — scoped so periodic polls don't flicker */
+    @keyframes ml-fade-in {
+      from { opacity: 0; transform: translateY(2px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="h-full font-sans bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+  <header class="sticky top-0 z-30 border-b border-slate-200/70 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 backdrop-blur">
+    {% from "_icons.html" import icon %}
+    <div class="mx-auto max-w-6xl px-6 h-14 flex items-center justify-between gap-6">
+      <a href="/" class="flex items-center gap-2 font-semibold tracking-tight">
+        <span class="inline-flex w-6 h-6 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-card">
+          {{ icon('layers-3', 14) }}
+        </span>
+        <span>Model Loader</span>
+      </a>
+      <nav class="flex-1 flex items-center gap-0.5 text-sm">
+        {% set active = active_nav | default('') %}
+        {% macro navlink(href, key, label, ic, enabled=True) %}
+          {% if enabled %}
+            <a href="{{ href }}" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+              {% if active == key %}bg-slate-100 dark:bg-slate-800 font-medium text-slate-900 dark:text-slate-100
+              {% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800{% endif %}">{{ icon(ic, 14) }}{{ label }}</a>
+          {% else %}
+            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-slate-400 dark:text-slate-600 cursor-not-allowed" title="coming soon">{{ icon(ic, 14) }}{{ label }}</span>
+          {% endif %}
+        {% endmacro %}
+        {{ navlink('/', 'dashboard', 'Overview', 'gauge') }}
+        {{ navlink('/models', 'models', 'Models', 'layers-3') }}
+        {{ navlink('/search', 'search', 'Search HF', 'search') }}
+        {{ navlink('/downloads', 'downloads', 'Downloads', 'download') }}
+        {{ navlink('/config', 'config', 'models.ini', 'file-cog') }}
+        {{ navlink('/containers', 'containers', 'Containers', 'server') }}
+        {{ navlink('/prompts', 'prompts', 'Prompts', 'message-square-quote') }}
+        {{ navlink('/settings', 'settings', 'Settings', 'settings') }}
+      </nav>
+      <div class="flex items-center gap-1">
+        <button onclick="window.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true}))"
+                aria-label="Open command palette (⌘K)"
+                class="hidden md:inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 px-2 py-1">
+          {{ icon('search', 13) }}
+          <kbd class="text-[10px] border border-slate-200 dark:border-slate-700 rounded px-1 py-px">⌘K</kbd>
+        </button>
+        <button onclick="document.documentElement.classList.toggle('dark'); localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');"
+                aria-label="Toggle theme"
+                class="inline-flex items-center justify-center w-8 h-8 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800">
+          <span class="hidden dark:inline">{{ icon('sun', 15) }}</span>
+          <span class="dark:hidden">{{ icon('moon', 15) }}</span>
+        </button>
+      </div>
+    </div>
+  </header>
+  <main class="mx-auto max-w-6xl px-6 py-8">
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toast-slot" hx-swap-oob="true"></div>
+
+  {# Cmd+K command palette #}
+  <div x-data="palette()" x-init="init()" @keydown.window.meta.k.prevent="open=true" @keydown.window.ctrl.k.prevent="open=true">
+    <div x-show="open" x-cloak
+         x-transition:enter="transition ease-out duration-150"
+         x-transition:enter-start="opacity-0"
+         x-transition:enter-end="opacity-100"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0"
+         @click="open=false"
+         class="fixed inset-0 z-50 bg-slate-900/50 dark:bg-black/70 backdrop-blur-sm flex items-start justify-center pt-24 px-4">
+      <div @click.stop x-show="open" x-cloak
+           x-transition:enter="transition ease-out duration-150"
+           x-transition:enter-start="opacity-0 scale-95"
+           x-transition:enter-end="opacity-100 scale-100"
+           class="w-full max-w-xl rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-card-lg overflow-hidden">
+        <div class="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 px-4 py-3">
+          <span class="text-slate-400 dark:text-slate-500">{% from "_icons.html" import icon %}{{ icon('search', 15) }}</span>
+          <input x-ref="q" x-model="query" @input="cursor=0" @keydown.escape="open=false" @keydown.arrow-down.prevent="move(1)" @keydown.arrow-up.prevent="move(-1)" @keydown.enter.prevent="activate()"
+                 type="text" placeholder="Search models, sections, actions…"
+                 class="flex-1 bg-transparent outline-none text-sm placeholder:text-slate-400">
+          <kbd class="text-[10px] text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-700 rounded px-1.5 py-0.5">esc</kbd>
+        </div>
+        <div class="max-h-96 overflow-y-auto py-1" x-ref="list">
+          <template x-for="(it, i) in filtered()" :key="it.kind + it.title + i">
+            <button @click="run(it)" @mouseover="cursor=i"
+                    :class="i===cursor ? 'bg-slate-100 dark:bg-slate-800' : ''"
+                    class="w-full flex items-center gap-3 px-4 py-2 text-left text-sm">
+              <span x-html="iconFor(it.icon)" class="text-slate-500 dark:text-slate-400"></span>
+              <span class="flex-1 min-w-0">
+                <span class="font-medium truncate block" x-text="it.title"></span>
+                <span class="text-xs text-slate-500 dark:text-slate-400" x-text="it.kind + (it.hint ? ' · ' + it.hint : '')"></span>
+              </span>
+              <span class="text-[10px] text-slate-400 dark:text-slate-500" x-show="it.action==='post'">POST</span>
+            </button>
+          </template>
+          <p x-show="filtered().length === 0" class="px-4 py-6 text-center text-sm text-slate-500 dark:text-slate-400">No matches for “<span x-text="query"></span>”.</p>
+        </div>
+        <div class="border-t border-slate-200 dark:border-slate-800 px-4 py-2 text-[10px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
+          <span><kbd class="border border-slate-200 dark:border-slate-700 rounded px-1">↑↓</kbd> navigate · <kbd class="border border-slate-200 dark:border-slate-700 rounded px-1">↵</kbd> select</span>
+          <span x-text="filtered().length + ' of ' + items.length"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    function palette() {
+      return {
+        open: false, query: '', items: [], cursor: 0,
+        _icons: {},
+        async init() {
+          try {
+            const r = await fetch('/palette.json');
+            const d = await r.json();
+            this.items = d.items || [];
+          } catch (e) { console.warn('palette load failed', e); }
+          this.$watch('open', v => { if (v) { this.query=''; this.cursor=0; setTimeout(()=>this.$refs.q && this.$refs.q.focus(), 30); } });
+        },
+        filtered() {
+          const q = this.query.trim().toLowerCase();
+          if (!q) return this.items.slice(0, 40);
+          const scored = [];
+          for (const it of this.items) {
+            const t = (it.title || '').toLowerCase();
+            const k = (it.kind || '').toLowerCase();
+            if (t.includes(q) || k.includes(q)) {
+              let score = 0;
+              if (t.startsWith(q)) score += 10;
+              if (t.includes(q)) score += 5;
+              if (k.includes(q)) score += 2;
+              scored.push([score, it]);
+            }
+          }
+          scored.sort((a,b) => b[0]-a[0]);
+          return scored.slice(0, 40).map(x => x[1]);
+        },
+        move(delta) {
+          const n = this.filtered().length;
+          if (!n) return;
+          this.cursor = ((this.cursor + delta) % n + n) % n;
+          const el = this.$refs.list && this.$refs.list.children[this.cursor];
+          if (el && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+        },
+        activate() {
+          const list = this.filtered();
+          if (list.length) this.run(list[this.cursor]);
+        },
+        async run(it) {
+          this.open = false;
+          if (it.action === 'post') {
+            try { await fetch(it.url, {method:'POST'}); } catch (e) {}
+          } else if (it.url) {
+            location.href = it.url;
+          }
+        },
+        _iconPaths: {
+          'layers-3': '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m6.08 9.5-3.5 1.6a1 1 0 0 0 0 1.81l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9a1 1 0 0 0 0-1.83l-3.5-1.59"/><path d="m6.08 14.5-3.5 1.6a1 1 0 0 0 0 1.81l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9a1 1 0 0 0 0-1.83l-3.5-1.59"/>',
+          'file-cog': '<path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="6" cy="14" r="3"/><path d="M6 10v1"/><path d="M6 17v1"/><path d="M10 14H9"/><path d="M3 14H2"/>',
+          'server': '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+          'rotate-cw': '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+          'message-square-quote': '<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4c0-1.1.9-2 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>',
+          'refresh-cw': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+          'check': '<path d="M20 6 9 17l-5-5"/>',
+          'search': '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+          'download': '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+          'settings': '<circle cx="12" cy="12" r="3"/><path d="M12 1v3M12 20v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M1 12h3M20 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/>',
+          'gauge': '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+        },
+        iconFor(name) {
+          const body = this._iconPaths[name] || '<circle cx="12" cy="12" r="9"/>';
+          return '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block">' + body + '</svg>';
+        },
+      }
+    }
+  </script>
+  <script>
+    // Preserve scroll position on any element marked [data-log-pane] across HTMX swaps.
+    // If the user was at the bottom (within 12 px), snap to the new bottom — terminal style.
+    document.body.addEventListener('htmx:beforeSwap', (e) => {
+      const t = e.detail && e.detail.target;
+      if (t && t.matches && t.matches('[data-log-pane]')) {
+        t.dataset._atBottom = (t.scrollTop + t.clientHeight >= t.scrollHeight - 12) ? '1' : '0';
+        t.dataset._savedScroll = String(t.scrollTop);
+      }
+    });
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      const t = e.detail && e.detail.target;
+      if (t && t.matches && t.matches('[data-log-pane]')) {
+        t.scrollTop = (t.dataset._atBottom === '1') ? t.scrollHeight : parseInt(t.dataset._savedScroll || '0', 10);
+      }
+    });
+  </script>
+</body>
+</html>

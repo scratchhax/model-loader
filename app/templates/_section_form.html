@@ -1,0 +1,133 @@
+{# expects: mode ('new'|'edit'), section_name, values (dict), extras_text, common_fields, advanced_fields, warning (optional) #}
+{% from "_icons.html" import icon %}
+{% macro help_icon(text) %}
+  {% if text %}
+  <span class="relative inline-block align-middle group">
+    <span tabindex="0"
+          class="inline-flex w-3.5 h-3.5 items-center justify-center rounded-full text-slate-400 dark:text-slate-500 cursor-help select-none">{{ icon('info', 12) }}</span>
+    <span role="tooltip"
+          class="pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity
+                 absolute z-20 left-1/2 -translate-x-1/2 top-full mt-1.5 w-64
+                 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900
+                 px-3 py-2 text-xs font-normal normal-case leading-snug shadow-lg">
+      {{ text }}
+    </span>
+  </span>
+  {% endif %}
+{% endmacro %}
+
+{% macro render_field(f, values) %}
+  {% set v = values.get(f.key, '') %}
+  {% set changed = v not in ('', None) %}
+  <div>
+    <label class="flex items-center gap-1 text-xs font-medium">
+      <span class="inline-block w-1.5 h-1.5 rounded-full shrink-0
+        {% if changed %}bg-sky-500 dark:bg-sky-400{% else %}bg-transparent{% endif %}"
+        aria-hidden="true"></span>
+      <span class="font-mono {% if changed %}text-sky-700 dark:text-sky-300{% else %}text-slate-600 dark:text-slate-300{% endif %}">{{ f.key }}</span>
+      <span class="truncate {% if changed %}text-slate-600 dark:text-slate-300{% else %}text-slate-400 dark:text-slate-500{% endif %}">{{ f.label }}</span>
+      {{ help_icon(f.help) }}
+    </label>
+    {% if f.kind == 'select' %}
+      <select name="fld_{{ f.key }}" class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm">
+        {% for c in f.choices %}
+        <option value="{{ c }}" {% if v == c %}selected{% endif %}>{{ c or '(unset)' }}</option>
+        {% endfor %}
+      </select>
+    {% elif f.kind == 'bool' %}
+      <label class="mt-1 inline-flex items-center gap-2 text-sm">
+        <input type="checkbox" name="fld_{{ f.key }}" value="true" {% if v and v.lower() not in ('false', '0', 'no', 'off', '') %}checked{% endif %}>
+        <span class="text-slate-500 dark:text-slate-400 text-xs">enable</span>
+      </label>
+    {% elif f.kind == 'int' %}
+      <input type="text" inputmode="numeric" name="fld_{{ f.key }}" value="{{ v }}" placeholder="{{ f.placeholder }}"
+             class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm font-mono">
+    {% else %}
+      <input type="text" name="fld_{{ f.key }}" value="{{ v }}" placeholder="{{ f.placeholder }}"
+             class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm font-mono">
+    {% endif %}
+  </div>
+{% endmacro %}
+
+<form hx-post="/config/section/{{ section_name }}" hx-target="#section-list" hx-swap="innerHTML"
+      class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-5">
+  <div class="flex items-baseline justify-between gap-3">
+    <h2 class="text-base font-semibold">
+      {% if mode == 'new' %}New section {% else %}Editing {% endif %}<span class="font-mono">[{{ section_name }}]</span>
+    </h2>
+    <div class="flex items-center gap-3 text-xs">
+      <button type="button"
+              hx-get="/config/section/{{ section_name }}/autoconfig"
+              hx-target="#autoconfig-slot"
+              hx-swap="innerHTML"
+              hx-indicator="#autoconfig-ind"
+              class="inline-flex items-center gap-1 cursor-pointer rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 text-white px-2.5 py-1 hover:brightness-110">{{ icon('sparkles', 12) }} Autoconfig</button>
+      <span id="autoconfig-ind" class="htmx-indicator text-slate-500 dark:text-slate-400">analyzing…</span>
+      {% if mode == 'edit' %}
+      <a hx-get="/config/section/{{ section_name }}/edit?reset=1"
+         hx-target="#section-list" hx-swap="innerHTML"
+         hx-confirm="Reset all fields to GGUF-derived defaults? Nothing saves until you click Save."
+         class="inline-flex items-center gap-1 cursor-pointer rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 hover:bg-slate-50 dark:hover:bg-slate-800">{{ icon('sparkles', 12) }} Reset to GGUF defaults</a>
+      {% endif %}
+      <a href="/config" class="text-slate-500 dark:text-slate-400 hover:underline">Cancel</a>
+    </div>
+  </div>
+
+  <div id="autoconfig-slot"></div>
+
+  {% if warning %}
+  <div class="rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-3 py-2 text-sm">{{ warning }}</div>
+  {% endif %}
+
+  {% if auto_filled %}
+  <div class="inline-flex items-start gap-2 rounded-md bg-sky-50 dark:bg-sky-950/40 text-sky-800 dark:text-sky-300 px-3 py-2 text-sm w-full">
+    <span class="mt-0.5">{{ icon('sparkles', 14) }}</span>
+    Pre-filled from GGUF metadata. Review the fields below and click Save when ready.
+  </div>
+  {% endif %}
+
+  {% if smart_hints %}
+  <ul class="rounded-md bg-slate-50 dark:bg-slate-950/40 text-slate-700 dark:text-slate-300 px-3 py-2 text-xs space-y-1 list-disc list-inside">
+    {% for h in smart_hints %}<li>{{ h }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% for tier_label, tier_fields, tier_open in form_tiers %}
+    {% set any_set = tier_fields | selectattr('key', 'in', values) | map(attribute='key') | select('in', values) | list %}
+    {% set n_set = tier_fields | selectattr('key', 'in', values) | list | length %}
+    {% if tier_open %}
+    <div>
+      <div class="flex items-baseline justify-between mb-2">
+        <div class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{{ tier_label }}</div>
+        <div class="text-[10px] text-slate-400 dark:text-slate-600 tabular-nums">{{ tier_fields | length }} fields</div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% for f in tier_fields %}{{ render_field(f, values) }}{% endfor %}
+      </div>
+    </div>
+    {% else %}
+    <details class="rounded-lg border border-slate-200 dark:border-slate-800 p-3" {% if n_set %}open{% endif %}>
+      <summary class="cursor-pointer flex items-center justify-between gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <span>{{ tier_label }}</span>
+        <span class="text-[10px] font-normal normal-case text-slate-400 dark:text-slate-600 tabular-nums">
+          {{ tier_fields | length }} fields{% if n_set %} · <span class="text-sky-600 dark:text-sky-400">{{ n_set }} set</span>{% endif %}
+        </span>
+      </summary>
+      <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% for f in tier_fields %}{{ render_field(f, values) }}{% endfor %}
+      </div>
+    </details>
+    {% endif %}
+  {% endfor %}
+
+  <div>
+    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Extras (raw <span class="font-mono normal-case">key = value</span> lines)</label>
+    <textarea name="extras" rows="4" placeholder="Passed through untouched. Overrides form fields with the same key."
+              class="mt-1 w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm font-mono">{{ extras_text }}</textarea>
+  </div>
+
+  <div class="flex items-center gap-2">
+    <button class="rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-4 py-2 text-sm font-medium">Save</button>
+    <a href="/config" class="rounded-md border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm">Cancel</a>
+  </div>
+</form>

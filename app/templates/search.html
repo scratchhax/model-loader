@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'search' %}
+{% block title %}Search HF · Model Loader{% endblock %}
+{% block content %}
+<div class="flex items-baseline justify-between">
+  <h1 class="text-xl font-semibold tracking-tight">Search Hugging Face</h1>
+  <a href="/downloads" class="inline-flex items-center gap-1 text-sm text-slate-500 dark:text-slate-400 hover:underline">Downloads {{ icon('chevron-right', 13) }}</a>
+</div>
+
+<form hx-get="/search/results" hx-target="#results" hx-indicator="#spinner" hx-swap="innerHTML"
+      class="mt-5 flex flex-wrap gap-2">
+  <input name="q" value="{{ query or '' }}" placeholder="e.g. gemma 4, qwen 2.5, llama 3"
+         class="flex-1 min-w-64 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm">
+  <select name="sort" class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm">
+    <option value="downloads">most downloads</option>
+    <option value="likes">most likes</option>
+    <option value="lastModified">recently updated</option>
+    <option value="trendingScore">trending</option>
+  </select>
+  <button class="inline-flex items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-4 py-2 text-sm font-medium shadow-card hover:shadow-card-lg">
+    {{ icon('search', 14) }} Search
+  </button>
+  <span id="spinner" class="htmx-indicator self-center inline-flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+    <span class="skeleton inline-block w-3 h-3 rounded-full"></span> searching…
+  </span>
+</form>
+
+<div id="results" class="mt-6">
+  {% if results is defined %}{% include "_search_results.html" %}{% endif %}
+</div>
+{% endblock %}

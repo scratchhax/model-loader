@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% set active_nav = 'config' %}
+{% block title %}models.ini · Model Loader{% endblock %}
+{% block content %}
+<div class="flex items-baseline justify-between">
+  <h1 class="text-xl font-semibold">models.ini</h1>
+  <span class="text-xs text-slate-500 dark:text-slate-400 font-mono">{{ ini_path }}</span>
+</div>
+
+{% if flash %}
+<div class="mt-4 rounded-md px-4 py-3 text-sm
+  {% if flash.ok %}bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300
+  {% else %}bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300{% endif %}">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div>{{ flash.msg }}</div>
+    {% if flash.ok and llama_backends %}
+    <div class="flex items-center gap-2 text-xs">
+      <span class="opacity-70">Apply now:</span>
+      {% for name in llama_backends %}
+      <button hx-post="/containers/{{ name }}/restart" hx-swap="outerHTML"
+              hx-confirm="Restart {{ name }} now? Model reload can take 30–60s."
+              class="rounded-md border border-current px-2.5 py-1 font-mono">restart {{ name }}</button>
+      {% endfor %}
+      <a href="/containers" class="opacity-70 hover:opacity-100 underline">view</a>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<div id="section-list" class="mt-6">
+  {% include "_section_list.html" %}
+</div>
+
+<details class="mt-8 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+  <summary class="cursor-pointer px-4 py-3 text-sm font-medium">Raw file & backups</summary>
+  <div class="px-4 pb-4 space-y-3">
+    <pre class="rounded-lg bg-slate-950 text-slate-100 dark:bg-black text-xs p-3 overflow-x-auto font-mono whitespace-pre">{{ raw or '(empty)' }}</pre>
+    {% if backups %}
+    <div>
+      <div class="text-xs font-medium text-slate-600 dark:text-slate-400">Backups (newest first, keeping 10):</div>
+      <ul class="mt-2 text-xs font-mono divide-y divide-slate-100 dark:divide-slate-800">
+        {% for name, mtime, size in backups %}
+        <li class="py-1 flex justify-between gap-3">
+          <span class="truncate">{{ name }}</span>
+          <span class="tabular-nums text-slate-500 dark:text-slate-400">{{ size }} B</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% else %}
+    <div class="text-xs text-slate-500 dark:text-slate-400">No backups yet. One will be created on the next save.</div>
+    {% endif %}
+  </div>
+</details>
+{% endblock %}
