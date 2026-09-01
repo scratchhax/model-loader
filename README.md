@@ -26,6 +26,14 @@ Pick how many chats will hit the model at once, then pick a priority. Each prese
 
 The speed figures are an **ordering hint, not a benchmark**. They come from a calibrated penalty per CPU-resident layer; they will tell you Fast beats Long context, and they will not tell you your tokens per second. The panel says so too.
 
+### Routing models to backends
+
+![The Models directory: each downloaded GGUF with its status, whether it is in models.ini and under what alias, a vision capability chip, and per-backend "serves on" toggles](docs/models_available.png)
+
+Every llama.cpp backend reads the same `models.ini`, which means by default every backend offers every model — including the CPU one being asked for a 27B. The **serves on** toggles fix that per model: click a backend to include or exclude it, and Model Loader writes the change into OpenWebUI's per-connection whitelist.
+
+The row also shows what each model actually is. **`in models.ini · as wheatley-voice`** means that file is served under an alias rather than its filename — one GGUF can back several sections with different settings, and each gets its own toggles. The **vision** chip reads `capable` or `text-only` depending on whether the section declares a projector, and that flag is pushed into OpenWebUI so the image-upload control only appears where it can work.
+
 ## Security posture
 
 **This is a personal, LAN-only tool. There is no authentication.** It mounts `/var/run/docker.sock`, which is root-equivalent on the host — anyone who can reach the port can `docker exec` into any container. Do not expose port 8090 to the internet. Do not run this on a shared machine. If you need multi-user, add a reverse-proxy with auth in front, and understand that authenticated users still get docker-socket-level power.
