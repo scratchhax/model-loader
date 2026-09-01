@@ -26,6 +26,13 @@ fi
 
 echo "==> Using compose file: $COMPOSE_FILE"
 
+# Back the compose file up before touching it. This script edits a file the user
+# depends on to run their whole stack; if the insertion goes wrong, or they simply
+# change their mind, they should not have to reconstruct it from memory.
+BACKUP="$COMPOSE_FILE.bak-$(date +%Y%m%d-%H%M%S)"
+cp "$COMPOSE_FILE" "$BACKUP"
+echo "==> Backed up to $BACKUP"
+
 # Symlink or ensure a local ./model_loader dir points at this repo
 if [ ! -e "$COMPOSE_DIR/model_loader" ]; then
   echo "==> Linking ./model_loader -> $REPO_DIR"

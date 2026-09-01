@@ -35,7 +35,7 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 The fastest path — `bootstrap.sh` adds the `model-loader` service to your existing compose file and brings it up.
 
 ```bash
-git clone <this-repo> ~/ai-lab/model_loader
+git clone https://github.com/scratchhax/model-loader.git ~/ai-lab/model_loader
 cd ~/ai-lab              # your compose project directory
 bash ~/ai-lab/model_loader/bootstrap.sh
 ```
