@@ -18,6 +18,14 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 - **Prompt library** — saved system prompts with copy-to-clipboard, stored in the app's sqlite.
 - **Command palette** (Cmd/Ctrl-K) — jump to any page or model.
 
+### Autoconfig, in practice
+
+![The Autoconfig panel: a concurrent-sessions picker, four priority presets (Fast, Balanced, Long context, Custom) each showing context size, GPU layers and a relative speed estimate, and a per-backend table marking which context sizes fit and which do not](docs/model_performance_selector.png)
+
+Pick how many chats will hit the model at once, then pick a priority. Each preset shows what you are trading: context size against GPU layers against speed. The table underneath marks every context size as fitting or not on each backend, and names the cost when it doesn't — `9L on CPU` means nine layers had to move off the GPU to make that context fit.
+
+The speed figures are an **ordering hint, not a benchmark**. They come from a calibrated penalty per CPU-resident layer; they will tell you Fast beats Long context, and they will not tell you your tokens per second. The panel says so too.
+
 ## Security posture
 
 **This is a personal, LAN-only tool. There is no authentication.** It mounts `/var/run/docker.sock`, which is root-equivalent on the host — anyone who can reach the port can `docker exec` into any container. Do not expose port 8090 to the internet. Do not run this on a shared machine. If you need multi-user, add a reverse-proxy with auth in front, and understand that authenticated users still get docker-socket-level power.
