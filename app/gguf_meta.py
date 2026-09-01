@@ -86,8 +86,14 @@ def _read_value(f, vtype: int):
     raise GgufMetaError(f"unknown value type {vtype}")
 
 
-def _read_raw(path: Path) -> dict[str, Any]:
-    with open(path, "rb") as f:
+def _read_raw_stream(f) -> dict[str, Any]:
+    """Parse GGUF metadata from any seekable binary stream.
+
+    Split out from _read_raw so the same parser can run over a range-fetched header
+    (io.BytesIO) as well as a local file — metadata lives at the very start of a GGUF,
+    so the first ~1 MB is enough to read every KV pair without pulling the weights.
+    """
+    if True:
         magic = f.read(4)
         if magic != b"GGUF":
             raise GgufMetaError(f"not a GGUF file (magic={magic!r})")
@@ -113,6 +119,17 @@ def _read_raw(path: Path) -> dict[str, Any]:
     return out
 
 
+def _read_raw(path: Path) -> dict[str, Any]:
+    with open(path, "rb") as f:
+        return _read_raw_stream(f)
+
+
+def read_raw_bytes(buf: bytes) -> dict[str, Any]:
+    """Parse GGUF metadata out of an in-memory buffer (e.g. a range-fetched header)."""
+    import io
+    return _read_raw_stream(io.BytesIO(buf))
+
+
 def read_raw(path: Path) -> dict[str, Any]:
     st = path.stat()
     key = f"{path}|{st.st_mtime_ns}|{st.st_size}"
@@ -124,6 +141,59 @@ def read_raw(path: Path) -> dict[str, Any]:
     with _CACHE_LOCK:
         _CACHE[key] = raw
     return raw
+
+
+def _scalar_int(v: Any) -> int | None:
+    """Unwrap array-summary dicts / lists to a representative int, or None if not resolvable.
+    Some archs (Gemma, MoE variants) encode per-layer values as arrays; the config-panel and
+    autoconfig want a scalar. Pick the most-common value from the sample."""
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    if isinstance(v, dict) and v.get("_array"):
+        sample = v.get("sample") or []
+        if sample:
+            counts: dict[int, int] = {}
+            for x in sample:
+                if isinstance(x, (int, float)):
+                    counts[int(x)] = counts.get(int(x), 0) + 1
+            if counts:
+                return max(counts, key=lambda k: counts[k])
+    if isinstance(v, list) and v:
+        first = v[0]
+        if isinstance(first, (int, float)):
+            return int(first)
+    return None
+
+
+def _scalar_float(v: Any) -> float | None:
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    n = _scalar_int(v)
+    return float(n) if n is not None else None
+
+
+def scan_chat_template_features(template: str) -> dict:
+    """Detect reasoning/thinking-related capabilities of a Jinja chat template.
+    Everything is checked against the raw template source — no execution."""
+    if not template or not isinstance(template, str):
+        return {}
+    t = template.lower()
+    return {
+        # kwargs the template accepts (found as variable references)
+        "accepts_enable_thinking": "enable_thinking" in t,
+        "accepts_reasoning_effort": "reasoning_effort" in t,
+        "accepts_preserve_thinking": "preserve_thinking" in t,
+        # output markers — knowing these tells us reasoning-format should be 'deepseek' so
+        # OpenAI-compatible clients (OpenWebUI etc.) can hide the thinking trace nicely
+        "uses_think_tags": "<think>" in t,
+        "uses_channel_thought": "channel>thought" in t or "channel|>thought" in t or "<|channel|>thought" in t,
+    }
 
 
 def _fmt_params(n: Any) -> str | None:
@@ -173,24 +243,25 @@ def summarize(raw: dict[str, Any]) -> dict[str, Any]:
             "kv_count": raw.get("_kv_count"),
         },
         "model": {
-            "context_length": a("context_length"),
-            "embedding_length": a("embedding_length"),
-            "block_count": a("block_count"),
-            "feed_forward_length": a("feed_forward_length"),
-            "attention_head_count": a("attention.head_count"),
+            "context_length": _scalar_int(a("context_length")),
+            "embedding_length": _scalar_int(a("embedding_length")),
+            "block_count": _scalar_int(a("block_count")),
+            "feed_forward_length": _scalar_int(a("feed_forward_length")),
+            "attention_head_count": _scalar_int(a("attention.head_count")),
+            # kept raw — autoconfig has _kv_first_int() that samples the array intelligently
             "attention_head_count_kv": a("attention.head_count_kv"),
-            "rope_freq_base": a("rope.freq_base"),
+            "rope_freq_base": _scalar_float(a("rope.freq_base")),
             "rope_scaling_type": a("rope.scaling.type"),
-            "rope_scaling_factor": a("rope.scaling.factor"),
-            "rope_scaling_original_context": a("rope.scaling.original_context_length"),
-            "vocab_size": vocab_size,
-            "expert_count": a("expert_count"),
-            "expert_used_count": a("expert_used_count"),
-            "key_length": a("attention.key_length"),
-            "value_length": a("attention.value_length"),
-            "full_attention_interval": a("full_attention_interval"),
-            "ssm_state_size": a("ssm.state_size"),
-            "ssm_inner_size": a("ssm.inner_size"),
+            "rope_scaling_factor": _scalar_float(a("rope.scaling.factor")),
+            "rope_scaling_original_context": _scalar_int(a("rope.scaling.original_context_length")),
+            "vocab_size": _scalar_int(vocab_size),
+            "expert_count": _scalar_int(a("expert_count")),
+            "expert_used_count": _scalar_int(a("expert_used_count")),
+            "key_length": _scalar_int(a("attention.key_length")),
+            "value_length": _scalar_int(a("attention.value_length")),
+            "full_attention_interval": _scalar_int(a("full_attention_interval")),
+            "ssm_state_size": _scalar_int(a("ssm.state_size")),
+            "ssm_inner_size": _scalar_int(a("ssm.inner_size")),
         },
         "tokenizer": {
             "model": raw.get("tokenizer.ggml.model"),
@@ -203,6 +274,7 @@ def summarize(raw: dict[str, Any]) -> dict[str, Any]:
             "add_eos_token": raw.get("tokenizer.ggml.add_eos_token"),
         },
         "chat_template": raw.get("tokenizer.chat_template"),
+        "chat_template_features": scan_chat_template_features(raw.get("tokenizer.chat_template") or ""),
     }
 
 

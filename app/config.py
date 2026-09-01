@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     models_ini_path: Path = Path("/models/models.ini")
     data_dir: Path = Path("/data")
     llama_containers: str = ""  # empty = auto-discover any ghcr.io/ggml-org/llama.cpp:* container
-    gpu_vram: str = "llama-7900xt:20,llama-5070:12"  # container_name:vram_gib — probed if not listed
+    gpu_vram: str = ""  # optional container_name:vram_gib overrides — auto-probed via nvidia-smi/rocm-smi if empty
     bind_port: int = 8090
     max_concurrent_downloads: int = 2
 

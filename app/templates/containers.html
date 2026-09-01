@@ -10,7 +10,8 @@
 </div>
 
 {% if openwebui and openwebui.found %}
-<div class="mt-4 rounded-xl border {% if openwebui.missing_backends %}border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20{% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900{% endif %} p-4 flex items-start justify-between gap-3">
+{% set drift = (openwebui.missing_backends | length) + (openwebui.stale_urls | length) %}
+<div class="mt-4 rounded-xl border {% if drift %}border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20{% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900{% endif %} p-4 flex items-start justify-between gap-3">
   <div class="min-w-0">
     <div class="text-sm font-medium inline-flex items-center gap-2">
       {{ icon('link', 14) }} OpenWebUI
@@ -18,29 +19,176 @@
     </div>
     {% if openwebui.missing_backends %}
     <div class="mt-1 text-xs text-amber-800 dark:text-amber-300">
-      {{ openwebui.missing_backends | length }} llama backend(s) missing from OpenWebUI's connections:
+      <span class="font-semibold">{{ openwebui.missing_backends | length }} missing</span>:
       {% for m in openwebui.missing_backends %}
       <span class="inline-block font-mono bg-amber-100 dark:bg-amber-950 px-1.5 py-0.5 rounded">{{ m.name }}</span>
       {% endfor %}
     </div>
-    {% else %}
-    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-      All {{ openwebui.current_urls | length }} llama backend(s) already connected: {{ openwebui.current_urls | join(', ') }}
+    {% endif %}
+    {% if openwebui.stale_urls %}
+    <div class="mt-1 text-xs text-red-700 dark:text-red-300">
+      <span class="font-semibold">{{ openwebui.stale_urls | length }} stale</span> (target container gone):
+      {% for u in openwebui.stale_urls %}
+      <span class="inline-block font-mono bg-red-100 dark:bg-red-950 px-1.5 py-0.5 rounded">{{ u }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if not drift %}
+    <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-400">
+      All {{ openwebui.current_urls | length }} backend(s) in sync.
+    </div>
+    {% endif %}
+
+    {# Model Loader writes to this container's database, so show what it's writing to. #}
+    <div class="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-slate-500 dark:text-slate-400">
+      {% if openwebui.image %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5">{{ openwebui.image }}</span>{% endif %}
+      {% if openwebui.short_id %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5">{{ openwebui.short_id }}</span>{% endif %}
+      {% for p in openwebui.ports %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5">:{{ p }}</span>{% endfor %}
+    </div>
+
+    {% if openwebui.connections %}
+    <details class="mt-2">
+      <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">
+        {{ openwebui.connections | length }} configured connection(s)
+      </summary>
+      <div class="mt-1.5 space-y-1">
+        {% for c in openwebui.connections %}
+        <div class="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+          <span class="inline-flex items-center rounded px-1.5 py-0.5
+            {% if c.stale %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300
+            {% elif not c.enabled %}bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400
+            {% else %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300{% endif %}">
+            {% if c.stale %}stale{% elif not c.enabled %}disabled{% else %}live{% endif %}
+          </span>
+          <span class="text-slate-600 dark:text-slate-300">{{ c.url }}</span>
+          {% if c.prefix_id %}
+          <span class="rounded bg-sky-100 dark:bg-sky-950 text-sky-800 dark:text-sky-300 px-1.5 py-0.5"
+                title="Models from this connection appear in OpenWebUI as {{ c.prefix_id }}.&lt;model&gt;">{{ c.prefix_id }}.</span>
+          {% endif %}
+          {% if c.model_ids %}
+          <span class="text-slate-400" title="{{ c.model_ids | join(', ') }}">{{ c.model_ids | length }} of {{ all_model_ids | length }} models</span>
+          {% if c.unknown_ids %}
+          <span class="rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-1.5 py-0.5"
+                title="{{ c.unknown_ids | join(', ') }}">{{ c.unknown_ids | length }} dead</span>
+          {% endif %}
+          {% else %}
+          <span class="text-slate-400">all models</span>
+          {% endif %}
+        </div>
+
+        {# A whitelist id with no matching models.ini section can never resolve. OpenWebUI
+           renders its whitelist rather than intersecting it with what the backend reports, so
+           the model still appears in the picker and only fails on use, with "model not found".
+           Nothing else in either UI shows this, so it gets its own warning. #}
+        {% if c.unknown_ids %}
+        <div class="ml-2 mb-2 rounded-md bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
+          <div>
+            <span class="font-semibold">{{ c.unknown_ids | length }} dead model id{{ 's' if c.unknown_ids | length != 1 else '' }}</span>
+            on this connection — offered by OpenWebUI but served by no <span class="font-mono">models.ini</span> section,
+            so selecting {{ 'them' if c.unknown_ids | length != 1 else 'it' }} gives “model not found”.
+            Usually the leftover of a rename.
+          </div>
+          <div class="mt-1 font-mono">{{ c.unknown_ids | join(', ') }}</div>
+          {% if c.live_ids %}
+          <form hx-post="/containers/openwebui-filter"
+                hx-target="#openwebui-toast" hx-swap="innerHTML"
+                hx-confirm="Remove {{ c.unknown_ids | join(', ') }} from {{ c.host }}? Restarts open-webui (~5s)."
+                hx-on::after-request="setTimeout(()=>location.reload(),1500)"
+                class="mt-1.5">
+            <input type="hidden" name="url" value="{{ c.url }}">
+            {% for mid in c.live_ids %}<input type="hidden" name="model_ids" value="{{ mid }}">{% endfor %}
+            <button type="submit"
+                    class="rounded-md bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1 text-[11px] font-medium">
+              Remove dead id{{ 's' if c.unknown_ids | length != 1 else '' }}
+            </button>
+          </form>
+          {% else %}
+          <div class="mt-1 italic">Every id on this connection is dead — pick models below instead, since
+            clearing the list entirely would make it offer everything.</div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {# Per-connection model whitelist. Backends share one models.ini, so this is how you
+           give e.g. a CPU backend only the small models it can actually run. #}
+        <details class="ml-2 mb-2">
+          <summary class="cursor-pointer text-[11px] text-sky-700 dark:text-sky-400">choose models…</summary>
+          <form hx-post="/containers/openwebui-filter"
+                hx-target="#openwebui-toast" hx-swap="innerHTML"
+                hx-confirm="Update which models {{ c.host }} offers? Restarts open-webui (~5s)."
+                hx-on::after-request="setTimeout(()=>location.reload(),1500)"
+                class="mt-1.5 rounded-md border border-slate-200 dark:border-slate-800 p-2">
+            <input type="hidden" name="url" value="{{ c.url }}">
+            <div class="grid gap-x-3 gap-y-1 [grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))]">
+              {% for mid in all_model_ids %}
+              <label class="flex items-center gap-1.5 text-[11px] font-mono cursor-pointer">
+                <input type="checkbox" name="model_ids" value="{{ mid }}"
+                       {% if mid in c.model_ids %}checked{% endif %}>
+                <span class="truncate" title="{{ mid }}">{{ mid }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+              <button type="submit"
+                      class="rounded-md bg-sky-600 hover:bg-sky-500 text-white px-3 py-1 text-[11px] font-medium">
+                Apply to {{ c.host }}
+              </button>
+              <span class="text-[10px] text-slate-500 dark:text-slate-400">
+                Leave everything unchecked to offer all models. Ids are unprefixed — OpenWebUI adds
+                <span class="font-mono">{{ c.prefix_id or 'the prefix' }}.</span> itself.
+              </span>
+            </div>
+          </form>
+        </details>
+        {% endfor %}
+      </div>
+      <p class="mt-1.5 text-[10px] text-slate-400">
+        Prefixes are yours to set in OpenWebUI; reconcile preserves them. New backends get one derived from the container name.
+      </p>
+    </details>
+    {% endif %}
+
+    {# Companion services in the OpenWebUI stack (terminal server, etc.) — not model
+       backends, so they're listed separately and never touched by reconcile. #}
+    {% if openwebui.companions %}
+    <div class="mt-2">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Companion services</div>
+      <div class="space-y-1">
+        {% for s in openwebui.companions %}
+        <div class="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+          <span class="inline-flex items-center rounded px-1.5 py-0.5
+            {% if s.stale or s.status == 'not found' %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300
+            {% elif not s.enabled %}bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400
+            {% elif s.status == 'running' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+            {% else %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300{% endif %}">
+            {% if s.stale or s.status == 'not found' %}missing{% elif not s.enabled %}disabled{% else %}{{ s.status }}{% endif %}
+          </span>
+          <span class="text-slate-500 dark:text-slate-400">{{ s.kind }}</span>
+          <span class="text-slate-600 dark:text-slate-300">{{ s.url }}</span>
+          {% if s.name and s.name != s.host %}<span class="text-slate-400">“{{ s.name }}”</span>{% endif %}
+          {% if s.image %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-500">{{ s.image }}</span>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <p class="mt-1 text-[10px] text-slate-400">
+        Configured in OpenWebUI, shown here because they're part of a working stack. Reconcile only manages
+        model backends and leaves these alone.
+      </p>
     </div>
     {% endif %}
   </div>
-  {% if openwebui.missing_backends %}
+  {% if drift %}
   <div class="shrink-0" x-data="{ syncing: false }">
     <button type="button"
             hx-post="/containers/sync-openwebui"
             hx-target="#openwebui-toast"
             hx-swap="innerHTML"
-            hx-confirm="Recreate open-webui with {{ openwebui.missing_backends | length }} new backend(s) added? This restarts open-webui (usually ~5s downtime)."
+            hx-confirm="Reconcile OpenWebUI's connections: add {{ openwebui.missing_backends | length }} missing + remove {{ openwebui.stale_urls | length }} stale. Restarts open-webui (~5s downtime)."
             @click="syncing=true"
-            hx-on::after-request="Alpine.$data(this.parentElement).syncing=false; setTimeout(()=>location.reload(),1000)"
+            hx-on::after-request="Alpine.$data(this.parentElement).syncing=false; setTimeout(()=>location.reload(),1500)"
             class="inline-flex items-center gap-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
       <template x-if="!syncing">
-        <span class="inline-flex items-center gap-1">{{ icon('refresh-cw', 12) }} Sync to OpenWebUI</span>
+        <span class="inline-flex items-center gap-1">{{ icon('refresh-cw', 12) }} Reconcile OpenWebUI</span>
       </template>
       <template x-if="syncing">
         <span class="inline-flex items-center gap-1"><span class="skeleton inline-block w-3 h-3 rounded-full"></span> syncing…</span>
@@ -48,6 +196,27 @@
     </button>
   </div>
   {% endif %}
+
+  {# Capabilities live in OpenWebUI but are DECIDED here: a model can take an image iff its
+     section declares an mmproj. OpenWebUI's own default is permissive, so without this it
+     offers the image-upload control on every model and only fails at inference time. #}
+  <div class="shrink-0" x-data="{ aligning: false }">
+    <button type="button"
+            hx-post="/containers/openwebui-align-capabilities"
+            hx-target="#openwebui-toast"
+            hx-swap="innerHTML"
+            hx-confirm="Align OpenWebUI capabilities to models.ini? Sets vision from each section's mmproj, replacing OpenWebUI's defaults, and deletes records for models nothing serves any more. Your own workspace models (those built on a base model) are left untouched. No restart needed."
+            @click="aligning=true"
+            hx-on::after-request="Alpine.$data(this.parentElement).aligning=false; setTimeout(()=>location.reload(),1500)"
+            class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800">
+      <template x-if="!aligning">
+        <span class="inline-flex items-center gap-1">{{ icon('layers', 12) }} Align capabilities</span>
+      </template>
+      <template x-if="aligning">
+        <span class="inline-flex items-center gap-1"><span class="skeleton inline-block w-3 h-3 rounded-full"></span> aligning…</span>
+      </template>
+    </button>
+  </div>
 </div>
 <div id="openwebui-toast" class="mt-2"></div>
 {% endif %}
@@ -66,6 +235,12 @@
       Model Loader auto-discovers any container running <span class="font-mono">ghcr.io/ggml-org/llama.cpp:*</span> — no config change here needed.
       Just add a service to your compose file and <span class="font-mono">docker compose up -d &lt;service-name&gt;</span>.
       Templates below; edit the port and name, paste into your compose.
+    </p>
+    <p class="text-xs rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-3 py-2">
+      <span class="font-semibold">Keep the command router-only.</span> Inference flags on the container command line
+      (<span class="font-mono">-ngl, -fa, -ctk, -ctv, -np, -sm</span>) <em>override</em> <span class="font-mono">models.ini</span>
+      rather than acting as defaults — a preset that disagrees is silently discarded. Set those per-model in the
+      config form instead, and leave only <span class="font-mono">--models-dir --models-preset --host --port --models-max</span> here.
     </p>
     <div class="flex items-center gap-1 text-xs">
       <button type="button" @click="tab='cuda'" :class="tab==='cuda' ? 'bg-slate-100 dark:bg-slate-800 font-medium' : 'text-slate-500'"
@@ -104,7 +279,7 @@
               capabilities: [gpu]
     volumes:
       - ./models:/models
-    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 999 --models-max 1 -fa on -ctk q8_0 -ctv q8_0 -np 1') }}
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 --models-max 1') }}
     {{ tmpl('rocm',
 '  llama-newamd:
     image: ghcr.io/ggml-org/llama.cpp:server-rocm
@@ -120,7 +295,7 @@
       - "/dev/dri:/dev/dri"
     volumes:
       - ./models:/models
-    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 999 --models-max 1 -fa on -ctk q8_0 -ctv q8_0 -np 1') }}
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 --models-max 1') }}
     {{ tmpl('cpu',
 '  llama-cpu:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -130,8 +305,8 @@
       - "8083:8080"
     volumes:
       - ./models:/models
-    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 0 --models-max 1 -t 16
-    # tune -t to your physical core count (not threads). -ngl 0 keeps everything on CPU.') }}
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 --models-max 1
+    # This image has no GPU backend, so everything runs on CPU regardless of ngl.') }}
     {{ tmpl('vulkan',
 '  llama-vulkan:
     image: ghcr.io/ggml-org/llama.cpp:server-vulkan
@@ -143,7 +318,7 @@
       - "/dev/dri:/dev/dri"
     volumes:
       - ./models:/models
-    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 -ngl 999 --models-max 1') }}
+    command: --models-dir /models --models-preset /models/models.ini --host 0.0.0.0 --port 8080 --models-max 1') }}
     <p class="text-[11px] text-slate-500 dark:text-slate-400">
       Then: <span class="font-mono">docker compose up -d &lt;service-name&gt;</span>. The new backend appears on this page automatically within 2s.
     </p>

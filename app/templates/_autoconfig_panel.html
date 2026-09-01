@@ -7,6 +7,7 @@
 <div id="autoconfig-panel"
      data-values='{{ values_json }}'
      data-values-minimal='{{ values_minimal_json }}'
+     data-frontier='{{ frontier_json }}'
      class="mt-4 rounded-xl border border-sky-200 dark:border-sky-900 bg-sky-50/40 dark:bg-sky-950/20 p-4">
 
   <div class="flex items-baseline justify-between gap-3">
@@ -25,22 +26,80 @@
     {% if params %}&middot; <span class="font-mono">{{ params }}</span>{% endif %}
   </div>
 
-  {# MoE preset picker — only when the model is MoE and offload is needed #}
-  {% if rec.presets %}
+  {# Concurrent sessions picker — always visible. Divides ctx across N slots. #}
   <div class="mt-4">
-    <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">Priority</div>
-    <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
-      {% for p in rec.presets %}
+    <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">
+      Concurrent sessions
+      <span class="text-slate-400 normal-case tracking-normal">— how many chats hit this model at once</span>
+    </div>
+    <div class="flex flex-wrap gap-1.5">
+      {# Every value the server accepts. It clamps to 1-8, and autoconfig sets
+         ctx-size = per_session x sessions, so any N divides evenly into slots —
+         there is no reason to restrict this to powers of two. #}
+      {% for n in range(1, 9) %}
       <button type="button"
-              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ p.key }}"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ rec.active_preset or 'balanced' }}&sessions={{ n }}"
               hx-target="#autoconfig-slot"
               hx-swap="innerHTML"
-              class="text-left rounded-md border px-3 py-2 transition
-                     {% if p.key == rec.active_preset %}bg-sky-100 dark:bg-sky-950/60 border-sky-400 dark:border-sky-700 ring-1 ring-sky-500
-                     {% else %}bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400{% endif %}">
+              class="inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs font-mono tabular-nums transition
+                     {% if n == rec.n_sessions %}bg-sky-100 dark:bg-sky-950/60 border-sky-400 dark:border-sky-700 ring-1 ring-sky-500 text-sky-800 dark:text-sky-200
+                     {% else %}bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400{% endif %}"
+              title="{{ n }} concurrent session{{ '' if n == 1 else 's' }}">
+        {{ n }}
+      </button>
+      {% endfor %}
+    </div>
+    <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+      Each session gets an equal slice of the total KV budget. More sessions = smaller per-user context.
+      Sets <span class="font-mono">-np</span> and enables continuous batching when &gt; 1.
+    </p>
+  </div>
+
+  {# Selecting a chip only re-renders this panel; nothing reaches models.ini until
+     Fill form + Save. Without this banner a previewed preset is indistinguishable from
+     the running one, and you can sit on an old ngl wondering why tok/s is low. #}
+  {% if rec.has_unsaved %}
+  <div class="mt-3 rounded-md border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+    <div class="font-semibold inline-flex items-center gap-1.5">{{ icon('triangle-alert', 13) }} Preview only — not applied yet</div>
+    <div class="mt-1">
+      models.ini still has
+      {% if rec.current_preset %}the <span class="font-semibold">{{ rec.current_preset }}</span> settings{% else %}different settings{% endif %}.
+      Click <span class="font-semibold">Fill form</span> below, then <span class="font-semibold">Save</span>, then restart the
+      container for this to take effect. Changes so far:
+      <span class="font-mono">{{ rec.current_diff | join('; ') }}</span>
+    </div>
+  </div>
+  {% endif %}
+
+  {# Offload priority picker — MoE (expert offload) or dense (layer offload via ngl) #}
+  {% if rec.presets %}
+  <div class="mt-4" x-data="offloadCustom()">
+    <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">Priority</div>
+    {# auto-fit rather than fixed breakpoints: each chip needs ~11rem for its
+       ctx / GPU / knob / speed grid. Forcing 4 columns squeezed them to ~65px wide
+       and ~160px tall, wrapping every label into an unreadable vertical strip. #}
+    <div class="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(11rem,1fr))]">
+      {% for p in rec.presets %}
+      <button type="button"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ p.key }}&sessions={{ rec.n_sessions }}"
+              hx-target="#autoconfig-slot"
+              hx-swap="innerHTML"
+              class="text-left rounded-md border px-3 py-2 transition"
+              {% if p.key == rec.active_preset %}
+              :class="on ? 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400'
+                         : 'bg-sky-100 dark:bg-sky-950/60 border-sky-400 dark:border-sky-700 ring-1 ring-sky-500'"
+              {% else %}
+              :class="'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400'"
+              {% endif %}>
         <div class="flex items-center gap-1.5 text-sm font-medium">
           {{ icon(p.icon, 14) }} {{ p.label }}
-          {% if p.key == rec.active_preset %}<span class="ml-auto text-[10px] text-sky-700 dark:text-sky-300">selected</span>{% endif %}
+          {% if p.key == rec.current_preset %}
+          {# what the ini ACTUALLY has right now — distinct from what you're previewing #}
+          <span class="ml-auto text-[10px] rounded px-1 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                title="This is what models.ini currently contains">running</span>
+          {% elif p.key == rec.active_preset %}
+          <span class="ml-auto text-[10px] text-sky-700 dark:text-sky-300" x-show="!on">preview</span>
+          {% endif %}
         </div>
         <div class="mt-1.5 grid grid-cols-2 gap-x-2 text-[11px] font-mono text-slate-600 dark:text-slate-300 tabular-nums">
           <div><span class="text-slate-400">ctx</span> {{ format_ctx(p.ctx) }}</div>
@@ -48,15 +107,109 @@
           <div>
             {% if p.offload_kind == 'cpu-moe' %}<span class="text-slate-400">cpu-moe</span> true
             {% elif p.offload_kind == 'n-cpu-moe' %}<span class="text-slate-400">ncm</span> {{ p.n_cpu_moe }}
+            {% elif p.offload_kind == 'ngl' %}<span class="text-slate-400">ngl</span> {{ p.ngl }}
             {% else %}<span class="text-slate-400">no offload</span>{% endif %}
           </div>
           <div class="text-right"><span class="text-slate-400">~</span>{{ '%.0f' % (p.speed_score * 100) }}% speed</div>
         </div>
       </button>
       {% endfor %}
+
+      {# 4th chip: custom point anywhere on the frontier. Hidden when the frontier has a
+         single point — a one-position slider offers no choice and just looks broken. #}
+      {% if rec.frontier | length > 1 %}
+      <button type="button" @click="toggle()"
+              class="text-left rounded-md border px-3 py-2 transition"
+              :class="on ? 'bg-sky-100 dark:bg-sky-950/60 border-sky-400 dark:border-sky-700 ring-1 ring-sky-500'
+                         : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400'">
+        <div class="flex items-center gap-1.5 text-sm font-medium">
+          {{ icon('sliders', 14) }} Custom
+          <span class="ml-auto text-[10px] text-sky-700 dark:text-sky-300" x-show="on" x-cloak>selected</span>
+        </div>
+        <div class="mt-1.5 grid grid-cols-2 gap-x-2 text-[11px] font-mono text-slate-600 dark:text-slate-300 tabular-nums">
+          <div><span class="text-slate-400">ctx</span> <span x-text="on ? fmt(cur.ctx) : '—'"></span></div>
+          <div class="text-right"><span class="text-slate-400">GPU</span>
+            <span x-text="on ? (cur.gpu_layers + '/' + cur.total_layers + 'L') : '—'"></span></div>
+          <div><span class="text-slate-400" x-text="knobLabel()"></span> <span x-text="on ? knobValue() : '—'"></span></div>
+          <div class="text-right"><span class="text-slate-400">~</span><span
+                x-text="on ? Math.round(cur.speed*100)+'% speed' : '—'"></span></div>
+        </div>
+      </button>
+      {% endif %}
     </div>
+
+    {# the slider itself #}
+    <div x-show="on" x-cloak class="mt-3 rounded-md border border-sky-300 dark:border-sky-800 bg-white dark:bg-slate-900 p-3">
+      <div class="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+        <span>more speed</span>
+        <span class="font-mono" x-text="(idx+1) + ' / ' + pts.length + ' points'"></span>
+        <span>more context</span>
+      </div>
+      <input type="range" min="0" :max="pts.length-1" step="1" x-model.number="idx"
+             class="w-full mt-1 accent-sky-600">
+      <div class="mt-2 grid gap-2 text-[11px] font-mono tabular-nums [grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))]">
+        <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
+          <div class="text-slate-400">ctx / session</div><div x-text="fmt(cur.ctx)"></div></div>
+        <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
+          <div class="text-slate-400">ctx-size written</div><div x-text="cur.total_ctx.toLocaleString()"></div></div>
+        <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
+          <div class="text-slate-400">weights on GPU</div><div x-text="cur.gpu_gb + ' GB'"></div></div>
+        <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
+          <div class="text-slate-400">KV cache</div><div x-text="cur.kv_gb + ' GB'"></div></div>
+      </div>
+      <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+        Every stop is a real, achievable config — the slider snaps to computed points, it does not interpolate.
+        While Custom is selected, Fill form uses this point.
+      </p>
+    </div>
+
+    {# Fewer than three presets is normal, not a bug: the frontier only keeps offload points
+       that actually reach a HIGHER context step. If a model already fits near its ceiling
+       there may only be one or two distinct tradeoffs, and Balanced would be a duplicate of
+       Fast. Say so, because a silently missing chip reads as broken. #}
+    {% if rec.presets | length < 3 and rec.frontier %}
+    {% set only = rec.frontier[0] %}
+    <p class="mt-2 text-[11px] rounded-md bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 px-2 py-1.5">
+      {% if rec.fits_full_gpu %}
+        Fits entirely on the GPU at its full context of
+        <span class="font-mono">{{ format_ctx(rec.native_ctx) }}</span> with all {{ only.total_layers }} layers resident.
+        Nothing to trade: offloading layers only buys context, and there is none left to buy —
+        Balanced and Long context would be identical to Fast.
+      {% else %}
+        Only {{ rec.presets | length }} distinct tradeoff{{ 's' if rec.presets | length != 1 else '' }}
+        exist{{ '' if rec.presets | length != 1 else 's' }} for this model, so Balanced would be identical
+        to Fast. Intermediate offload levels don't reach a higher context step, which makes them strictly
+        slower for the same context.
+        Use <span class="font-mono">Custom</span> to see all {{ rec.frontier | length }} point{{ 's' if rec.frontier | length != 1 else '' }}.
+      {% endif %}
+    </p>
+    {% endif %}
+
+    {# Flag a preset that buys very little context for a lot of speed. #}
+    {% set f0 = rec.frontier[0] if rec.frontier else None %}
+    {% set fN = rec.frontier[-1] if rec.frontier else None %}
+    {% if f0 and fN and f0.ctx > 0 and fN.ctx > f0.ctx and f0.speed_score > 0 %}
+    {% set ctx_gain = ((fN.ctx / f0.ctx) - 1) * 100 %}
+    {% set speed_cost = (1 - (fN.speed_score / f0.speed_score)) * 100 %}
+    {% if ctx_gain < 25 and speed_cost > 50 %}
+    <p class="mt-2 text-[11px] rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-2 py-1.5">
+      Poor trade at the long end: going from <span class="font-mono">{{ format_ctx(f0.ctx) }}</span> to
+      <span class="font-mono">{{ format_ctx(fN.ctx) }}</span> is only <span class="font-mono">+{{ '%.0f' % ctx_gain }}%</span>
+      context but costs roughly <span class="font-mono">{{ '%.0f' % speed_cost }}%</span> of throughput
+      ({{ fN.gpu_layers }}/{{ fN.total_layers }} layers left on GPU). This model already fits near its ceiling —
+      Fast is almost certainly what you want.
+    </p>
+    {% endif %}
+    {% endif %}
+
     <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-      Speed % is a rough relative estimate (share of layers with experts on GPU).
+      {% if rec.presets and rec.presets[0].offload_kind == 'ngl' or (rec.presets | selectattr('offload_kind','equalto','ngl') | list) %}
+        Dense model — context is bought by moving whole layers off the GPU (<span class="font-mono">ngl</span>);
+        those layers stay in RAM and every token traverses them on the CPU, so the speed cost is steep.
+        Speed % is an ordering hint only — benchmark before trusting it.
+      {% else %}
+        Speed % is a rough relative estimate (share of layers with experts on GPU).
+      {% endif %}
       Click a chip to update the values below.
     </p>
   </div>
@@ -71,9 +224,9 @@
           <th class="text-right py-1 px-2 font-medium">Total VRAM</th>
           <th class="text-right py-1 px-2 font-medium">Model</th>
           {% for ctx in ctx_columns %}
-          <th class="text-right py-1 px-2 font-medium">{{ format_ctx(ctx) }}</th>
+          <th class="text-right py-1 px-2 font-medium">{{ format_ctx(ctx) }}{% if rec.n_sessions > 1 %}<div class="text-[9px] font-normal normal-case text-slate-400">per session</div>{% endif %}</th>
           {% endfor %}
-          <th class="text-right py-1 px-2 font-medium">Max ctx that fits</th>
+          <th class="text-right py-1 px-2 font-medium">Max{% if rec.n_sessions > 1 %} per-session{% endif %} ctx that fits</th>
         </tr>
       </thead>
       <tbody class="font-mono">
@@ -96,6 +249,7 @@
                 {% if row.fits %}✓ {{ '%.1f' % row.total_gb }}{% else %}✗ {{ '%.1f' % row.total_gb }}{% endif %}
                 {% if row.offload_kind == 'cpu-moe' %}<sup class="text-[9px] text-slate-500 font-sans">cpu-moe</sup>
                 {% elif row.offload_kind == 'n-cpu-moe' %}<sup class="text-[9px] text-slate-500 font-sans">ncm={{ row.n_cpu_moe }}</sup>
+                {% elif row.offload_kind == 'ngl' %}<sup class="text-[9px] text-slate-500 font-sans">{{ row.n_cpu_moe }}L on CPU</sup>
                 {% endif %}
               </td>
             {% else %}
@@ -123,13 +277,18 @@
     <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Recommendation</div>
     <div class="mt-1 text-sm">
       Assign to <span class="font-mono font-semibold text-sky-700 dark:text-sky-300">{{ rec.recommended_backend }}</span>
-      at ctx <span class="font-mono font-semibold">{{ format_ctx(rec.recommended_ctx) }}</span>
+      {% if rec.n_sessions > 1 %}
+        &middot; {{ rec.n_sessions }} × <span class="font-mono font-semibold">{{ format_ctx(rec.recommended_ctx) }}</span> per session
+        <span class="text-slate-500 dark:text-slate-400">(ctx-size <span class="font-mono">{{ format_ctx(rec.recommended_total_ctx) }}</span>, <span class="font-mono">-np {{ rec.n_sessions }}</span>)</span>
+      {% else %}
+        at ctx <span class="font-mono font-semibold">{{ format_ctx(rec.recommended_ctx) }}</span>
+      {% endif %}
     </div>
   </div>
   {% else %}
   <div class="mt-4 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-3 py-2 text-sm">
     Model doesn't fit on any configured backend even at the smallest sensible ctx.
-    Consider `cpu-moe`, `n-cpu-moe`, a smaller quant, or a bigger GPU.
+    Even with layers offloaded to the CPU it will not fit. Try a smaller quant or a bigger GPU.
   </div>
   {% endif %}
 
@@ -187,12 +346,61 @@
 </div>
 
 <script>
+// The panel is re-rendered on every preset click / session change. Drop any previous custom
+// selection so a stale point can never leak into a freshly rendered recommendation.
+window.__acCustom = null;
+
+// Custom offload point picker. Reads the precomputed frontier off the panel; each entry is
+// a real config the fit math produced, so the slider snaps between achievable points.
+function offloadCustom() {
+  let pts = [];
+  try { pts = JSON.parse(document.getElementById('autoconfig-panel').dataset.frontier || '[]'); }
+  catch (e) { pts = []; }
+  return {
+    pts,
+    on: false,
+    idx: Math.max(0, pts.length - 1),
+    get cur() { return this.pts[this.idx] || {ctx:0,total_ctx:0,gpu_layers:0,total_layers:0,gpu_gb:0,kv_gb:0,speed:0,kind:'',ngl:-1,n_cpu_moe:0}; },
+    toggle() {
+      if (!this.pts.length) return;
+      this.on = !this.on;
+      window.__acCustom = this.on ? this.cur : null;
+    },
+    fmt(n) { return (n && n % 1024 === 0) ? (n/1024) + 'K' : (n || 0).toLocaleString(); },
+    knobLabel() { const k = this.cur.kind; return k === 'ngl' ? 'ngl' : (k === 'n-cpu-moe' ? 'ncm' : (k === 'cpu-moe' ? 'cpu-moe' : 'no offload')); },
+    knobValue() {
+      const c = this.cur;
+      if (c.kind === 'ngl') return c.ngl;
+      if (c.kind === 'n-cpu-moe') return c.n_cpu_moe;
+      if (c.kind === 'cpu-moe') return 'true';
+      return '';
+    },
+    init() {
+      // keep the global in sync as the slider moves, so Fill form always sees the current point
+      this.$watch('idx', () => { if (this.on) window.__acCustom = this.cur; });
+    },
+  };
+}
+
 function applyAutoconfig(mode) {
   const panel = document.getElementById('autoconfig-panel');
   if (!panel) return;
   const key = mode === 'minimal' ? 'valuesMinimal' : 'values';
   let values;
   try { values = JSON.parse(panel.dataset[key]); } catch (e) { console.error(e); return; }
+
+  // If the Custom slider is active, its point overrides the ctx/offload knobs.
+  const c = window.__acCustom;
+  if (c) {
+    values = Object.assign({}, values);
+    values['ctx-size'] = String(c.total_ctx);
+    // clear any offload key the base recommendation set, then apply this point's
+    delete values['cpu-moe']; delete values['n-cpu-moe'];
+    if (c.kind === 'ngl')            { values['ngl'] = String(c.ngl); }
+    else if (c.kind === 'n-cpu-moe') { values['n-cpu-moe'] = String(c.n_cpu_moe); values['ngl'] = '999'; }
+    else if (c.kind === 'cpu-moe')   { values['cpu-moe'] = 'true'; values['ngl'] = '999'; }
+    else                             { values['ngl'] = '999'; }
+  }
   for (const [k, v] of Object.entries(values)) {
     const sel = 'input[name="fld_' + CSS.escape(k) + '"], select[name="fld_' + CSS.escape(k) + '"], textarea[name="fld_' + CSS.escape(k) + '"]';
     const els = document.querySelectorAll(sel);

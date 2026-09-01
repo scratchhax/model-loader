@@ -64,6 +64,25 @@
               class="inline-flex items-center gap-1 cursor-pointer rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 text-white px-2.5 py-1 hover:brightness-110">{{ icon('sparkles', 12) }} Autoconfig</button>
       <span id="autoconfig-ind" class="htmx-indicator text-slate-500 dark:text-slate-400">analyzing…</span>
       {% if mode == 'edit' %}
+      {# The section name IS the model id llama-server serves, so renaming is how you give a
+         model a short name. `model =` still points at the original file. #}
+      <details class="relative">
+        <summary class="inline-flex items-center gap-1 cursor-pointer rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 hover:bg-slate-50 dark:hover:bg-slate-800 list-none">
+          {{ icon('pencil', 12) }} Rename
+        </summary>
+        <form hx-post="/config/section/{{ section_name }}/rename"
+              hx-confirm="Rename [{{ section_name }}]? This changes the model id that OpenWebUI and any API client use."
+              class="absolute right-0 z-20 mt-1 w-80 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 shadow-card-lg">
+          <input type="text" name="new_name" value="{{ section_name }}" required
+                 class="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-xs font-mono">
+          <div class="mt-1.5 flex items-center gap-2">
+            <button type="submit" class="rounded-md bg-sky-600 hover:bg-sky-500 text-white px-2.5 py-1 text-xs font-medium">Rename</button>
+            <span class="text-[10px] text-slate-500 dark:text-slate-400">
+              Becomes the API model id. Any client using the old name must be updated.
+            </span>
+          </div>
+        </form>
+      </details>
       <a hx-get="/config/section/{{ section_name }}/edit?reset=1"
          hx-target="#section-list" hx-swap="innerHTML"
          hx-confirm="Reset all fields to GGUF-derived defaults? Nothing saves until you click Save."

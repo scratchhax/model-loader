@@ -28,7 +28,14 @@
 </div>
 {% endif %}
 
-<div id="section-list" class="mt-6">
+<div id="section-list" class="mt-6"
+     {% if edit_section %}
+     {# Arrived via ?edit=<name> — pull that section's form in on load, so a direct link
+        lands on the real, styled page instead of a bare HTMX fragment. #}
+     hx-get="/config/section/{{ edit_section }}/edit"
+     hx-trigger="load"
+     hx-swap="innerHTML"
+     {% endif %}>
   {% include "_section_list.html" %}
 </div>
 

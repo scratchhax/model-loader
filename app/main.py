@@ -194,6 +194,56 @@ async def _models_avatar_map(snap) -> tuple[dict[str, str], dict[str, str]]:
     return file_to_owner, avatars
 
 
+def _owui_visibility() -> dict:
+    """Per-connection model visibility for the Models page.
+
+    Returns {"conns": [{host, url, prefix_id, explicit}], "visible": {model_id: {url: bool}}}.
+    Only populated when there is more than one connection — with a single backend every
+    model is on it and a toggle would be pure noise.
+    """
+    st = services.openwebui_state()
+    conns = [c for c in (st.get("connections") or []) if not c.get("stale")]
+    if not st.get("found"):
+        return {"conns": [], "visible": {}, "caps": {}}
+
+    # Capabilities are computed regardless of connection count. Unlike the visibility
+    # toggles -- which are noise with a single backend, since everything is on it -- a wrong
+    # vision flag is just as broken with one connection as with five.
+    want = services.openwebui_capability_plan()
+    have = services.openwebui_capability_state()
+    caps: dict[str, dict] = {}
+    # Match the id back to its section by NAME, never by splitting on dots: OpenWebUI ids are
+    # "<prefix>.<section>" but section names contain dots too (Qwen3.8-27B-Q4_K_M), so
+    # rsplit(".", 1) yields "8-27B-Q4_K_M" and silently matches nothing.
+    _sections = set(ini.section_names())
+    for mid, should in want.items():
+        section = next((n for n in _sections if mid == n or mid.endswith("." + n)), None)
+        if section is None:
+            continue
+        row = caps.setdefault(section, {"should": should, "current": [], "mismatch": False})
+        cur = have.get(mid)
+        row["current"].append((mid, cur))
+        if cur != should:
+            row["mismatch"] = True
+
+    if len(conns) < 2:
+        return {"conns": [], "visible": {}, "caps": caps}
+    ids = sorted(ini.section_names())
+    visible: dict[str, dict] = {}
+    for mid in ids:
+        row: dict[str, bool] = {}
+        for c in conns:
+            filt = c.get("model_ids") or []
+            row[c["url"]] = (mid in filt) if filt else True  # empty filter = offers everything
+        visible[mid] = row
+    return {
+        "conns": [{"host": c["host"], "url": c["url"], "prefix_id": c.get("prefix_id") or "",
+                   "explicit": bool(c.get("model_ids"))} for c in conns],
+        "visible": visible,
+        "caps": caps,
+    }
+
+
 @app.get("/models", response_class=HTMLResponse)
 async def models_page(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
@@ -203,6 +253,7 @@ async def models_page(request: Request) -> HTMLResponse:
         "loaded_map": await _loaded_map(),
         "file_to_owner": file_to_owner, "avatars": avatars,
         "update_status": _update_status_map(snap),
+        "owui": _owui_visibility(),
     })
 
 
@@ -241,10 +292,15 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
     avatars = await hf.owner_avatars([owner]) if owner else {}
     avatar_url = avatars.get(owner, "") if owner else ""
 
-    lm = await _loaded_map()
-    loaded_on = lm.get(stem, [])
+    # The section that owns this file may be named something else entirely (renamed to give
+    # the model a short API id), so resolve file -> section rather than assuming stem == id.
+    owning = ini.sections_by_file().get(entry.first_shard_rel) or []
+    model_id = stem if stem in owning else (owning[0] if owning else stem)
 
-    in_ini = stem in ini.section_names()
+    lm = await _loaded_map()
+    loaded_on = lm.get(model_id, [])
+
+    in_ini = model_id in ini.section_names()
     mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
     return templates.TemplateResponse("model_local.html", {
@@ -252,6 +308,7 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
         "filename": filename,
         "path": str(path),
         "stem": stem,
+        "model_id": model_id,
         "size_h": human_bytes(st.st_size),
         "mtime": mtime,
         "raw": raw,
@@ -266,6 +323,18 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
 @app.post("/models/delete", response_class=HTMLResponse)
 async def models_delete(request: Request, name: str = Form(...)) -> HTMLResponse:
     ok, msg, freed = services.delete_gguf(name)
+    # Deleting the weights does not remove the id from OpenWebUI's whitelist, and OpenWebUI
+    # RENDERS that whitelist rather than intersecting it with what the backend serves -- so a
+    # deleted model keeps appearing in the picker and fails with "model not found" on use.
+    # Prune here; it is a no-op (and costs no restart) when nothing is actually stale.
+    if ok:
+        try:
+            pruned = services.prune_openwebui_unknown_ids()
+            if pruned:
+                msg = f"{msg}; removed {len(pruned)} stale id(s) from OpenWebUI"
+            services.sync_openwebui_capabilities()
+        except Exception:  # noqa: BLE001 -- deletion must succeed even if OpenWebUI is down
+            pass
     snap = services.snapshot_models_dir()
     file_to_owner, avatars = await _models_avatar_map(snap)
     flash = {"ok": ok, "msg": msg, "freed_h": human_bytes(freed) if freed else None}
@@ -293,6 +362,13 @@ async def models_delete_bulk(request: Request) -> HTMLResponse:
             total_freed += freed
         else:
             errors.append(f"{n}: {msg}")
+    # One prune after the whole batch, not per file -- each whitelist write restarts
+    # open-webui, so doing it inside the loop would restart it once per deleted model.
+    if ok_count:
+        try:
+            services.prune_openwebui_unknown_ids()
+        except Exception:  # noqa: BLE001
+            pass
     snap = services.snapshot_models_dir()
     file_to_owner, avatars = await _models_avatar_map(snap)
     if errors:
@@ -352,27 +428,34 @@ def search_page(request: Request) -> HTMLResponse:
 
 
 @app.get("/search/results", response_class=HTMLResponse)
-async def search_results(request: Request, q: str = "", sort: str = "downloads") -> HTMLResponse:
+async def search_results(request: Request, q: str = "", sort: str = "downloads",
+                         limit: int = 30) -> HTMLResponse:
     error: str | None = None
     results = []
     avatars: dict[str, str] = {}
-    if q.strip():
-        try:
-            results = await hf.search_models(q.strip(), sort=sort)
-            owners = [(m.id.split("/", 1)[0] if "/" in m.id else m.id) for m in results]
-            avatars = await hf.owner_avatars(owners)
-        except httpx.HTTPStatusError as e:
-            error = f"HF returned HTTP {e.response.status_code}"
-        except httpx.HTTPError as e:
-            error = f"network error: {e}"
+    browse_mode = not q.strip()  # empty query = "show me trending" browse view
+    try:
+        # Empty query is now valid — HF returns the top-N gguf models under `sort`
+        results = await hf.search_models(q.strip(), sort=sort, limit=limit)
+        owners = [(m.id.split("/", 1)[0] if "/" in m.id else m.id) for m in results]
+        avatars = await hf.owner_avatars(owners)
+    except httpx.HTTPStatusError as e:
+        error = f"HF returned HTTP {e.response.status_code}"
+    except httpx.HTTPError as e:
+        error = f"network error: {e}"
+    # Cross-check against local downloads so we can flag repos the user already has.
+    downloaded = db.downloaded_files_by_repo()
     return templates.TemplateResponse("_search_results.html", {
         "request": request, "results": results, "error": error, "avatars": avatars,
+        "browse_mode": browse_mode, "browse_sort": sort,
+        "downloaded_by_repo": downloaded,
     })
 
 
 @app.get("/search/repo/{repo_id:path}", response_class=HTMLResponse)
 async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
     error: str | None = None
+    gated: str = ""
     groups: list[dict] = []
     try:
         detail = await hf.repo_detail(repo_id)
@@ -394,11 +477,43 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
                 "files": [{"path": x.path, "size": x.size, "size_h": human_bytes(x.size), "quant": x.quant} for x in files],
             })
         groups.sort(key=lambda g: (0 if g["files"][0]["path"].lower().endswith(".gguf") else 1, g["shard_base"].lower()))
+
+        # Real context estimates need the model's layer/head counts, which only exist in the
+        # GGUF header — so range-fetch ONE header for the repo. Those fields are properties of
+        # the model and identical across its quants, so a single fetch (~1 MB) covers every
+        # group; only file size varies, and we already know that per group.
+        probe = next(
+            (g for g in groups
+             if g["files"][0]["path"].lower().endswith(".gguf")
+             and "mmproj" not in g["files"][0]["path"].lower()),
+            None,
+        )
+        # A repo's projector ships alongside its quants; it will be loaded with the model,
+        # so its VRAM has to come off the budget or every multimodal estimate reads high.
+        # Pick the smallest, matching what _find_mmproj does locally.
+        mmproj_sizes = [
+            g["total_size"] for g in groups
+            if "mmproj" in g["files"][0]["path"].lower()
+        ]
+        mmproj_gb = (min(mmproj_sizes) / (1024 ** 3)) if mmproj_sizes else 0.0
+
+        if probe:
+            summary = await hf.gguf_header(repo_id, probe["files"][0]["path"])
+            # A gated repo lists its files publicly but refuses the weights, so estimates
+            # would silently vanish with no explanation. Surface the reason instead.
+            gated = hf.gated_reason(repo_id) if not summary else ""
+            if summary:
+                for g in groups:
+                    first = g["files"][0]["path"].lower()
+                    if not first.endswith(".gguf") or "mmproj" in first:
+                        continue
+                    g["estimates"] = _preset_estimates(summary, g["total_size"], mmproj_gb)
+                    g["native_ctx"] = (summary.get("model") or {}).get("context_length") or 0
     except httpx.HTTPStatusError as e:
         error = f"HF returned HTTP {e.response.status_code} for {repo_id}"
     except httpx.HTTPError as e:
         error = f"network error: {e}"
-    return templates.TemplateResponse("_repo_files.html", {"request": request, "repo_id": repo_id, "groups": groups, "error": error})
+    return templates.TemplateResponse("_repo_files.html", {"request": request, "repo_id": repo_id, "groups": groups, "error": error, "gated": gated})
 
 
 # ---------- Downloads ----------
@@ -409,6 +524,53 @@ _QUEUED_CHIP = (
     'text-emerald-800 dark:text-emerald-300 px-3 py-1.5 text-xs font-medium">'
     '✓ {label}</a>'
 )
+
+
+def _preset_estimates(summary: dict, size_bytes: int, mmproj_gb: float = 0.0) -> list[dict]:
+    """Fast / Balanced / Long-ctx context estimates for a model we have NOT downloaded.
+
+    Runs the very same autoconfig fit math used on local models, so a search-page estimate
+    and the eventual Config recommendation agree instead of being two different guesses.
+    Returns [] when there is nothing meaningful to show (no GPU backend, or the GGUF header
+    lacks the fields needed to size a KV cache).
+    """
+    backends = []
+    for name, vram in services._fit_backends().items():
+        backends.append({
+            "name": name, "vendor": "cuda", "vram_gb": vram,
+            "gpu_count": hw.gpu_count_for(name), "card_vram_gb": hw.card_vram_gb_for(name),
+            "baseline": {},
+        })
+    if not backends or not summary:
+        return []
+    out: list[dict] = []
+    for key, label in (("fast", "Fast"), ("balanced", "Balanced"), ("long-ctx", "Long ctx")):
+        try:
+            rec = autoconfig.analyze(
+                summary=summary, file_size=size_bytes, backends=backends,
+                preset=key, models_dir=None, section_name="",
+                mmproj_gb_override=(mmproj_gb or None),
+            )
+        except Exception:  # noqa: BLE001 — an estimate must never break the search page
+            return []
+        if rec.error or not rec.recommended_ctx:
+            continue
+        chosen = next((p for p in rec.presets if p.key == rec.active_preset), None)
+        out.append({
+            "key": key,
+            "label": label,
+            "ctx": rec.recommended_ctx,
+            "ctx_h": autoconfig.format_ctx(rec.recommended_ctx),
+            "gpu_layers": chosen.gpu_layers if chosen else 0,
+            "total_layers": chosen.total_layers if chosen else 0,
+            "speed_pct": round((chosen.speed_score if chosen else 1.0) * 100),
+            "offload": bool(chosen and chosen.offload_kind),
+        })
+        # Collapse duplicates: a model that fits fully at native has one real answer, and
+        # three identical chips would imply choices that don't exist.
+        if len(out) > 1 and out[-1]["ctx"] == out[0]["ctx"] and not out[-1]["offload"]:
+            out.pop()
+    return out
 
 
 def _model_stem(filename: str) -> str:
@@ -439,6 +601,9 @@ async def download_single(repo_id: str = Form(...), path: str = Form(...), size:
         return HTMLResponse(_QUEUED_CHIP.format(label="Queued", title=f"Queued {filename} — see Downloads"))
 
     # Main GGUF: subdir = stem. Also auto-queue any mmproj found in the same HF repo.
+    # Draft / MTP heads are NOT auto-queued — community MTP drafts have proven fragile
+    # (segfaults in llama.cpp) and there's no reliable programmatic pre-check. If you
+    # want to try one, download it manually and set `spec-draft-model` in the ini form.
     main_stem, filename = _dest_for_main(base)
     manager.enqueue(repo_id=repo_id, hf_path=path, filename=filename, total_bytes=size)
     extras = 0
@@ -567,7 +732,7 @@ def _config_context(request: Request, flash: dict | None = None) -> dict:
 
 
 @app.get("/config", response_class=HTMLResponse)
-def config_page(request: Request, saved: str = "", deleted: str = "", err: str = "") -> HTMLResponse:
+def config_page(request: Request, saved: str = "", deleted: str = "", err: str = "", edit: str = "") -> HTMLResponse:
     flash = None
     if saved:
         flash = {"ok": True, "msg": f"Saved section [{saved}]."}
@@ -575,7 +740,11 @@ def config_page(request: Request, saved: str = "", deleted: str = "", err: str =
         flash = {"ok": True, "msg": f"Deleted section [{deleted}]."}
     elif err:
         flash = {"ok": False, "msg": err}
-    return templates.TemplateResponse("config.html", _config_context(request, flash))
+    ctx = _config_context(request, flash)
+    # ?edit=<section> makes the page open straight into that section's form, which is how
+    # direct links from elsewhere (e.g. a model's "edit models.ini") arrive here.
+    ctx["edit_section"] = edit if (edit and edit in ini.section_names()) else ""
+    return templates.TemplateResponse("config.html", ctx)
 
 
 @app.get("/config/section/new", response_class=HTMLResponse)
@@ -607,24 +776,38 @@ def config_section_new(request: Request, name: str = "") -> HTMLResponse:
     })
 
 
-def _gguf_hints_for(name: str) -> tuple[dict[str, str], list[str]]:
-    # Resolve the section name to an actual file. Supports flat and subdir'd layouts.
-    stems_map = ini._stems_present()
-    rel = stems_map.get(name)
-    gguf_path: Path | None = None
-    model_rel = ""
+def _resolve_section_gguf(name: str) -> tuple[Path | None, str, str | None]:
+    """(gguf_path, model_rel, rel) for a section. rel is models-dir-relative, model_rel is
+    the container-absolute /models/... path llama-server wants, or "" for flat layouts.
+
+    Resolution order matters. An explicit `model =` wins over deriving the file from the
+    section name, because (a) a section can be renamed to give the model a short API id, and
+    (b) a subdir can hold several quants, where re-deriving would silently pick whichever
+    sorts first rather than the one this section is actually configured for.
+    """
+    rel = ini.section_file_rel(name)
+    explicit = ((ini.get_section(name) or {}).get("model") or "").strip()
+    if explicit and rel and (settings.models_dir / rel).is_file():
+        return settings.models_dir / rel, (explicit if "/" in rel else ""), rel
+
     if rel is not None and "/" in rel:
         subdir_name = rel.split("/", 1)[0]
         subdir_path = settings.models_dir / subdir_name
         if subdir_path.is_dir():
-            gguf_files = sorted([p for p in subdir_path.iterdir() if p.is_file() and p.suffix.lower() == ".gguf"])
-            if gguf_files:
-                gguf_path = gguf_files[0]  # first shard has the metadata
-                model_rel = f"{subdir_name}/{gguf_files[0].name}"
-    elif rel is not None:
-        gguf_path = settings.models_dir / rel
-    else:
-        gguf_path = settings.models_dir / f"{name}.gguf"
+            # Prefer non-mmproj as the main GGUF (mmproj is the companion multimodal projector)
+            gguf_files = sorted([q for q in subdir_path.iterdir() if q.is_file() and q.suffix.lower() == ".gguf"])
+            main_files = [q for q in gguf_files if "mmproj" not in q.name.lower()] or gguf_files
+            if main_files:
+                # first shard has the metadata
+                return main_files[0], f"/models/{subdir_name}/{main_files[0].name}", rel
+        return None, "", rel
+    if rel is not None:
+        return settings.models_dir / rel, "", rel
+    return settings.models_dir / f"{name}.gguf", "", rel
+
+
+def _gguf_hints_for(name: str) -> tuple[dict[str, str], list[str]]:
+    gguf_path, model_rel, rel = _resolve_section_gguf(name)
 
     if gguf_path is None or not gguf_path.is_file():
         return {}, [f"No GGUF found for `{name}` — cannot suggest defaults from metadata."]
@@ -635,12 +818,37 @@ def _gguf_hints_for(name: str) -> tuple[dict[str, str], list[str]]:
     values, hints = ini.suggest_defaults(summary)
     if model_rel:
         values["model"] = model_rel
-        hints.insert(0, f"Sharded model detected → `model = {model_rel}` pre-filled to point at the first shard. llama-server auto-loads the rest.")
+        # Auto-detect a companion mmproj (multimodal projector — vision, audio, etc.)
+        # in the same subdir so multimodal models load out of the box.
+        subdir_path = Path(model_rel).parent  # e.g. /models/<stem>
+        try:
+            for p in Path(str(subdir_path).replace("/models", str(settings.models_dir), 1)).iterdir():
+                if p.is_file() and p.suffix.lower() == ".gguf" and "mmproj" in p.name.lower():
+                    values["mmproj"] = f"/models/{Path(model_rel).parts[-2]}/{p.name}"
+                    hints.insert(0, f"Companion mmproj found → `mmproj = {values['mmproj']}` pre-filled.")
+                    break
+        except OSError:
+            pass
+        # Distinguish real sharding (multi-part files) from "single file in a subdir"
+        from .utils import shard_key as _sk
+        _, part_idx, part_total = _sk(Path(model_rel).name)
+        if part_idx is not None and part_total and part_total > 1:
+            hints.insert(0, f"Sharded model ({part_total} parts) → `model = {model_rel}` pre-filled to the first shard; llama-server auto-loads the rest.")
+        else:
+            hints.insert(0, f"Model lives in a subdir → `model = {model_rel}` pre-filled with the absolute path.")
     return values, hints
 
 
 @app.get("/config/section/{name}/edit", response_class=HTMLResponse)
 def config_section_edit(request: Request, name: str, reset: int = 0) -> HTMLResponse:
+    # This endpoint returns a PARTIAL, designed to be swapped into /config by HTMX. Reaching
+    # it by ordinary navigation (the "edit models.ini" link on a model page, a bookmark, a
+    # refresh) renders the fragment with no base.html — so no stylesheet, no nav, just raw
+    # form controls on white. Bounce those requests to the real page and let it open the
+    # section instead.
+    if request.headers.get("HX-Request", "").lower() != "true":
+        from urllib.parse import quote
+        return Response(status_code=303, headers={"Location": f"/config?edit={quote(name)}"})
     vals = ini.get_section(name)
     if vals is None and not reset:
         return HTMLResponse(f"unknown section: {name}", status_code=404)
@@ -681,6 +889,15 @@ async def config_section_save(request: Request, name: str) -> Response:
         ini.upsert_section(name, values, extras)
     except Exception as e:  # noqa: BLE001
         return Response(status_code=200, headers={"HX-Redirect": f"/config?err=save+failed:+{e}"})
+    # Whether a model can accept an image is decided here (by the presence of `mmproj`) but
+    # enforced in OpenWebUI, which otherwise shows the image-upload control on everything and
+    # only fails at inference with "image input is not supported". Push it across on every
+    # save, so adding or removing a projector updates the UI that people actually click.
+    # No restart: the `model` table is ordinary app data, not PersistentConfig.
+    try:
+        services.sync_openwebui_capabilities()
+    except Exception:  # noqa: BLE001 -- saving the section must not depend on OpenWebUI
+        pass
     return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={name}"})
 
 
@@ -697,28 +914,12 @@ def _container_baseline(name: str) -> list[str]:
 
 
 @app.get("/config/section/{name}/autoconfig", response_class=HTMLResponse)
-async def config_autoconfig(request: Request, name: str, preset: str = "balanced") -> HTMLResponse:
+async def config_autoconfig(request: Request, name: str, preset: str = "",
+                            sessions: int = 1) -> HTMLResponse:
     import json as _json
+    sessions = max(1, min(int(sessions or 1), 8))
 
-    # Resolve name → actual GGUF file (flat or subdir'd)
-    stems_map = ini._stems_present()
-    rel = stems_map.get(name)
-    gguf_path: Path | None = None
-    model_rel = ""
-    if rel is not None and "/" in rel:
-        subdir_name = rel.split("/", 1)[0]
-        subdir_path = settings.models_dir / subdir_name
-        if subdir_path.is_dir():
-            # prefer non-mmproj gguf as the "main" file
-            gguf_files = sorted([p for p in subdir_path.iterdir() if p.is_file() and p.suffix.lower() == ".gguf"])
-            main_files = [p for p in gguf_files if "mmproj" not in p.name.lower()] or gguf_files
-            if main_files:
-                gguf_path = main_files[0]
-                model_rel = f"/models/{subdir_name}/{main_files[0].name}"
-    elif rel is not None:
-        gguf_path = settings.models_dir / rel
-    else:
-        gguf_path = settings.models_dir / f"{name}.gguf"
+    gguf_path, model_rel, rel = _resolve_section_gguf(name)
 
     if gguf_path is None or not gguf_path.is_file():
         return templates.TemplateResponse("_autoconfig_panel.html", {
@@ -741,11 +942,16 @@ async def config_autoconfig(request: Request, name: str, preset: str = "balanced
         })
 
     file_size = gguf_path.stat().st_size
-    # If sharded, sum all shard sizes for accurate model_gb
+    # If sharded, sum all shard sizes for accurate model_gb. But exclude companions
+    # (mmproj, draft heads) that happen to sit in the same subdir — those aren't
+    # part of the main model's parameter footprint and are budgeted separately.
     if rel and "/" in rel and gguf_path is not None:
         try:
-            file_size = sum(p.stat().st_size for p in gguf_path.parent.iterdir()
-                            if p.is_file() and p.suffix.lower() == ".gguf")
+            file_size = sum(
+                p.stat().st_size for p in gguf_path.parent.iterdir()
+                if p.is_file() and p.suffix.lower() == ".gguf"
+                and not ini._is_companion(p.name)
+            )
         except OSError:
             pass
 
@@ -755,6 +961,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "balanced
         vram = hw.vram_gb_for(bn)
         if vram <= 0:
             continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
+        gpu_count = hw.gpu_count_for(bn)
         # detect vendor via hw sampler cache (or docker inspect image)
         vendor = "unknown"
         try:
@@ -769,7 +976,9 @@ async def config_autoconfig(request: Request, name: str, preset: str = "balanced
             pass
         cmd = _container_baseline(bn)
         base = autoconfig.parse_baseline(cmd) if cmd else {}
-        backend_list.append({"name": bn, "vendor": vendor, "vram_gb": float(vram), "baseline": base})
+        backend_list.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
+                             "gpu_count": gpu_count, "card_vram_gb": hw.card_vram_gb_for(bn),
+                             "baseline": base})
 
     # Existing section (for diff)
     current_section = ini.get_section(name)
@@ -786,6 +995,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "balanced
         model_rel=model_rel,
         current_section=current_section,
         preset=preset,
+        n_sessions=sessions,
         models_dir=settings.models_dir,
         section_name=name,
         model_subdir=model_subdir,
@@ -820,7 +1030,69 @@ async def config_autoconfig(request: Request, name: str, preset: str = "balanced
         "format_ctx": autoconfig.format_ctx,
         "values_json": _json.dumps(rec.values),
         "values_minimal_json": _json.dumps(rec.values_minimal),
+        # Full offload frontier for the custom slider. Every entry is an achievable
+        # config, so the slider snaps to real points rather than interpolating.
+        "frontier_json": _json.dumps([
+            {
+                "ctx": p.ctx,
+                "total_ctx": p.ctx * sessions,
+                "ngl": p.ngl,
+                "n_cpu_moe": p.n_cpu_moe,
+                "kind": p.offload_kind,
+                "gpu_layers": p.gpu_layers,
+                "total_layers": p.total_layers,
+                "gpu_gb": p.gpu_gb,
+                "kv_gb": p.kv_gb,
+                "speed": p.speed_score,
+            }
+            for p in rec.frontier
+        ]),
     })
+
+
+@app.post("/config/section/{name}/rename")
+async def config_section_rename(request: Request, name: str) -> Response:
+    """Rename a preset. The section name IS the model id llama-server serves, so this is how
+    you give a model a short, human name — `model =` keeps pointing at the same file."""
+    form = await request.form()
+    new = (form.get("new_name") or "").strip()
+    if not new:
+        return Response(status_code=200, headers={"HX-Redirect": "/config?err=new+name+required"})
+    if new == name:
+        return Response(status_code=200, headers={"HX-Redirect": f"/config?edit={new}"})
+    if not ini.valid_section_name(new):
+        return Response(status_code=200,
+                        headers={"HX-Redirect": f"/config?err=invalid+name:+{new}"})
+    if new in ini.section_names():
+        return Response(status_code=200,
+                        headers={"HX-Redirect": f"/config?err=section+already+exists:+{new}"})
+    if not ini.rename_section(name, new):
+        return Response(status_code=200, headers={"HX-Redirect": f"/config?err=rename+failed"})
+
+    # Reconcile OpenWebUI's per-connection whitelists in ONE pass (each write restarts
+    # open-webui, so doing this as two passes would cost two restarts).
+    #
+    # Two things have to happen together. Carry the old id across, or the model silently
+    # vanishes from the picker. And drop ids no section provides any more: OpenWebUI RENDERS
+    # its whitelist rather than intersecting it with what the backend reports, so a dead id
+    # stays visible in the model picker and fails with "model not found" only when someone
+    # tries to use it — the one failure mode neither end shows you.
+    try:
+        known = set(ini.section_names())
+        for c in (services.openwebui_state().get("connections") or []):
+            ids = c.get("model_ids") or []
+            if not ids:
+                continue  # empty whitelist = "offer everything"; nothing to reconcile
+            fixed = [new if m == name else m for m in ids]
+            fixed = [m for m in fixed if m in known]
+            # Never write an empty list: that would flip the connection from a filter to
+            # "offer every model", quietly widening what this backend exposes.
+            if fixed and fixed != ids:
+                services.set_openwebui_model_filter(c["url"], fixed)
+    except Exception:  # noqa: BLE001 — renaming must succeed even if OpenWebUI is unreachable
+        pass
+
+    return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={new}&edit={new}"})
 
 
 @app.post("/config/section/{name}/delete")
@@ -837,13 +1109,54 @@ def _stats_by_name() -> dict:
     return {name: hw.stats_for(name) for name in services._effective_container_names()}
 
 
+def _perf_by_name() -> dict:
+    """Sparkline-ready view of the rolling history the hw sampler already keeps.
+
+    Percentages are pinned to a 0-100 scale and VRAM to the card total, so the lines stay
+    comparable between refreshes instead of auto-rescaling to whatever the current window
+    happens to contain.
+    """
+    out: dict[str, dict] = {}
+    for name in services._effective_container_names():
+        pts = hw.history_for(name)
+        if not pts:
+            continue
+        st = hw.stats_for(name)
+        vram_total = st.gpu.vram_total_gb if (st.ok and st.gpu) else 0.0
+        span_s = (pts[-1].ts - pts[0].ts) if len(pts) > 1 else 0.0
+        mins = int(span_s // 60)
+        cards = (st.gpu.cards if (st.ok and st.gpu) else []) or []
+        frees = [c.vram_free_gb for c in cards]
+        out[name] = {
+            "points": len(pts),
+            "has_gpu": bool(st.ok and st.gpu),
+            "window_label": (f"last {mins}m" if mins >= 1 else f"last {int(span_s)}s"),
+            "gpu_util": hw.sparkline([p.gpu_util for p in pts], 100.0),
+            "vram": hw.sparkline([p.vram_used_gb for p in pts], vram_total or None),
+            "cpu": hw.sparkline([p.cpu_pct for p in pts], None),
+            "mem": hw.sparkline([p.mem_used_gb for p in pts], None),
+            "cur_gpu_util": pts[-1].gpu_util,
+            "cur_vram": pts[-1].vram_used_gb,
+            "vram_total": vram_total,
+            "cur_cpu": pts[-1].cpu_pct,
+            "cur_mem": pts[-1].mem_used_gb,
+            # spread between the most and least free card — the number that explains
+            # "OOM on one GPU while the other looks fine"
+            "imbalance_gb": round(max(frees) - min(frees), 2) if len(frees) > 1 else 0.0,
+        }
+    return out
+
+
 @app.get("/containers", response_class=HTMLResponse)
 async def containers_page(request: Request) -> HTMLResponse:
     backends = await services.snapshot_llama_backends()
     return templates.TemplateResponse("containers.html", {
-        "request": request, "backends": backends, "stats": _stats_by_name(),
+        "request": request, "backends": backends, "stats": _stats_by_name(), "perf": _perf_by_name(),
         "prompts": db.list_prompts(),
         "openwebui": services.openwebui_state(),
+        # Raw model ids a backend reports — what OpenWebUI's model_ids whitelist matches on.
+        # Every llama backend serves the same models.ini, so the section names are the list.
+        "all_model_ids": sorted(ini.section_names()),
     })
 
 
@@ -859,6 +1172,58 @@ def containers_sync_openwebui() -> HTMLResponse:
     )
 
 
+@app.post("/containers/openwebui-align-capabilities", response_class=HTMLResponse)
+def containers_openwebui_align() -> HTMLResponse:
+    """Make OpenWebUI's per-model capabilities match models.ini, and drop stale records."""
+    ok, msg = services.align_openwebui_capabilities()
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Align failed:"} {msg}</div>')
+
+
+@app.post("/containers/openwebui-filter", response_class=HTMLResponse)
+async def containers_openwebui_filter(request: Request) -> HTMLResponse:
+    """Set which models one OpenWebUI connection offers. No checked boxes = offer all."""
+    form = await request.form()
+    url = (form.get("url") or "").strip()
+    if not url:
+        return HTMLResponse(
+            '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">No connection specified.</div>'
+        )
+    model_ids = [str(v) for v in form.getlist("model_ids") if str(v).strip()]
+    ok, msg = services.set_openwebui_model_filter(url, model_ids)
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    mark = "✓" if ok else "Filter failed:"
+    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{mark} {msg}</div>')
+
+
+@app.post("/models/align-capability", response_class=HTMLResponse)
+def models_align_capability(section: str = Form(...)) -> HTMLResponse:
+    """Align OpenWebUI capabilities for a single models.ini section."""
+    ok, msg = services.align_openwebui_capability_for(section)
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Failed:"} {msg}</div>')
+
+
+@app.post("/models/openwebui-visibility", response_class=HTMLResponse)
+async def models_openwebui_visibility(request: Request) -> HTMLResponse:
+    """Toggle one model's visibility on one OpenWebUI connection, from the Models page."""
+    form = await request.form()
+    url = (form.get("url") or "").strip()
+    model_id = (form.get("model_id") or "").strip()
+    show = str(form.get("show") or "").lower() in ("1", "true", "on", "yes")
+    if not url or not model_id:
+        return HTMLResponse(
+            '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">Missing model or connection.</div>'
+        )
+    ok, msg = services.toggle_openwebui_model(url, model_id, show, sorted(ini.section_names()))
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Failed:"} {msg}</div>')
+
+
 @app.get("/containers/{name}/dashboard", response_class=HTMLResponse)
 async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     backends = await services.snapshot_llama_backends()
@@ -866,7 +1231,7 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     if b is None:
         return HTMLResponse(f"<span class='text-xs text-slate-500'>unknown backend: {name}</span>")
     return templates.TemplateResponse("_container_dashboard.html", {
-        "request": request, "b": b, "stats": _stats_by_name(),
+        "request": request, "b": b, "stats": _stats_by_name(), "perf": _perf_by_name(),
     })
 
 

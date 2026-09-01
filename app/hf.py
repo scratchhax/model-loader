@@ -45,15 +45,17 @@ class HfModel:
 
 
 async def search_models(query: str, limit: int = 30, sort: str = "downloads") -> list[HfModel]:
-    """Search HF hub for models tagged gguf. sort: downloads|likes|lastModified|trendingScore"""
-    params = {
-        "search": query,
+    """Search HF hub for models tagged gguf. sort: downloads|likes|lastModified|trendingScore.
+    Empty query is valid — returns the top N gguf models under the given sort (browse mode)."""
+    params: dict[str, str] = {
         "filter": "gguf",
         "limit": str(limit),
         "sort": sort,
         "direction": "-1",
         "full": "true",
     }
+    if query:
+        params["search"] = query
     async with httpx.AsyncClient(timeout=20.0, headers=_auth_headers()) as client:
         r = await client.get(f"{HF_API}/models", params=params)
         r.raise_for_status()
@@ -124,6 +126,64 @@ def _is_support_file(path: str) -> bool:
     low = path.lower()
     # things llama.cpp sometimes needs alongside a GGUF
     return low.endswith((".mmproj", "mmproj.gguf", "chat_template.jinja", "tokenizer.model"))
+
+
+_HEADER_BYTES = 1024 * 1024      # GGUF metadata sits at the very start of the file
+_HEADER_CACHE: dict[str, dict] = {}
+_HEADER_GATED: dict[str, str] = {}  # repo_id -> why estimates are unavailable
+_HEADER_CACHE_MAX = 64
+
+
+def gated_reason(repo_id: str) -> str:
+    """Why a repo's header could not be read, if it was an access problem."""
+    return _HEADER_GATED.get(repo_id, "")
+
+
+async def gguf_header(repo_id: str, path: str) -> dict | None:
+    """Fetch and parse a remote GGUF's metadata WITHOUT downloading the weights.
+
+    GGUF stores all its KV metadata at the head of the file, so a single ranged GET of the
+    first megabyte is enough to read block_count, head counts, native context and so on.
+    That is what makes a real fit estimate possible for a model you haven't downloaded —
+    file size alone can't tell you how big the KV cache will be.
+
+    Note the caller only needs this ONCE per repo: layer counts and native ctx are properties
+    of the model, identical across every quant in it. Only the file size differs, so one
+    fetch covers all of a repo's files.
+    """
+    from . import gguf_meta
+    key = f"{repo_id}/{path}"
+    cached = _HEADER_CACHE.get(key)
+    if cached is not None:
+        return cached or None
+    url = f"{HF_RESOLVE}/{repo_id}/resolve/main/{path}"
+    headers = dict(_auth_headers())
+    headers["Range"] = f"bytes=0-{_HEADER_BYTES - 1}"
+    try:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+            r = await client.get(url, headers=headers)
+        if r.status_code in (401, 403):
+            # Gated repo. The tree listing is public (so sizes render) but the weights
+            # are not, which is why estimates would otherwise vanish with no explanation.
+            # 401 = no usable token, 403 = token valid but not granted access to THIS repo.
+            _HEADER_GATED[repo_id] = (
+                "needs a Hugging Face token (set one in Settings)" if r.status_code == 401
+                else "your token lacks access — accept this model's licence on its HF page"
+            )
+            _HEADER_CACHE[key] = {}
+            return None
+        if r.status_code not in (200, 206) or not r.content:
+            _HEADER_CACHE[key] = {}
+            return None
+        summary = gguf_meta.summarize(gguf_meta.read_raw_bytes(r.content))
+    except (httpx.HTTPError, gguf_meta.GgufMetaError, ValueError, OSError):
+        _HEADER_CACHE[key] = {}
+        return None
+    _HEADER_GATED.pop(repo_id, None)
+    if len(_HEADER_CACHE) >= _HEADER_CACHE_MAX:
+        _HEADER_CACHE.clear()
+    _HEADER_CACHE[key] = summary
+    return summary
 
 
 async def _fetch_owner_avatar(client: httpx.AsyncClient, owner: str) -> str | None:

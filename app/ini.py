@@ -41,7 +41,10 @@ COMMON_FIELDS: tuple[Field, ...] = (
     Field("cache-type-k", "KV cache — K quant", "select", choices=_KV_TYPES,
           help="Data type for the K side of the KV cache. q8_0 is a strong VRAM saver with minimal quality loss. f16 = default."),
     Field("cache-type-v", "KV cache — V quant", "select", choices=_KV_TYPES,
-          help="Data type for the V side of the KV cache. Match K unless you're experimenting. q8_0 halves KV VRAM."),
+          help="Data type for the V side of the KV cache. Keep this equal to K. Going below q8_0 saves VRAM but "
+               "can silently fall off the CUDA flash-attention fast path and run attention on the CPU — measured "
+               "15x slower prompt eval (1737 -> 115 tok/s) on a 27B with a 256-wide head dim. The fallback is "
+               "invisible on short prompts, so if you change this, benchmark a LONG one and watch GPU utilization."),
     Field("parallel", "Parallel slots (--np)", "int", placeholder="1",
           help="Number of concurrent generation slots the server hosts. -1 = auto. Each slot needs its own KV allocation."),
     Field("jinja", "Enable --jinja templating", "bool",
@@ -91,6 +94,8 @@ RUNTIME_FIELDS: tuple[Field, ...] = (
           help="Interleave prompt+generation across slots. Default on. Off = one request at a time."),
     Field("context-shift", "Context shift", "select", choices=_ONOFF,
           help="On overflow, shift out oldest tokens (keeping --keep from the start) to make room. Default on for endless-chat use."),
+    Field("cache-reuse", "Prefix cache reuse (min tokens)", "int", placeholder="1",
+          help="Reuse KV cache from a previous request when the new prompt shares a prefix. Set to 1 to enable — huge TTFT win for chat continuations (only new tokens are prompt-evaluated). 0 disables. Free, safe, should almost always be on."),
     Field("kv-unified", "Unified KV cache", "select", choices=_ONOFF,
           help="Share one KV cache across all slots (saves memory) vs. per-slot caches (better cache locality)."),
     Field("cache-ram", "Cache RAM budget (MiB)", "int", placeholder="8192  ·  -1 = unlimited",
@@ -158,19 +163,19 @@ SPECULATIVE_FIELDS: tuple[Field, ...] = (
                    "draft-dspark", "ngram-simple", "ngram-map-k", "ngram-map-k4v",
                    "ngram-mod", "ngram-cache"),
           help="Speculative decoding algorithm. draft-* needs a smaller draft model; ngram-* is model-free (looks in prompt history)."),
-    Field("spec-draft-model", "Draft model path", "text", placeholder="/models/draft.gguf",
-          help="Local path to a small 'draft' GGUF used to propose tokens the main model verifies."),
+    Field("spec-draft-model", "Draft model path", "text", placeholder="/models/<stem>/draft.gguf",
+          help="Local path to a small 'draft' GGUF used to propose tokens the main model verifies. For Qwen3 with MTP, use the model's official MTP draft head."),
     Field("spec-draft-hf", "Draft HF repo", "text", placeholder="user/repo[:quant]",
           help="Hugging Face repo to pull the draft model from (llama-server auto-downloads at startup)."),
-    Field("spec-draft-ngl", "Draft GPU layers", "int",
-          help="How many draft-model layers to place on GPU. Small drafts usually fit entirely (999)."),
+    Field("spec-draft-ngl", "Draft GPU layers", "int", placeholder="999",
+          help="How many draft-model layers to place on GPU. Small drafts fit entirely — 999 offloads everything."),
     Field("spec-draft-device", "Draft device list", "text",
           help="Comma-separated devices for the draft model. Often the same as main; sometimes a spare GPU."),
-    Field("spec-draft-n-max", "Draft n_max", "int", placeholder="3",
-          help="Maximum draft tokens per speculation attempt. More = higher upside if accepted, more waste if rejected."),
-    Field("spec-draft-n-min", "Draft n_min", "int",
+    Field("spec-draft-n-max", "Draft n_max", "int", placeholder="8",
+          help="Maximum draft tokens per speculation attempt. More = higher upside if accepted, more waste if rejected. Qwen3 MTP tuned for 8."),
+    Field("spec-draft-n-min", "Draft n_min", "int", placeholder="0",
           help="Minimum draft tokens to always attempt per step."),
-    Field("spec-draft-p-min", "Draft p_min", "text", placeholder="float",
+    Field("spec-draft-p-min", "Draft p_min", "text", placeholder="0.75",
           help="Minimum probability threshold for the draft to speculate; below this it defers to the main model."),
     Field("spec-draft-p-split", "Draft p_split", "text", placeholder="float",
           help="Probability threshold at which speculation branches (tree drafting)."),
@@ -218,6 +223,26 @@ CPU_FIELDS: tuple[Field, ...] = (
           help="How aggressively worker threads busy-wait for work. Higher = lower latency, more idle CPU."),
 )
 
+REASONING_FIELDS: tuple[Field, ...] = (
+    Field("reasoning", "Enable reasoning / thinking", "select", choices=("", "on", "off", "auto"),
+          help="Whether the model uses its reasoning (thinking) mode. 'auto' = detected from the chat template "
+               "(the right default for most reasoning models). Force 'on' to always think, 'off' to skip thinking "
+               "for lower latency."),
+    Field("reasoning-format", "Reasoning output format", "select", choices=("", "none", "deepseek", "deepseek-legacy"),
+          help="How thoughts appear in responses. 'deepseek' = thoughts in message.reasoning_content (OpenAI-compatible clients like OpenWebUI hide them). "
+               "'deepseek-legacy' = keeps <think> tags in content too. 'none' = raw, unparsed. Default: auto."),
+    Field("reasoning-budget", "Reasoning token budget", "int",
+          placeholder="-1 unrestricted · 0 = skip thinking · N = hard cap",
+          help="Max tokens the model can spend on reasoning per response. -1 = unlimited (default), 0 = skip thinking entirely, "
+               "N>0 = hard cap. Rough map to OpenAI 'reasoning_effort': low ≈ 512, medium ≈ 2048, high ≈ 8192 or -1."),
+    Field("reasoning-budget-message", "Reasoning-budget cutoff message", "text",
+          placeholder="e.g. \"Final answer:\"",
+          help="Message injected right before the end-of-thinking tag when the budget runs out. Nudges the model to wrap up."),
+    Field("reasoning-preserve", "Preserve reasoning across turns", "select", choices=("", "on", "off"),
+          help="Keep the full thinking trace in the conversation history, not just the last turn. Needed for templates with "
+               "'supports_preserve_reasoning'. Uses more context per turn."),
+)
+
 MISC_FIELDS: tuple[Field, ...] = (
     Field("alias", "Alias override", "text",
           help="Server-facing model name. Defaults to the section name; only override if you need a different API-visible id."),
@@ -254,6 +279,7 @@ FORM_TIERS: tuple[tuple[str, tuple[Field, ...], bool], ...] = (
     ("Speculative decoding", SPECULATIVE_FIELDS, False),
     ("LoRA / control vectors", LORA_FIELDS, False),
     ("CPU threading", CPU_FIELDS, False),
+    ("Reasoning / thinking", REASONING_FIELDS, False),
     ("Embeddings & misc", MISC_FIELDS, False),
 )
 
@@ -284,22 +310,46 @@ _TRUTHY = {"true", "on", "yes", "1"}
 _FALSY = {"false", "off", "no", "0"}
 
 
+_FIELD_KIND = {f.key: f.kind for f in ALL_FIELDS}
+# Selects whose "on" is spelled as a bare flag on the command line rather than `--key on`.
+_BARE_ON_OFF: set[str] = set()
+
 def to_cli(name: str, items: list[tuple[str, str]]) -> str:
     # If the section has an explicit `model` key, respect it; otherwise default to /models/<section>.gguf
     explicit_model = next((v for k, v in items if k == "model" and v), None)
-    model_path = f"/models/{explicit_model}" if explicit_model else f"/models/{name}.gguf"
+    # `model` is documented as relative to /models, but autoconfig writes the container-absolute
+    # path llama-server actually wants. Accept both rather than emitting /models//models/...
+    if not explicit_model:
+        model_path = f"/models/{name}.gguf"
+    elif explicit_model.startswith("/"):
+        model_path = explicit_model
+    else:
+        model_path = f"/models/{explicit_model}"
     parts: list[str] = ["--alias", shlex.quote(name), "--model", shlex.quote(model_path)]
     for k, v in items:
         if k == "model":
             continue  # already emitted
-        low = str(v).strip().lower()
-        if low in _FALSY:
+        val = str(v).strip()
+        low = val.lower()
+        # Whether a key is a bare flag is a property of the KEY, not of its value. Deciding it
+        # from the text alone silently mangles numeric options that happen to read as boolean:
+        # `parallel = 1` became a bare `--parallel` (no slot count) and `main-gpu = 0` vanished
+        # entirely. Only genuinely boolean fields collapse to a flag.
+        if _FIELD_KIND.get(k, "text") in ("bool", "flag"):
+            if low in _FALSY:
+                continue
+            parts.append(f"--{k}")
             continue
-        if low in _TRUTHY:
+        if not val:
+            continue
+        if low in _TRUTHY or low in _FALSY:
+            # on/off-style select (flash-attn, kv-offload, ...): llama-server wants the word.
             parts.append(f"--{k}")
-        else:
-            parts.append(f"--{k}")
-            parts.append(shlex.quote(str(v)))
+            if k not in _BARE_ON_OFF:
+                parts.append(low)
+            continue
+        parts.append(f"--{k}")
+        parts.append(shlex.quote(val))
     return " ".join(parts)
 
 
@@ -312,15 +362,34 @@ class SectionView:
     cli: str = ""
 
 
+def _is_companion(filename: str) -> bool:
+    """Return True for GGUFs that are companion artefacts, not standalone models.
+    These are referenced from a main section (via `mmproj = ...`, `model-draft = ...`, etc.)
+    and should not be offered as their own configurable ini sections.
+
+    Covers:
+      - mmproj files (multimodal projectors — vision, audio, etc.)
+      - draft heads for speculative decoding (Qwen3 MTP, generic -draft-)
+    """
+    n = filename.lower()
+    if "mmproj" in n:
+        return True
+    # Import lazily to avoid circular: autoconfig imports ini for ALL_KNOWN_KEYS.
+    from .autoconfig import _looks_like_draft
+    return _looks_like_draft(filename)
+
+
 def _stems_present() -> dict[str, str]:
-    """stem -> display_name (with subdir prefix if in subdir). Scans /models one level deep."""
+    """stem -> display_name (with subdir prefix if in subdir). Scans /models one level deep.
+    Excludes companion files (mmproj etc.) — they belong to a main model's section, not their own."""
     out: dict[str, str] = {}
     root = settings.models_dir
+    from .utils import shard_key as _sk
     try:
         for p in root.iterdir():
             if p.is_file() and p.suffix.lower() == ".gguf":
-                # take shard base as the identity stem (strips -NNNNN-of-NNNNN when applicable)
-                from .utils import shard_key as _sk
+                if _is_companion(p.name):
+                    continue
                 base, _, _ = _sk(p.name)
                 stem = base[:-5] if base.lower().endswith(".gguf") else base
                 out[stem] = base
@@ -331,7 +400,8 @@ def _stems_present() -> dict[str, str]:
                     continue
                 for sp in kids:
                     if sp.is_file() and sp.suffix.lower() == ".gguf":
-                        from .utils import shard_key as _sk
+                        if _is_companion(sp.name):
+                            continue
                         base, _, _ = _sk(sp.name)
                         stem = base[:-5] if base.lower().endswith(".gguf") else base
                         out[stem] = f"{p.name}/{base}"
@@ -340,12 +410,64 @@ def _stems_present() -> dict[str, str]:
     return out
 
 
+def section_file_rel(name: str, vals: dict | None = None) -> str | None:
+    """models-dir-relative path of the GGUF a section points at, or None.
+
+    Resolves from the section's explicit `model =` value FIRST, and only falls back to
+    matching the section name against file stems. That ordering matters: a section can be
+    renamed to give a model a short API id, at which point its name no longer resembles the
+    filename. Name-matching alone then reports "no GGUF found", which breaks Autoconfig, the
+    fit chips and the per-model backend toggles for a section that is perfectly valid.
+    """
+    v = vals if vals is not None else (get_section(name) or {})
+    mp = (v.get("model") or "").strip()
+    if mp:
+        rel = mp.replace("/models/", "", 1).lstrip("/")
+        try:
+            if (settings.models_dir / rel).is_file():
+                return rel
+        except OSError:
+            pass
+    return _stems_present().get(name)
+
+
+def sections_by_file() -> dict[str, list[str]]:
+    """{models-dir-relative path -> [section name, ...]} in file order.
+
+    The reverse of section_file_rel(): given a file on disk, which sections configure it.
+    A section name IS the id llama-server serves under, and it can be renamed away from the
+    filename to give a model a short API id, so a file cannot be matched to its section by
+    name alone. The value is a LIST because one GGUF can legitimately back several sections —
+    the same weights served twice under different ids with different settings (a chat preset
+    and a persona preset, say).
+    """
+    cp = read_ini()
+    out: dict[str, list[str]] = {}
+    for n in cp.sections():
+        rel = section_file_rel(n, dict(cp.items(n)))
+        if rel:
+            out.setdefault(rel, []).append(n)
+    return out
+
+
+def _files_claimed_by_sections() -> set[str]:
+    """Relative paths already referenced by some section, however that section is named."""
+    cp = read_ini()
+    out: set[str] = set()
+    for n in cp.sections():
+        rel = section_file_rel(n, dict(cp.items(n)))
+        if rel:
+            out.add(rel)
+    return out
+
+
 def list_sections() -> list[SectionView]:
     cp = read_ini()
     stems_map = _stems_present()
     out: list[SectionView] = []
     for name in cp.sections():
-        matched = stems_map.get(name)
+        # by explicit model= first, so renamed sections keep their file association
+        matched = section_file_rel(name, dict(cp.items(name))) or stems_map.get(name)
         items = list(cp.items(name))
         out.append(SectionView(
             name=name, items=items,
@@ -365,7 +487,11 @@ def get_section(name: str) -> dict[str, str] | None:
 def unregistered_gguf_stems() -> list[str]:
     """Filenames (stem, without .gguf) that don't have a section yet. Scans one subdir level too."""
     have = set(section_names())
-    return sorted([stem for stem in _stems_present().keys() if stem not in have])
+    # A file is "registered" if ANY section points at it — not merely when a section shares
+    # its name. Without this, renaming a section makes its own model reappear as unregistered.
+    claimed = _files_claimed_by_sections()
+    return sorted([stem for stem, rel in _stems_present().items()
+                   if stem not in have and rel not in claimed])
 
 
 # ---- writing ----
@@ -391,12 +517,17 @@ def suggest_defaults(summary: dict) -> tuple[dict[str, str], list[str]]:
     if isinstance(ctx, int) and ctx > 0:
         fields["ctx-size"] = str(ctx)
 
-    # sensible defaults matching your compose baseline (-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -np 1)
+    # Runtime defaults. These used to be supplied by the container's CLI baseline, but
+    # compose args OVERRIDE models.ini rather than falling back to it — so the compose
+    # commands were reduced to router-only plumbing and every preset must now be
+    # self-sufficient. `parallel` in particular is not optional: llama-server defaults
+    # to n_slots = 4, which would silently quarter each slot's share of ctx-size.
     fields["ngl"] = "999"
     fields["flash-attn"] = "on"
     fields["cache-type-k"] = "q8_0"
     fields["cache-type-v"] = "q8_0"
     fields["parallel"] = "1"
+    fields["split-mode"] = "layer"
 
     if summary.get("chat_template"):
         fields["jinja"] = "true"

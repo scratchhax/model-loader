@@ -12,6 +12,7 @@ import docker
 import httpx
 from docker.errors import APIError, DockerException, NotFound
 
+from . import ini
 from .config import settings
 from .utils import human_bytes, shard_key
 
@@ -26,7 +27,13 @@ class GgufEntry:
     mtime: float             # newest part's mtime
     is_sharded: bool
     subdir: str = ""         # empty for flat files, subdir name for shard groups in a subdir
+    is_companion: bool = False   # True for mmproj / other files referenced from a main model's section
     aliases: list[str] = field(default_factory=list)  # ini section names that reference this
+    # If this is a main model with a companion mmproj in the same subdir, these fields
+    # describe the companion. Standalone companion entries are hidden from listings.
+    companion_name: str = ""
+    companion_bytes: int = 0
+    companion_parts: list[Path] = field(default_factory=list)
 
     @property
     def human_size(self) -> str:
@@ -40,6 +47,18 @@ class GgufEntry:
     def stem(self) -> str:
         # e.g. "gemma-4-12b-it-Q4_K_M.gguf" -> "gemma-4-12b-it-Q4_K_M"
         return self.display_name[:-5] if self.display_name.lower().endswith(".gguf") else self.display_name
+
+    @property
+    def model_id(self) -> str:
+        """The id llama-server serves this file under.
+
+        That is its ini section name when it has one — which is NOT necessarily the filename
+        stem, since a section can be renamed to give the model a short API id — and otherwise
+        the stem, which is what llama-server falls back to.
+        """
+        if self.stem in self.aliases:
+            return self.stem      # a section named after the file: the natural id
+        return self.aliases[0] if self.aliases else self.stem
 
     @property
     def route_key(self) -> str:
@@ -102,6 +121,8 @@ def snapshot_models_dir() -> ModelsDirSnapshot:
 
     aliases = read_ini_aliases(settings.models_ini_path)
     snap.ini_aliases = aliases
+    # file -> section, so a section renamed to a short API id still owns its GGUF
+    by_file = ini.sections_by_file()
     snap.ini_present = settings.models_ini_path.exists()
 
     # collect gguf files, grouping shards. Also descend one level into subdirs
@@ -132,7 +153,9 @@ def snapshot_models_dir() -> ModelsDirSnapshot:
         total = sum(pp.stat().st_size for pp in parts)
         mtime = max(pp.stat().st_mtime for pp in parts)
         stem_no_ext = base[:-5] if base.lower().endswith(".gguf") else base
-        matched = [a for a in aliases if a == stem_no_ext]
+        rel = f"{subdir}/{parts[0].name}" if subdir else parts[0].name
+        matched = by_file.get(rel) or [a for a in aliases if a == stem_no_ext]
+        is_comp = "mmproj" in base.lower()
         entries.append(GgufEntry(
             display_name=base,
             parts=parts,
@@ -140,10 +163,35 @@ def snapshot_models_dir() -> ModelsDirSnapshot:
             mtime=mtime,
             is_sharded=len(parts) > 1,
             subdir=subdir,
+            is_companion=is_comp,
             aliases=matched,
         ))
-    entries.sort(key=lambda e: e.display_name.lower())
-    snap.ggufs = entries
+
+    # Fold companion mmproj entries into their same-subdir main model.
+    # A companion is a standalone file that only makes sense paired with its main model:
+    # you can't run it alone, can't configure it, can't do anything with it. So we hide
+    # it from the list and expose it as a badge on the main model instead. Un-paired
+    # companions (mmproj in a subdir with no main model) stay visible for cleanup.
+    main_by_subdir: dict[str, GgufEntry] = {
+        e.subdir: e for e in entries if not e.is_companion and e.subdir
+    }
+    surviving: list[GgufEntry] = []
+    for e in entries:
+        if e.is_companion and e.subdir and e.subdir in main_by_subdir:
+            main = main_by_subdir[e.subdir]
+            # ACCUMULATE. A subdir can hold several projectors (mmproj-BF16 + mmproj-F32 is
+            # a common upload pattern). Assigning here instead of appending meant the second
+            # one overwrote the first, so deleting the model stranded a projector on disk and
+            # left the subdir non-empty -- which then silently defeated the rmdir below.
+            main.companion_name = (f"{main.companion_name}, {e.display_name}"
+                                   if main.companion_name else e.display_name)
+            main.companion_bytes += e.total_bytes
+            main.companion_parts.extend(e.parts)
+            continue  # drop the standalone companion row
+        surviving.append(e)
+    # sort: (remaining) companions after main models, alpha within group
+    surviving.sort(key=lambda e: (e.subdir.lower(), e.is_companion, e.display_name.lower()))
+    snap.ggufs = surviving
     return snap
 
 
@@ -162,7 +210,43 @@ def delete_gguf(display_name: str, subdir: str = "") -> tuple[bool, str, int]:
         return False, f"not found: {display_name}", 0
     freed = 0
     removed: list[str] = []
-    for p in match.parts:
+
+    # Whole-directory delete when this model is the only model in its subdir.
+    #
+    # Downloads land one model per directory, and everything beside the weights there is
+    # support material for THAT model: projectors (often more than one), chat_template.jinja,
+    # tokenizer.model. Deleting file-by-file means anything not explicitly enumerated is
+    # stranded -- and a single leftover keeps the directory non-empty, so the tidy-up rmdir
+    # below silently does nothing and the orphans persist invisibly. Measured on a real
+    # deletion: 3.3 GB of projectors left behind.
+    #
+    # Guarded on there being no OTHER main GGUF present, so a directory someone has put two
+    # models into degrades to per-file deletion rather than taking the neighbour with it.
+    if match.subdir:
+        subpath = settings.models_dir / match.subdir
+        own = {p.resolve() for p in list(match.parts) + list(match.companion_parts)}
+        try:
+            others = [
+                q for q in subpath.iterdir()
+                if q.is_file() and q.suffix.lower() == ".gguf"
+                and not ini._is_companion(q.name) and q.resolve() not in own
+            ]
+        except OSError:
+            others = []
+        if not others and subpath.is_dir():
+            try:
+                for q in sorted(subpath.rglob("*")):
+                    if q.is_file():
+                        freed += q.stat().st_size
+                        removed.append(q.name)
+                shutil.rmtree(subpath)
+                return True, f"deleted {len(removed)} file(s), removed {match.subdir}/", freed
+            except OSError as e:
+                return False, f"failed to remove {match.subdir}/: {e}", freed
+
+    # Fallback: shared directory, or a flat file with no directory of its own.
+    paths_to_remove: list[Path] = list(match.parts) + list(match.companion_parts)
+    for p in paths_to_remove:
         try:
             size = p.stat().st_size
             p.unlink()
@@ -439,11 +523,31 @@ def restart_llama_backend(name: str) -> tuple[bool, str]:
     return True, "restart queued"
 
 
+def _fit_backends() -> dict[str, float]:
+    """{backend_name: total VRAM GiB} for everything we can actually plan against.
+
+    Prefers the live probe over settings.gpu_vram_map. The static map is an optional
+    override and is empty by default — relying on it alone silently disabled the fit
+    chips entirely once the hardcoded example values were removed.
+    """
+    from . import hw
+    out: dict[str, float] = {}
+    for name in _effective_container_names():
+        vram = float(settings.gpu_vram_map.get(name, 0) or 0)
+        if vram <= 0:
+            st = hw.stats_for(name)
+            if st.ok and st.gpu and st.gpu.vram_total_gb > 0:
+                vram = float(st.gpu.vram_total_gb)
+        if vram > 0:
+            out[name] = vram
+    return out
+
+
 def vram_fit_chips(size_bytes: int) -> list[dict]:
-    """For each configured GPU, return {'name', 'vram_gb', 'verdict' in {fits,tight,oom}, 'ratio_pct'}."""
+    """For each GPU backend, return {'name', 'vram_gb', 'verdict' in {fits,tight,oom}, 'ratio_pct'}."""
     gb = size_bytes / (1024 ** 3)
     out: list[dict] = []
-    for name, vram in settings.gpu_vram_map.items():
+    for name, vram in _fit_backends().items():
         if vram <= 0:
             continue
         ratio = gb / vram
@@ -518,18 +622,54 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
     }
 
 
-def _find_open_webui(client):
+_OWUI_DB = "/app/backend/data/webui.db"
+
+
+def _has_webui_db(c) -> bool:
+    """Definitive test: does this container actually hold OpenWebUI's database?"""
     try:
-        for c in client.containers.list(all=True):
-            try:
-                img = ((c.image.tags or [""]) + [""])[0].lower()
-            except DockerException:
-                img = ""
-            if "open-webui" in img or "openwebui" in img:
-                return c
+        r = c.exec_run(["test", "-f", _OWUI_DB])
+        return r.exit_code == 0
+    except (DockerException, APIError):
+        return False
+
+
+def _find_open_webui(client):
+    """Locate the OpenWebUI container.
+
+    Matching on `"open-webui" in <full image ref>` is too loose: an unrelated image from the
+    same GitHub org — e.g. ghcr.io/open-webui/open-terminal — contains that string in its ORG
+    path and would match first, after which every DB call fails with
+    "unable to open database file" because that container has no webui.db.
+
+    So: compare against the image's repository basename (not the org), prefer an exact
+    container-name match, and confirm the database is actually present before accepting.
+    """
+    def _repo_basename(c) -> str:
+        try:
+            ref = ((c.image.tags or [""]) + [""])[0].lower()
+        except DockerException:
+            return ""
+        ref = ref.split("@", 1)[0]                 # strip digest
+        path = ref.rsplit(":", 1)[0]              # strip tag
+        return path.rsplit("/", 1)[-1]            # image name only, no org/registry
+
+    try:
+        containers = list(client.containers.list(all=True))
     except DockerException:
-        pass
-    return None
+        return None
+
+    exact_name = [c for c in containers if (c.name or "").lower() in ("open-webui", "openwebui")]
+    by_image = [c for c in containers if _repo_basename(c) in ("open-webui", "openwebui")]
+
+    # Running instances first, then anything else; verify the DB before committing.
+    for group in (exact_name, by_image):
+        for c in sorted(group, key=lambda x: 0 if x.status == "running" else 1):
+            if _has_webui_db(c):
+                return c
+    # Nothing verified — fall back to the best name/image guess so callers can still report
+    # a sensible container name in their error message.
+    return (exact_name or by_image or [None])[0]
 
 
 def _openwebui_persisted_urls(ow) -> list[str]:
@@ -586,19 +726,409 @@ def openwebui_state() -> dict:
         if not any(u in current_urls for u in candidate_urls):
             missing.append({"name": d["name"], "vendor": d.get("vendor", ""), "url": candidate_urls[0]})
 
+    # Detect stale entries — URLs pointing at compose-local hosts that no longer exist
+    valid_hosts: set[str] = set()
+    try:
+        for c in client.containers.list(all=True):
+            if c.name:
+                valid_hosts.add(c.name)
+            svc = c.labels.get("com.docker.compose.service") if c.labels else None
+            if svc:
+                valid_hosts.add(svc)
+    except DockerException:
+        pass
+    from urllib.parse import urlparse
+    stale: list[str] = []
+    for u in current_urls:
+        host = urlparse(u).hostname or ""
+        looks_local = host and "." not in host and ":" not in host
+        if looks_local and valid_hosts and host not in valid_hosts:
+            stale.append(u)
+
+    # Container facts + per-connection settings. Model Loader writes to this container's
+    # database, so the page that does the writing should also show what it is writing to.
+    image = ""
+    short_id = ""
+    ports: list[str] = []
+    try:
+        image = ((ow.image.tags or [ow.image.short_id]) or [""])[0]
+        short_id = ow.short_id
+        # Docker lists IPv4 and IPv6 bindings separately for the same mapping; dedupe so the
+        # card doesn't show "3000→8080" twice.
+        seen_ports: set[str] = set()
+        for cport, binds in ((ow.attrs or {}).get("NetworkSettings", {}).get("Ports") or {}).items():
+            for b in (binds or []):
+                hp = b.get("HostPort")
+                if not hp:
+                    continue
+                label = f"{hp}→{cport.split('/')[0]}"
+                if label not in seen_ports:
+                    seen_ports.add(label)
+                    ports.append(label)
+    except (DockerException, AttributeError, KeyError):
+        pass
+
+    # Pair each persisted URL with its connection config (prefix, enabled, model filter).
+    cfgs = _openwebui_api_configs(ow)
+    # Every llama backend serves the same models.ini, so a whitelist id that is not a section
+    # name is one no backend can resolve. OpenWebUI still LISTS such an id — the whitelist is
+    # what it renders — so the model appears in the picker and then fails with "model not
+    # found" on first use. That is invisible from both ends unless something names it here.
+    known_ids = set(ini.section_names())
+    conns: list[dict] = []
+    for i, u in enumerate(current_urls):
+        c = cfgs.get(str(i)) or {}
+        host = urlparse(u).hostname or ""
+        wanted = c.get("model_ids") or []
+        conns.append({
+            "url": u,
+            "host": host,
+            "prefix_id": c.get("prefix_id") or "",
+            "enabled": c.get("enable", True),
+            "model_ids": wanted,
+            "unknown_ids": [m for m in wanted if m not in known_ids],
+            "live_ids": [m for m in wanted if m in known_ids],
+            "stale": u in stale,
+        })
+
     return {
         "found": True,
         "container_name": ow.name,
         "status": ow.status,
+        "image": image,
+        "short_id": short_id,
+        "ports": ports,
         "current_urls": current_urls,
+        "connections": conns,
+        "companions": _openwebui_companions(client, ow, valid_hosts),
         "missing_backends": missing,
+        "stale_urls": stale,
     }
 
 
-def sync_openwebui_endpoints() -> tuple[bool, str]:
-    """Add missing llama backends to OpenWebUI's PERSISTED config (webui.db → openai.api_base_urls).
-    Then restart open-webui so it reloads its PersistentConfig from the updated DB.
-    Preserves the user's existing connections, keys, and per-connection prefixes/tags.
+def _openwebui_companions(client, ow, valid_hosts: set[str]) -> list[dict]:
+    """Other services OpenWebUI depends on, and the containers behind them.
+
+    Right now that means the terminal server (ghcr.io/open-webui/open-terminal), which
+    OpenWebUI records under `terminal_server.connections`. It matters here for two reasons:
+    it's part of a working OpenWebUI stack, and its image lives under the same GitHub org,
+    which is exactly what previously made backend discovery grab the wrong container.
+    """
+    import json as _json
+    from urllib.parse import urlparse as _urlparse
+
+    script = (
+        "import sqlite3, json;"
+        "c=sqlite3.connect('/app/backend/data/webui.db');"
+        "r=c.execute(\"SELECT value FROM config WHERE key='terminal_server.connections'\").fetchone();"
+        "print(r[0] if r else '[]')"
+    )
+    try:
+        res = ow.exec_run(["python3", "-c", script])
+        raw = (res.output or b"").decode(errors="replace").strip() if res.exit_code == 0 else "[]"
+        entries = _json.loads(raw or "[]")
+    except (DockerException, APIError, ValueError):
+        entries = []
+
+    # Index running containers by name so each configured URL can be tied to a real container.
+    by_name: dict[str, object] = {}
+    try:
+        for c in client.containers.list(all=True):
+            if c.name:
+                by_name[c.name] = c
+    except DockerException:
+        pass
+
+    out: list[dict] = []
+    for e in entries if isinstance(entries, list) else []:
+        url = str(e.get("url") or "")
+        host = _urlparse(url).hostname or ""
+        c = by_name.get(host)
+        image = ""
+        status = "not found"
+        if c is not None:
+            status = getattr(c, "status", "") or ""
+            try:
+                image = ((c.image.tags or [c.image.short_id]) or [""])[0]
+            except (DockerException, AttributeError):
+                pass
+        looks_local = bool(host) and "." not in host and ":" not in host
+        out.append({
+            "kind": "terminal server",
+            "name": e.get("name") or host,
+            "url": url,
+            "host": host,
+            "enabled": bool(e.get("enabled", True)),
+            "container": host if c is not None else "",
+            "image": image,
+            "status": status,
+            # Same stale rule as the llama backends: a compose-local host that no longer exists.
+            "stale": looks_local and bool(valid_hosts) and host not in valid_hosts,
+        })
+    return out
+
+
+def _openwebui_api_configs(ow) -> dict:
+    """Read openai.api_configs out of webui.db. Best-effort: an empty dict just means the
+    card shows URLs without their prefixes, never an error."""
+    import json as _json
+    script = (
+        "import sqlite3, json;"
+        "c=sqlite3.connect('/app/backend/data/webui.db');"
+        "r=c.execute(\"SELECT value FROM config WHERE key='openai.api_configs'\").fetchone();"
+        "print(r[0] if r else '{}')"
+    )
+    try:
+        res = ow.exec_run(["python3", "-c", script])
+        if res.exit_code != 0:
+            return {}
+        return _json.loads((res.output or b"").decode(errors="replace").strip() or "{}")
+    except (DockerException, APIError, ValueError):
+        return {}
+
+
+def prune_openwebui_unknown_ids() -> list[str]:
+    """Drop whitelist ids that no models.ini section provides, on every connection.
+
+    Called after a rename, where the old id becomes unservable the moment the section changes
+    name. Only ever REMOVES ids that cannot resolve, so it can't hide a working model; an
+    empty whitelist means "offer everything", so a connection is never emptied to nothing —
+    that would silently widen it instead of narrowing it.
+    """
+    st = openwebui_state()
+    if not st.get("found"):
+        return []
+    cleaned: list[str] = []
+    for c in st.get("connections") or []:
+        dead = c.get("unknown_ids") or []
+        keep = c.get("live_ids") or []
+        if not dead or not keep:
+            continue  # nothing dead, or pruning would empty the list into "offer everything"
+        ok, _ = set_openwebui_model_filter(c["url"], keep)
+        if ok:
+            cleaned.extend(dead)
+    return cleaned
+
+
+def openwebui_capability_plan() -> dict[str, bool]:
+    """{prefixed OpenWebUI model id -> supports vision}.
+
+    A models.ini section is multimodal iff it declares `mmproj`. OpenWebUI stores capability
+    per model id, and its ids carry the connection's prefix, so the same section served by two
+    connections needs an entry for each.
+
+    Only models a connection actually offers are included: an entry for a model the connection
+    filters out would be a record for something the user can never select.
+    """
+    plan: dict[str, bool] = {}
+    try:
+        st = openwebui_state()
+        if not st.get("found"):
+            return {}
+        # Vision means the projector encodes IMAGES, not merely that a projector exists --
+        # llama.cpp uses the same --mmproj slot for audio encoders too.
+        vision_by_section = {}
+        for name in ini.section_names():
+            mm = (ini.get_section(name) or {}).get("mmproj", "").strip()
+            vision_by_section[name] = bool(mm) and "vision" in projector_modalities(mm)
+        for c in st.get("connections") or []:
+            if c.get("stale"):
+                continue
+            offered = c.get("model_ids") or list(vision_by_section)  # empty filter = all
+            prefix = c.get("prefix_id") or ""
+            for name in offered:
+                if name not in vision_by_section:
+                    continue  # stale whitelist id; prune handles those
+                plan[f"{prefix}.{name}" if prefix else name] = vision_by_section[name]
+    except (OSError, KeyError, AttributeError):
+        return {}
+    return plan
+
+
+def sync_openwebui_capabilities() -> tuple[bool, str]:
+    """Push per-model `capabilities.vision` into OpenWebUI, derived from models.ini.
+
+    Without this OpenWebUI offers the image-upload control on every model, because it has no
+    capability record for them. Picking a text-only model then fails at inference with
+    "image input is not supported" -- the model id and the fact that it has a projector live
+    in two different systems, and nothing warns you at selection time.
+
+    Existing meta is MERGED, not replaced: capabilities a user set by hand in OpenWebUI's own
+    model editor (web_search, code_interpreter, ...) survive. Only `vision` is authoritative
+    here, because it is the only one derivable from the ini.
+    """
+    import json as _json
+    plan = openwebui_capability_plan()
+    if not plan:
+        return False, "nothing to sync (no OpenWebUI connections, or no models.ini sections)"
+    client = _docker_client()
+    if client is None:
+        return False, "docker unreachable"
+    ow = _find_open_webui(client)
+    if ow is None:
+        return False, "open-webui not found"
+
+    script = """
+import sqlite3, json, os, time
+c = sqlite3.connect('/app/backend/data/webui.db')
+now = int(time.time())
+plan = json.loads(os.environ['PLAN'])
+
+row = c.execute('SELECT id FROM user WHERE role=? ORDER BY created_at LIMIT 1', ('admin',)).fetchone()
+if row is None:
+    row = c.execute('SELECT id FROM user ORDER BY created_at LIMIT 1').fetchone()
+if row is None:
+    print('NOUSER'); raise SystemExit(0)
+uid = row[0]
+
+changed = 0
+for mid, vision in plan.items():
+    cur = c.execute('SELECT meta FROM model WHERE id=?', (mid,)).fetchone()
+    if cur is None:
+        meta = {'capabilities': {'vision': bool(vision)}}
+        name = mid.split('.', 1)[1] if '.' in mid else mid
+        c.execute(
+            'INSERT INTO model(id, user_id, base_model_id, name, params, meta, updated_at, created_at, is_active)'
+            ' VALUES(?,?,?,?,?,?,?,?,1)',
+            (mid, uid, None, name, '{}', json.dumps(meta), now, now))
+        changed += 1
+    else:
+        try: meta = json.loads(cur[0]) if cur[0] else {}
+        except Exception: meta = {}
+        if not isinstance(meta, dict): meta = {}
+        caps = meta.get('capabilities')
+        if not isinstance(caps, dict): caps = {}
+        if caps.get('vision') == bool(vision):
+            continue
+        caps['vision'] = bool(vision)
+        meta['capabilities'] = caps
+        c.execute('UPDATE model SET meta=?, updated_at=? WHERE id=?', (json.dumps(meta), now, mid))
+        changed += 1
+c.commit()
+print('OK %d' % changed)
+"""
+    try:
+        r = ow.exec_run(["python3", "-c", script], environment={"PLAN": _json.dumps(plan)})
+    except (DockerException, APIError) as e:
+        return False, f"exec into open-webui failed: {e}"
+    out = (r.output or b"").decode(errors="replace").strip()
+    if r.exit_code != 0 or not out.startswith("OK"):
+        return False, f"capability sync failed: {out[:200]}"
+    n = out.split()[1] if len(out.split()) > 1 else "0"
+    vis = sum(1 for v in plan.values() if v)
+    # No restart. Unlike openai.api_configs (PersistentConfig, read once at boot), the `model`
+    # table is ordinary application data that OpenWebUI queries per request, so capability
+    # changes are picked up on the next page load.
+    if n == "0":
+        return True, f"already in sync ({vis} of {len(plan)} vision-capable)"
+    return True, f"{n} model(s) updated ({vis} of {len(plan)} vision-capable)"
+
+
+def align_openwebui_capabilities() -> tuple[bool, str]:
+    """Make OpenWebUI's per-model capabilities match models.ini, authoritatively.
+
+    Differs from sync_openwebui_capabilities() in two ways:
+      * REPLACES the capabilities block on backend records instead of merging into it, so
+        OpenWebUI's permissive defaults (vision on for everything) are overwritten rather
+        than preserved.
+      * DELETES backend records for model ids nothing serves any more -- the residue of
+        deleted or renamed models, which otherwise keep claiming capabilities forever.
+
+    Two categories are never touched:
+      * Records with a base_model_id: those are workspace models the USER built in
+        OpenWebUI (a custom name, system prompt and params on top of a base). Deleting one
+        destroys real work that does not exist anywhere else.
+      * Any record another model names as its base_model_id, even if the backend no longer
+        serves it -- removing it would orphan the workspace model sitting on top.
+    """
+    import json as _json
+    plan = openwebui_capability_plan()
+    if not plan:
+        return False, "nothing to align (no OpenWebUI connections, or no models.ini sections)"
+    client = _docker_client()
+    if client is None:
+        return False, "docker unreachable"
+    ow = _find_open_webui(client)
+    if ow is None:
+        return False, "open-webui not found"
+
+    script = """
+import sqlite3, json, os, time
+c = sqlite3.connect('/app/backend/data/webui.db')
+now = int(time.time())
+plan = json.loads(os.environ['PLAN'])
+
+row = c.execute('SELECT id FROM user WHERE role=? ORDER BY created_at LIMIT 1', ('admin',)).fetchone()
+if row is None:
+    row = c.execute('SELECT id FROM user ORDER BY created_at LIMIT 1').fetchone()
+if row is None:
+    print('NOUSER'); raise SystemExit(0)
+uid = row[0]
+
+# ids that are somebody's base -- protected from deletion
+bases = {r[0] for r in c.execute('SELECT DISTINCT base_model_id FROM model WHERE base_model_id IS NOT NULL')}
+
+updated = 0
+for mid, vision in plan.items():
+    cur = c.execute('SELECT meta, base_model_id FROM model WHERE id=?', (mid,)).fetchone()
+    if cur is not None and cur[1]:
+        continue                      # user workspace model; not ours to rewrite
+    if cur is None:
+        meta = {}
+    else:
+        try: meta = json.loads(cur[0]) if cur[0] else {}
+        except Exception: meta = {}
+        if not isinstance(meta, dict): meta = {}
+    meta['capabilities'] = {'vision': bool(vision)}   # replace, not merge
+    if cur is None:
+        name = mid.split('.', 1)[1] if '.' in mid else mid
+        c.execute('INSERT INTO model(id, user_id, base_model_id, name, params, meta, updated_at, created_at, is_active)'
+                  ' VALUES(?,?,?,?,?,?,?,?,1)', (mid, uid, None, name, '{}', json.dumps(meta), now, now))
+    else:
+        c.execute('UPDATE model SET meta=?, updated_at=? WHERE id=?', (json.dumps(meta), now, mid))
+    updated += 1
+
+removed, kept = [], []
+for mid, base in c.execute('SELECT id, base_model_id FROM model').fetchall():
+    if base or mid in plan:
+        continue                      # workspace model, or still served
+    if mid in bases:
+        kept.append(mid); continue    # another model is built on it
+    c.execute('DELETE FROM model WHERE id=?', (mid,))
+    removed.append(mid)
+c.commit()
+print('OK ' + json.dumps({'updated': updated, 'removed': removed, 'kept': kept}))
+"""
+    try:
+        r = ow.exec_run(["python3", "-c", script], environment={"PLAN": _json.dumps(plan)})
+    except (DockerException, APIError) as e:
+        return False, f"exec into open-webui failed: {e}"
+    out = (r.output or b"").decode(errors="replace").strip()
+    if r.exit_code != 0 or not out.startswith("OK"):
+        return False, f"align failed: {out[:200]}"
+    try:
+        res = _json.loads(out[3:])
+    except ValueError:
+        return True, out[:160]
+    vis = sum(1 for v in plan.values() if v)
+    msg = f"aligned {res['updated']} model(s) — {vis} vision-capable of {len(plan)}"
+    if res["removed"]:
+        msg += f"; removed {len(res['removed'])} stale record(s): " + ", ".join(res["removed"][:4])
+    if res["kept"]:
+        msg += f"; kept {len(res['kept'])} stale record(s) still used as a base model"
+    return True, msg
+
+
+def set_openwebui_model_filter(url: str, model_ids: list[str]) -> tuple[bool, str]:
+    """Restrict which models one OpenWebUI connection exposes.
+
+    OpenWebUI's `openai.api_configs[<index>].model_ids` is a whitelist: empty means "offer
+    everything this endpoint reports", non-empty means "offer only these". Model ids are the
+    RAW ids from the backend's /v1/models — the connection's prefix_id is applied by
+    OpenWebUI afterwards for display, so it must not appear here.
+
+    Useful when several backends share one models.ini but shouldn't all serve every model —
+    e.g. a CPU backend that should only offer the small models it can actually run.
     """
     import json as _json
     client = _docker_client()
@@ -608,16 +1138,147 @@ def sync_openwebui_endpoints() -> tuple[bool, str]:
     if ow is None:
         return False, "open-webui not found"
 
+    script = """
+import sqlite3, json, os, time
+c = sqlite3.connect('/app/backend/data/webui.db')
+now = int(time.time())
+
+def _get(k, default):
+    r = c.execute('SELECT value FROM config WHERE key=?', (k,)).fetchone()
+    if not r:
+        return default
+    try: return json.loads(r[0])
+    except Exception: return default
+
+def _set(k, v):
+    val = json.dumps(v)
+    if c.execute('SELECT 1 FROM config WHERE key=?', (k,)).fetchone():
+        c.execute('UPDATE config SET value=?, updated_at=? WHERE key=?', (val, now, k))
+    else:
+        c.execute('INSERT INTO config(key, value, updated_at) VALUES(?, ?, ?)', (k, val, now))
+
+target = os.environ['TARGET_URL']
+ids = json.loads(os.environ['MODEL_IDS'])
+urls = _get('openai.api_base_urls', [])
+cfgs = _get('openai.api_configs', {})
+if target not in urls:
+    print('NOTFOUND'); raise SystemExit(0)
+idx = str(urls.index(target))
+cfg = cfgs.get(idx) or {'enable': True, 'tags': [], 'prefix_id': '', 'model_ids': [],
+                        'connection_type': 'external', 'auth_type': 'bearer', 'passthrough_params': []}
+cfg['model_ids'] = ids
+cfgs[idx] = cfg
+_set('openai.api_configs', cfgs)
+c.commit()
+print('OK ' + str(len(ids)))
+"""
+    try:
+        r = ow.exec_run(
+            ["python3", "-c", script],
+            environment={"TARGET_URL": url, "MODEL_IDS": _json.dumps(model_ids)},
+        )
+    except (DockerException, APIError) as e:
+        return False, f"exec into open-webui failed: {e}"
+
+    out = (r.output or b"").decode(errors="replace").strip()
+    if r.exit_code != 0:
+        return False, f"DB update failed (exit {r.exit_code}): {out[:200]}"
+    if out.startswith("NOTFOUND"):
+        return False, f"connection not found in OpenWebUI: {url}"
+
+    # PersistentConfig only re-reads on boot, same as the endpoint sync.
+    try:
+        ow.restart(timeout=30)
+    except (DockerException, APIError) as e:
+        return False, f"filter saved but restart failed: {e}"
+    n = len(model_ids)
+    return True, (f"{url}: now offering {n} selected model(s)" if n
+                  else f"{url}: now offering all models")
+
+
+def toggle_openwebui_model(url: str, model_id: str, show: bool,
+                           all_model_ids: list[str]) -> tuple[bool, str]:
+    """Show/hide ONE model on ONE OpenWebUI connection.
+
+    The wrinkle: model_ids == [] means "offer everything", not "offer nothing". So hiding a
+    model on a connection that is currently unfiltered cannot just remove an entry — there
+    are no entries. It has to materialise the full model list minus that one, which converts
+    the connection from implicit-all to an explicit whitelist.
+
+    That has a lasting consequence worth surfacing to the caller: once explicit, models
+    downloaded later will NOT appear on that connection until they're added. Returns a
+    message saying so, so the UI can warn rather than silently changing future behaviour.
+    """
+    cur = openwebui_state()
+    if not cur.get("found"):
+        return False, cur.get("reason") or "open-webui not found"
+    conn = next((c for c in cur.get("connections", []) if c["url"] == url), None)
+    if conn is None:
+        return False, f"connection not found: {url}"
+
+    existing = list(conn.get("model_ids") or [])
+    was_implicit_all = not existing
+    if show:
+        if was_implicit_all:
+            return True, f"{model_id} already visible on {conn['host']} (offering all models)"
+        if model_id in existing:
+            return True, f"{model_id} already visible on {conn['host']}"
+        new_ids = existing + [model_id]
+    else:
+        if was_implicit_all:
+            # Convert implicit-all into an explicit list so one model can be excluded.
+            new_ids = [m for m in all_model_ids if m != model_id]
+        else:
+            new_ids = [m for m in existing if m != model_id]
+            if not new_ids:
+                # An empty list would silently mean "all models" — the opposite of hiding
+                # the last one. Refuse rather than do the reverse of what was asked.
+                return False, (f"cannot hide the last model on {conn['host']}: an empty list "
+                               "means 'offer everything' in OpenWebUI. Disable the connection "
+                               "instead if you want it to serve nothing.")
+
+    ok, msg = set_openwebui_model_filter(url, new_ids)
+    if ok and was_implicit_all and not show:
+        msg += (f" — {conn['host']} now uses an explicit list, so models added later "
+                "will not appear there until you enable them")
+    return ok, msg
+
+
+def sync_openwebui_endpoints() -> tuple[bool, str]:
+    """Reconcile OpenWebUI's PERSISTED config (webui.db → openai.api_base_urls) with reality:
+      1. Prune URLs whose target container/service no longer exists on the docker socket
+      2. Add discovered llama backends that aren't in the list yet
+    Preserves existing per-connection prefixes/tags for endpoints that stay.
+    Then restarts open-webui so PersistentConfig re-hydrates from the updated DB.
+    """
+    import json as _json
+    client = _docker_client()
+    if client is None:
+        return False, "docker unreachable"
+    ow = _find_open_webui(client)
+    if ow is None:
+        return False, "open-webui not found"
+
+    # Build the set of hostnames that are valid targets (container names + compose service names)
+    valid_hosts: set[str] = set()
+    try:
+        for c in client.containers.list(all=True):
+            if c.name:
+                valid_hosts.add(c.name)
+            svc = c.labels.get("com.docker.compose.service") if c.labels else None
+            if svc:
+                valid_hosts.add(svc)
+    except DockerException:
+        pass
+
     state = openwebui_state()
     missing = state.get("missing_backends") or []
-    if not missing:
-        return True, "already in sync — no missing backends"
 
-    # additions is a JSON-safe list; passed as env var to the exec'd python script for clean escaping
     additions = [{"name": m["name"]} for m in missing]
 
     script = r"""
 import sqlite3, json, os, time
+from urllib.parse import urlparse
 now = int(time.time())
 c = sqlite3.connect('/app/backend/data/webui.db')
 
@@ -637,18 +1298,36 @@ def _set(k, v):
 urls = _get('openai.api_base_urls', [])
 keys = _get('openai.api_keys', [])
 cfgs = _get('openai.api_configs', {})
+valid_hosts = set(json.loads(os.environ.get('VALID_HOSTS', '[]')))
 
+# ---- 1) Prune stale entries whose host isn't a live container / service ----
+kept_urls, kept_keys, kept_cfgs = [], [], {}
+removed = 0
+for old_idx, u in enumerate(urls):
+    host = urlparse(u).hostname or ''
+    # Keep non-llama hosts (e.g. openrouter, real openai) — only prune if it LOOKS like a compose-local
+    # llama host (unqualified, no dots, was in the DB but no matching container exists any more).
+    looks_local = host and '.' not in host and ':' not in host
+    if looks_local and valid_hosts and host not in valid_hosts:
+        removed += 1
+        continue
+    new_idx = str(len(kept_urls))
+    kept_urls.append(u)
+    kept_keys.append(keys[old_idx] if old_idx < len(keys) else 'dummy')
+    if str(old_idx) in cfgs:
+        kept_cfgs[new_idx] = cfgs[str(old_idx)]
+
+# ---- 2) Add missing entries ----
 added = 0
 for a in json.loads(os.environ.get('ADDITIONS', '[]')):
     url = 'http://' + a['name'] + ':8080/v1'
-    if url in urls:
+    if url in kept_urls:
         continue
-    urls.append(url)
-    keys.append('dummy')
-    idx = str(len(urls) - 1)
-    # short readable prefix from container name (strip 'llama-', uppercase, cap 12 chars)
+    kept_urls.append(url)
+    kept_keys.append('dummy')
+    idx = str(len(kept_urls) - 1)
     pref = a['name'].replace('llama-', '').replace('_', '-').upper()[:12]
-    cfgs[idx] = {
+    kept_cfgs[idx] = {
         'enable': True,
         'tags': [],
         'prefix_id': pref,
@@ -659,20 +1338,22 @@ for a in json.loads(os.environ.get('ADDITIONS', '[]')):
     }
     added += 1
 
-_set('openai.api_base_urls', urls)
-_set('openai.api_keys', keys)
-_set('openai.api_configs', cfgs)
-# Ensure the OpenAI provider is enabled
+_set('openai.api_base_urls', kept_urls)
+_set('openai.api_keys', kept_keys)
+_set('openai.api_configs', kept_cfgs)
 _set('openai.enable', True)
 
 c.commit()
-print('added=' + str(added))
+print('added=' + str(added) + ' removed=' + str(removed))
 """
 
     try:
         r = ow.exec_run(
             ["python3", "-c", script],
-            environment={"ADDITIONS": _json.dumps(additions)},
+            environment={
+                "ADDITIONS": _json.dumps(additions),
+                "VALID_HOSTS": _json.dumps(sorted(valid_hosts)),
+            },
         )
     except (DockerException, APIError) as e:
         return False, f"exec into open-webui failed: {e}"
@@ -687,7 +1368,9 @@ print('added=' + str(added))
     except (DockerException, APIError) as e:
         return False, f"DB updated but restart failed: {e}. Restart open-webui manually."
 
-    return True, f"added {len(missing)} backend(s) to OpenWebUI DB and restarted ({out})"
+    if additions or "removed=0" not in out:
+        return True, f"reconciled OpenWebUI ({out}) and restarted"
+    return True, f"already in sync — no changes needed ({out})"
 
 
 def container_logs(name: str, tail: int = 200) -> tuple[bool, str]:
@@ -705,3 +1388,160 @@ def container_logs(name: str, tail: int = 200) -> tuple[bool, str]:
     except DockerException as e:
         return False, f"log fetch failed: {e}"
     return True, raw.decode("utf-8", errors="replace")
+
+
+def openwebui_capability_state() -> dict[str, "bool | None"]:
+    """{prefixed model id -> vision as OpenWebUI currently has it}. None = no record.
+
+    Read side of the capability sync, so the UI can show whether OpenWebUI agrees with
+    models.ini for a given model rather than offering a blind "align" that gives no
+    indication whether anything was actually wrong. Skips workspace models (those with a
+    base_model_id): their capabilities belong to the user, not to us.
+    """
+    import json as _json
+    client = _docker_client()
+    if client is None:
+        return {}
+    ow = _find_open_webui(client)
+    if ow is None:
+        return {}
+    script = """
+import sqlite3, json
+c = sqlite3.connect('/app/backend/data/webui.db')
+out = {}
+for i, b, m in c.execute('SELECT id, base_model_id, meta FROM model'):
+    if b:
+        continue
+    try:
+        d = json.loads(m) if m else {}
+    except Exception:
+        d = {}
+    out[i] = (d.get('capabilities') or {}).get('vision')
+print(json.dumps(out))
+"""
+    try:
+        r = ow.exec_run(["python3", "-c", script])
+        if r.exit_code != 0:
+            return {}
+        return _json.loads((r.output or b"{}").decode(errors="replace").strip() or "{}")
+    except (DockerException, APIError, ValueError):
+        return {}
+
+
+def align_openwebui_capability_for(section: str) -> tuple[bool, str]:
+    """Align capabilities for ONE models.ini section, across every connection serving it.
+
+    Same authoritative replace as the bulk align, scoped to a single model. Stale-record
+    cleanup is deliberately NOT done here: a stale record has no section to hang a per-model
+    control off, so removing those belongs to the sweep instead.
+    """
+    import json as _json
+    full = openwebui_capability_plan()
+    # endswith("." + section), not rsplit: section names contain dots of their own
+    # (Qwen3.8-27B-Q4_K_M), so splitting on the last dot matches the wrong thing.
+    plan = {mid: v for mid, v in full.items()
+            if mid == section or mid.endswith("." + section)}
+    if not plan:
+        return False, f"{section}: not offered by any OpenWebUI connection"
+    client = _docker_client()
+    if client is None:
+        return False, "docker unreachable"
+    ow = _find_open_webui(client)
+    if ow is None:
+        return False, "open-webui not found"
+
+    script = """
+import sqlite3, json, os, time
+c = sqlite3.connect('/app/backend/data/webui.db')
+now = int(time.time())
+plan = json.loads(os.environ['PLAN'])
+row = c.execute('SELECT id FROM user WHERE role=? ORDER BY created_at LIMIT 1', ('admin',)).fetchone()
+if row is None:
+    row = c.execute('SELECT id FROM user ORDER BY created_at LIMIT 1').fetchone()
+if row is None:
+    print('NOUSER'); raise SystemExit(0)
+uid = row[0]
+n = 0
+for mid, vision in plan.items():
+    cur = c.execute('SELECT meta, base_model_id FROM model WHERE id=?', (mid,)).fetchone()
+    if cur is not None and cur[1]:
+        continue
+    meta = {}
+    if cur is not None:
+        try:
+            meta = json.loads(cur[0]) if cur[0] else {}
+        except Exception:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+    meta['capabilities'] = {'vision': bool(vision)}
+    if cur is None:
+        name = mid.split('.', 1)[1] if '.' in mid else mid
+        c.execute('INSERT INTO model(id, user_id, base_model_id, name, params, meta, updated_at, created_at, is_active)'
+                  ' VALUES(?,?,?,?,?,?,?,?,1)', (mid, uid, None, name, '{}', json.dumps(meta), now, now))
+    else:
+        c.execute('UPDATE model SET meta=?, updated_at=? WHERE id=?', (json.dumps(meta), now, mid))
+    n += 1
+c.commit()
+print('OK %d' % n)
+"""
+    try:
+        r = ow.exec_run(["python3", "-c", script], environment={"PLAN": _json.dumps(plan)})
+    except (DockerException, APIError) as e:
+        return False, f"exec into open-webui failed: {e}"
+    out = (r.output or b"").decode(errors="replace").strip()
+    if r.exit_code != 0 or not out.startswith("OK"):
+        return False, f"align failed: {out[:200]}"
+    vis = any(plan.values())
+    return True, f"{section}: vision = {str(vis).lower()} on {', '.join(sorted(plan))}"
+
+
+_PROJ_MODALITY_CACHE: dict[tuple, frozenset] = {}
+
+
+def projector_modalities(mmproj_rel_or_abs: str) -> frozenset:
+    """What a projector actually encodes: {'vision'}, {'audio'}, or both. Empty if unreadable.
+
+    llama.cpp uses the same `--mmproj` slot for BOTH image and audio encoders (Qwen2-Audio,
+    Ultravox and friends ship an audio projector). So the presence of an mmproj says the model
+    is multimodal, not that it takes pictures. Deriving OpenWebUI's `vision` flag from the
+    mere existence of a projector would offer image upload on an audio-only model -- the same
+    class of wrong as offering it on a text-only one.
+
+    The projector declares itself: a vision encoder carries clip.vision.* keys, an audio
+    encoder clip.audio.*. Cached on (path, size, mtime) since this reads a file header.
+    """
+    from pathlib import Path as _Path
+    raw_path = (mmproj_rel_or_abs or "").strip()
+    if not raw_path:
+        return frozenset()
+    rel = raw_path.replace("/models/", "", 1).lstrip("/")
+    p = settings.models_dir / rel
+    try:
+        st = p.stat()
+    except OSError:
+        return frozenset()
+    key = (str(p), st.st_size, int(st.st_mtime))
+    hit = _PROJ_MODALITY_CACHE.get(key)
+    if hit is not None:
+        return hit
+    mods: set[str] = set()
+    try:
+        from . import gguf_meta
+        kv = gguf_meta.read_raw(p)
+        if isinstance(kv, dict) and "kv" in kv and isinstance(kv["kv"], dict):
+            kv = kv["kv"]
+        if isinstance(kv, dict):
+            for k, v in kv.items():
+                lk = str(k).lower()
+                if lk.startswith("clip.vision.") or lk == "clip.has_vision_encoder" and v:
+                    mods.add("vision")
+                elif lk.startswith("clip.audio.") or lk == "clip.has_audio_encoder" and v:
+                    mods.add("audio")
+    except Exception:  # noqa: BLE001 -- a projector we cannot parse must not break the page
+        return frozenset()
+    out = frozenset(mods)
+    if len(_PROJ_MODALITY_CACHE) > 32:
+        _PROJ_MODALITY_CACHE.clear()
+    _PROJ_MODALITY_CACHE[key] = out
+    return out

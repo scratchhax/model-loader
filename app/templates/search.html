@@ -26,7 +26,15 @@
   </span>
 </form>
 
-<div id="results" class="mt-6">
-  {% if results is defined %}{% include "_search_results.html" %}{% endif %}
+<div id="results" class="mt-6"
+     hx-get="/search/results?sort=trendingScore&limit=10"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
+    <span class="inline-flex items-center gap-2">
+      <span class="skeleton inline-block w-3 h-3 rounded-full"></span>
+      loading trending gguf models on Hugging Face…
+    </span>
+  </div>
 </div>
 {% endblock %}

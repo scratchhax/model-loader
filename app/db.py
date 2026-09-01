@@ -106,6 +106,33 @@ def owner_by_filename() -> dict[str, str]:
     return {r["filename"]: (r["repo_id"].split("/", 1)[0] if "/" in r["repo_id"] else r["repo_id"]) for r in rows}
 
 
+def downloaded_repo_ids() -> set[str]:
+    """Set of HF repo ids ('owner/name') that have at least one successfully-downloaded file."""
+    with _LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT DISTINCT repo_id FROM download_history WHERE status = 'done'"
+        ).fetchall()
+    return {r["repo_id"] for r in rows if r["repo_id"]}
+
+
+def downloaded_files_by_repo() -> dict[str, list[str]]:
+    """{repo_id: [filename, ...]} of successfully-downloaded files, one entry per repo."""
+    with _LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT repo_id, filename FROM download_history WHERE status = 'done' ORDER BY id DESC"
+        ).fetchall()
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        rid = r["repo_id"]
+        if not rid:
+            continue
+        # Preserve insertion order for stable display; skip duplicate filenames per repo.
+        lst = out.setdefault(rid, [])
+        if r["filename"] not in lst:
+            lst.append(r["filename"])
+    return out
+
+
 def get_avatar(owner: str) -> dict | None:
     with _LOCK, _conn() as c:
         r = c.execute("SELECT url, fetched_at FROM avatar_cache WHERE owner = ?", (owner,)).fetchone()

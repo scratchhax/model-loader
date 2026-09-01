@@ -5,16 +5,35 @@
 {% elif not results %}
 <p class="text-sm text-slate-500 dark:text-slate-400">No matches. Try a broader query.</p>
 {% else %}
+{% if browse_mode %}
+<div class="mb-3 flex items-baseline justify-between">
+  <h2 class="text-sm font-semibold inline-flex items-center gap-1.5 text-slate-700 dark:text-slate-200">
+    {{ icon('flame', 14, 'text-orange-500') }}
+    {% if browse_sort == 'trendingScore' %}Trending on Hugging Face{% elif browse_sort == 'downloads' %}Most downloaded on Hugging Face{% elif browse_sort == 'likes' %}Most liked on Hugging Face{% elif browse_sort == 'lastModified' %}Recently updated on Hugging Face{% else %}Top on Hugging Face{% endif %}
+    <span class="text-xs font-normal text-slate-500 dark:text-slate-400">· GGUF only</span>
+  </h2>
+  <span class="text-xs text-slate-500 dark:text-slate-400">type above to search anything</span>
+</div>
+{% endif %}
 <ul class="space-y-3">
   {% for m in results %}
-  <li x-data="{ expanded: false }" class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+  {% set have_files = (downloaded_by_repo or {}).get(m.id) or [] %}
+  <li x-data="{ expanded: false }" class="rounded-xl border {% if have_files %}border-emerald-300 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/10{% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900{% endif %}">
     <div class="flex items-start justify-between gap-4 p-4">
       <div class="min-w-0 flex items-start gap-3">
         {% set owner = m.id.split('/', 1)[0] %}
         {{ avatar(owner, avatars.get(owner, ''), size=28) }}
         <div class="min-w-0">
-        <a href="https://huggingface.co/{{ m.id }}" target="_blank" rel="noopener"
-           class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline">{{ m.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+        <div class="flex items-center gap-2 flex-wrap">
+          <a href="https://huggingface.co/{{ m.id }}" target="_blank" rel="noopener"
+             class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline">{{ m.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+          {% if have_files %}
+            <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                  title="You've already downloaded {{ have_files | length }} file(s) from this repo: {{ have_files | join(', ') }}">
+              {{ icon('check', 10) }} downloaded ({{ have_files | length }})
+            </span>
+          {% endif %}
+        </div>
         <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
           <span class="inline-flex items-center gap-1">{{ icon('download', 11) }} {{ '{:,}'.format(m.downloads) }}</span>
           <span class="inline-flex items-center gap-1">★ {{ '{:,}'.format(m.likes) }}</span>
