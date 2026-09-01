@@ -48,7 +48,41 @@ The picker fell all the way to the smallest candidate, meaning the model + fp16 
 
 1. Use a smaller quant of the same model (Q4_K_M instead of Q6_K).
 2. Add a second GPU and use `-sm layer`.
-3. Fall back to CPU offload with `n-gpu-layers` less than full — autoconfig will do this if your backend is CPU-only, but if you want partial offload on GPU, edit the ini manually.
+3. Accept partial offload. Autoconfig does this for you now: dense models move whole layers off the GPU via `ngl`, MoE models offload expert weights via `n-cpu-moe`. The presets show the speed cost of each point.
+
+## A setting saves but has no effect
+
+Check your llama.cpp container's `command:` in docker-compose. **Anything on the command line overrides the preset file, silently.** A stray `--ctx-size`, `-np` or `--n-gpu-layers` in compose beats whatever Model Loader writes into `models.ini`, and nothing surfaces the conflict — you just get behaviour that doesn't match the config.
+
+Keep `command:` to `--models-preset`, `--host`, `--port` and `--models-max`. Everything per-model belongs in the ini.
+
+## Multi-GPU OOM even though pooled VRAM looks fine
+
+llama.cpp places each layer on exactly one card, so a config can fit the pool and still blow a single device. This bites hardest on MoE models with expert offload: layers below `n-cpu-moe` keep only attention on the GPU while the rest carry full experts, and `split-mode = layer` divides by layer *count*, so one card gets nearly all the expensive layers.
+
+Autoconfig now emits a byte-balanced `tensor-split` and checks each card individually. If you hand-edited the section, either re-run Autoconfig or set `tensor-split` yourself. The symptom is distinctive: the log shows a failed allocation on one device while `nvidia-smi` shows the other with gigabytes free.
+
+## A model shows in OpenWebUI but fails with "model not found"
+
+OpenWebUI renders its model whitelist rather than intersecting it with what the backend actually serves, so an id left behind by a deleted or renamed model keeps appearing in the picker.
+
+Containers page → the connection shows a **dead model id** warning → click to remove. Rename and delete do this automatically; the warning is for ids that drifted some other way.
+
+## "image input is not supported" when uploading a picture
+
+Either the model has no `mmproj` (check its ini section), or you selected a different model than you meant to — similarly-named text-only and multimodal variants are easy to confuse.
+
+Containers page → **Align capabilities** writes each model's vision flag into OpenWebUI from its ini section, so the upload control only appears where it can work. Models page shows the same per model.
+
+## Autoconfig says "doesn't fit at any context" on a Vulkan backend
+
+The Vulkan image ships neither `nvidia-smi` nor `rocm-smi`, so VRAM can't be probed and the budget computes as zero. Declare it: `GPU_VRAM=<container>:<GB>` on the model-loader service, then restart it.
+
+Current versions say this explicitly rather than reporting a fit failure. If you see the fit-failure wording instead, you're on an older build.
+
+## Renamed a model and now the section says "No GGUF found"
+
+Fixed in current versions — sections resolve to their file via the `model =` path rather than by matching the section name to a filename. If you hit this, you're on an older build; setting `model =` explicitly in the section is the workaround.
 
 ## `docker exec model-loader python3 -m app.migrate_layout` fails
 

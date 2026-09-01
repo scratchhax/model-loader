@@ -22,7 +22,7 @@ app/
   hw.py               Background sampler thread, per-container stats cache.
   hf.py               HF Hub API client (search, tree, avatar cache).
   gguf_meta.py        Hand-rolled GGUF v3 metadata reader (no numpy).
-  ini.py              models.ini schema (97 fields, 10 tiers) + parser + writer.
+  ini.py              models.ini schema (98 fields, 10 tiers) + parser + writer.
   downloader.py       Parallel-range download engine with sqlite-backed job history.
   db.py               Sqlite prefs (schema in module docstring).
   migrate_layout.py   One-shot: flat GGUF layout -> per-model-subdir + absolute paths.
@@ -67,6 +67,12 @@ app/
 4. Restarts `open-webui` container to force it to re-read the config.
 
 Why direct DB write? OpenWebUI uses `PersistentConfig` — env vars are only seed values on a virgin DB, subsequent reads come from `webui.db`. Editing compose env vars post-first-boot changes nothing.
+
+The same `docker exec` channel drives three more OpenWebUI features:
+
+- **Per-connection model whitelists** (`openai.api_configs[i].model_ids`), so a CPU backend can offer only the models it can actually run.
+- **Dead-id detection.** OpenWebUI *renders* that whitelist rather than intersecting it with what the backend reports, so an id left behind by a deleted or renamed model still appears in the picker and fails with "model not found" only when someone selects it. Model Loader flags those and prunes them automatically after a rename or delete.
+- **Vision capability** (`model.meta.capabilities.vision`). Unlike the config table, `model` is ordinary application data read per request, so this needs no restart. The flag is derived from the projector's own metadata rather than the mere presence of an `mmproj`, because llama.cpp uses that same slot for audio encoders.
 
 ## Design choices worth calling out
 
