@@ -110,7 +110,11 @@ A minimal, working service:
 
 `--models-max 1` keeps one model resident at a time, which is usually what you want on a single box — llama-server swaps on demand. Raise it if you have VRAM to hold several.
 
-If you don't have a compose file yet, the **Containers** page has ready-made service blocks for CUDA, ROCm and CPU that you can copy after installing.
+If you don't have a compose file yet, the **Containers** page has ready-made service blocks for CUDA, ROCm, Vulkan and CPU that you can copy after installing.
+
+![The Add another backend panel: tabs for NVIDIA CUDA, AMD ROCm, CPU only and Vulkan, each with a copyable compose service block, above a warning that inference flags on the container command line override models.ini](docs/add_a_backend.png)
+
+The panel repeats the warning above, because it is the mistake that costs the most time: flags like `-ngl`, `-fa`, `-ctk`, `-np` and `-sm` on the container command line **override** `models.ini` rather than acting as defaults, and a preset that disagrees is silently discarded. Keep the command to `--models-preset`, `--host`, `--port` and `--models-max`, and set everything per-model in the config form.
 
 ## Install
 
