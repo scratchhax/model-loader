@@ -30,3 +30,7 @@ model_loader_data/
 docker-compose.override.yaml
 docker-compose.override.yml
 .env.local
+
+# Backup archives — may contain your compose file, which usually holds secrets
+backups/
+*.tgz

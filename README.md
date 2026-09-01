@@ -110,28 +110,17 @@ See `docs/AUTOCONFIG.md` for the math and the empirical calibration.
 
 ## Backups
 
-Everything you care about is small and lives in three places:
+Model Loader's own state is two files, both small:
 
-1. **This git repo** — source code.
-2. **`./model_loader_data/model_loader.db`** on host — HF token, saved prompts, download history, avatar cache.
-3. **`./models/models.ini`** — llama-server preset file (has 10 rolling backups automatically in `./models/models.ini.bak-*`).
+1. **`./model_loader_data/model_loader.db`** — HF token, saved prompts, download history, avatar cache.
+2. **`./models/models.ini`** — the llama-server preset file. Model Loader already keeps 10 rolling copies beside it as `models.ini.bak-*` on every write.
 
-`backup.sh` tars all three plus your OpenWebUI sqlite (if present) into `./backups/<timestamp>.tgz` and rotates to the newest 20. Run from cron:
+Back those up however you back up anything else. Two things worth knowing if you roll your own:
 
-```cron
-15 3 * * * cd /home/you/ai-lab && bash model_loader/backup.sh >> /var/log/model-loader-backup.log 2>&1
-```
+- **Copy the sqlite file with the online backup API, not `cp`.** A plain copy of a live database can capture a torn page, and copying `foo.db` without its `foo.db-wal` silently loses every transaction still in the log. `python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d)" src.db dest.db` does it correctly, with no need to stop the container.
+- **The GGUFs are excluded on purpose.** They are large and re-downloadable; back them up with rsync/borg/restic if you want, but they are not state.
 
-The GGUFs themselves are big and excluded — back those up with your normal rsync/borg/restic strategy.
-
-## Restore
-
-```bash
-tar xzf model-loader-state-YYYYMMDD-HHMMSS.tgz -C /tmp/restore/
-cp /tmp/restore/model_loader.db ./model_loader_data/
-cp /tmp/restore/models_ini/models.ini ./models/
-docker compose restart model-loader
-```
+Restoring is just putting those two files back and running `docker compose restart model-loader`.
 
 ## Documentation
 
