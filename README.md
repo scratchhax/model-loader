@@ -24,11 +24,52 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 
 ## Requirements
 
-- Linux host (tested on Ubuntu/Debian, should work anywhere Docker runs)
-- Docker Engine + Compose plugin (v2)
-- An existing `docker-compose.yaml` for your llama.cpp containers (or use the templates on the Containers page after install)
-- A shared `./models` directory that's bind-mounted into your llama containers
-- NVIDIA GPU with `nvidia-container-toolkit`, or AMD with ROCm passthrough, or CPU-only (all work — Model Loader auto-detects vendor per-container)
+**Model Loader manages an existing llama.cpp setup — it does not install or replace one.** If you have no llama.cpp container running, there is nothing for it to discover and the dashboard will be empty. Set that up first.
+
+- **Linux host** (tested on Ubuntu/Debian, should work anywhere Docker runs)
+- **Docker Engine + Compose plugin (v2)**
+- **At least one running llama.cpp server container**, see below
+- **A shared models directory** bind-mounted into both llama.cpp and Model Loader
+- **NVIDIA GPU** with `nvidia-container-toolkit`, **AMD** with ROCm passthrough, or **CPU-only** — all work; vendor is auto-detected per container
+
+### The llama.cpp container
+
+Model Loader auto-discovers any container whose image matches `ghcr.io/ggml-org/llama.cpp:*`. For anything else — a self-built image, a fork — list it explicitly with the `LLAMA_CONTAINERS` env var.
+
+Two things have to line up or Model Loader can see the container but not steer it:
+
+1. **llama-server must be started with `--models-preset`**, pointing at the `models.ini` that Model Loader edits. Without it, llama-server never reads the file and your saved settings do nothing.
+2. **The models directory must be mounted at the same path in both containers.** Model Loader writes `model = /models/...` paths into the ini; llama-server has to resolve them identically.
+
+A minimal, working service:
+
+```yaml
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./models:/models          # same path Model Loader uses
+    command: >
+      --models-preset /models/models.ini
+      --host 0.0.0.0 --port 8080
+      --models-max 1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+> **Keep model settings out of `command:`.** Anything you pass on the command line **overrides** the preset file, silently. A stray `--ctx-size` or `-np` in your compose beats whatever Model Loader writes into `models.ini`, and the symptom is a setting that appears saved but has no effect. Restrict `command:` to `--models-preset`, `--host`, `--port` and `--models-max`; everything per-model belongs in the ini.
+
+`--models-max 1` keeps one model resident at a time, which is usually what you want on a single box — llama-server swaps on demand. Raise it if you have VRAM to hold several.
+
+If you don't have a compose file yet, the **Containers** page has ready-made service blocks for CUDA, ROCm and CPU that you can copy after installing.
 
 ## Install
 
