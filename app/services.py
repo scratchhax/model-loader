@@ -543,12 +543,17 @@ def _fit_backends() -> dict[str, float]:
     return out
 
 
-# Above this, a CPU-resident model is technically loadable and practically unusable.
-# Calibrated on measured tok/s for dense models on a dual-channel DDR5 box: a 6.6 GB dense
-# model managed 4.4 tok/s, which implies roughly 29 GB/s of effective read bandwidth, so a
-# 30 GB dense model lands near 1 tok/s. MoE models do far better at the same size because
-# only active experts are read, but size alone cannot tell them apart — the ctx estimates,
-# which have the GGUF metadata, make that distinction.
+# Above this, a CPU-resident DENSE model is technically loadable and practically unusable.
+# Calibrated on measured tok/s on a dual-channel DDR5 box: a 6.6 GB dense model managed
+# 4.4 tok/s, implying roughly 29 GB/s of effective read bandwidth, so 30 GB of dense weights
+# lands near 1 tok/s.
+#
+# KNOWN LIMITATION: this is size-based, and size is the wrong axis for MoE. A mixture-of-
+# experts model reads only its active experts per token, so a 30 GB MoE can be several times
+# faster than a 30 GB dense one — measured here, a 15.8 GB MoE beat a 6.6 GB dense by 2x.
+# Telling them apart needs expert_count/expert_used_count from the GGUF header, which the
+# chips do not have (they receive a file size and nothing else). The tooltip says so rather
+# than pretending the number applies to both.
 _CPU_CRAWL_GB = 30.0
 
 
