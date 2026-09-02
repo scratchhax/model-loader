@@ -271,6 +271,103 @@ class PresetOption:
     ngl: int = -1           # dense offload only: value to write as `ngl`. -1 = leave at 999 (all)
 
 
+@dataclass(frozen=True)
+class SpecProfile:
+    """A workload-shaped preset for speculative decoding.
+
+    Speculative decoding is a bet, not a free win: a cheap drafter proposes N tokens, the main
+    model verifies all N in a single forward pass, and everything from the first mismatch
+    onward is discarded. Whether the bet pays depends on how PREDICTABLE the text is — which
+    is a property of the workload, not of the model. The same weights drafting Python and
+    drafting prose accept at wildly different rates (measured here: 31% to 100% on one model),
+    so the knobs are grouped by what you intend to do with it rather than left as eleven
+    independent numbers nobody can reason about in isolation.
+
+    Two levers do the real work:
+      n-max  how deep to guess. Multiplies the win on predictable text and the waste on
+             unpredictable text. llama.cpp defaults to 3.
+      p-min  how confident the drafter must be before it bothers. Raising it declines the
+             marginal bets, which is what you want when acceptance is poor.
+
+    These are reasoned starting points, not measured optima — llama-server prints the real
+    acceptance rate per request and that is the number to tune against.
+    """
+    key: str
+    label: str
+    icon: str
+    blurb: str                  # one line under the chip
+    spec_type: str              # "" = speculation off
+    needs_head: bool            # requires a draft/MTP model to sit beside the weights
+    knobs: dict[str, str] = field(default_factory=dict)
+
+
+# The knobs each profile sets. Anything not listed is deliberately left unset so llama-server
+# applies its own default; writing out a value identical to the default only creates noise in
+# the diff and a second place to keep in sync when upstream changes it.
+SPEC_PROFILES: tuple[SpecProfile, ...] = (
+    SpecProfile(
+        key="off", label="Off", icon="x",
+        blurb="No speculation. Always correct, never slower than the model itself.",
+        spec_type="", needs_head=False),
+    SpecProfile(
+        key="balanced", label="Balanced", icon="gauge",
+        blurb="Mixed use. Barely above llama.cpp's own defaults, with a mild confidence gate.",
+        spec_type="draft-mtp", needs_head=True,
+        knobs={"spec-draft-n-max": "4", "spec-draft-p-min": "0.25"}),
+    SpecProfile(
+        key="coding", label="Coding", icon="terminal",
+        blurb="Deep drafts, loose gate. Code repeats itself, so guesses land and guessing further pays.",
+        spec_type="draft-mtp,ngram-simple", needs_head=True,
+        knobs={"spec-draft-n-max": "8", "spec-draft-n-min": "1", "spec-draft-p-min": "0.05"}),
+    SpecProfile(
+        key="writing", label="Creative writing", icon="pencil",
+        blurb="Shallow drafts, tight gate. Prose is unpredictable, so bad bets cost more than good ones pay.",
+        spec_type="draft-mtp", needs_head=True,
+        knobs={"spec-draft-n-max": "2", "spec-draft-p-min": "0.60"}),
+    SpecProfile(
+        key="ngram", label="N-gram only", icon="hash",
+        blurb="No draft head required. Replays literal repeats from the prompt: strong on edits and refactors, inert on new prose.",
+        spec_type="ngram-simple", needs_head=False),
+)
+
+# n-gram strategies read their draft length from --spec-ngram-*-size-m, not --spec-draft-n-max
+# (upstream's removal note for --draft-max spells the split out). Setting the draft-model knobs
+# for a head-free profile would write keys llama-server ignores.
+SPEC_PROFILE_BY_KEY: dict[str, SpecProfile] = {p.key: p for p in SPEC_PROFILES}
+
+# Keys a profile owns. Switching profiles must clear whatever the previous one set, or a move
+# from Coding to Writing would silently keep n-min = 1 from the profile that was abandoned.
+SPEC_PROFILE_KEYS: tuple[str, ...] = (
+    "spec-draft-n-max", "spec-draft-n-min", "spec-draft-p-min",
+)
+
+
+def match_spec_profile(section: dict[str, str] | None) -> str:
+    """Which profile an existing section corresponds to: a key, "custom", or "".
+
+    Returns "" for a section that does not exist yet (no opinion — the caller picks a default).
+    A saved section with no spec-type is "off": that is a deliberate opt-out, and re-proposing
+    speculation would make turning it off impossible to make stick.
+    """
+    if section is None:
+        return ""
+    stype = (section.get("spec-type") or "").strip()
+    if not stype or stype == "none":
+        return "off"
+    for prof in SPEC_PROFILES:
+        if prof.spec_type != stype:
+            continue
+        if all((section.get(k) or "").strip() == v for k, v in prof.knobs.items()):
+            # Any knob the profile does not set must also be absent, or a hand-tuned section
+            # that merely happens to share a spec-type would be mislabelled as this profile
+            # and get its edits overwritten on the next Fill.
+            extra = [k for k in SPEC_PROFILE_KEYS
+                     if k not in prof.knobs and (section.get(k) or "").strip()]
+            if not extra:
+                return prof.key
+    return "custom"
+
+
 @dataclass
 class Recommendation:
     plans: list[BackendPlan]
@@ -300,6 +397,12 @@ class Recommendation:
     current_preset: str = ""
     has_unsaved: bool = False
     active_preset: str = ""                                     # which preset the current values reflect
+    # Speculative decoding, which is orthogonal to the offload presets above: the preset picks
+    # where the weights live, this picks how aggressively the draft head guesses ahead.
+    spec_profiles: list[SpecProfile] = field(default_factory=list)   # empty = not offerable
+    active_spec_profile: str = ""                               # previewed profile ("custom" if hand-tuned)
+    current_spec_profile: str = ""                              # what the SAVED section has
+    spec_head_rel: str = ""                                     # matched draft head, "" if none
     error: str = ""
 
 
@@ -940,6 +1043,7 @@ def analyze(*,
             models_dir: "Path | None" = None,
             section_name: str = "",
             model_subdir: str = "",
+            spec_profile: str = "",
             mmproj_gb_override: float | None = None) -> Recommendation:
     # Clamp n_sessions to a sensible range for a homelab. Above 8 the per-slot ctx
     # shrinks below usability for real chat, and llama-server continuous batching
@@ -1330,43 +1434,64 @@ def analyze(*,
             if mmproj_rel:  # already resolved above, when sizing the VRAM reservation
                 values["mmproj"] = mmproj_rel
 
-    # Speculative decoding via a matched MTP head.
+    # Speculative decoding, driven by the selected workload profile (see SpecProfile).
     #
-    # Set only when a head ships beside the model. A head is trained against a specific base,
-    # so this is never a generic "make it faster" switch — that is what the earlier attempt at
-    # this got wrong, pairing an unrelated small model as a draft and segfaulting llama-server.
-    # spec-type is draft-mtp rather than draft-simple: these heads are a distinct architecture
-    # (gemma4-assistant here, four layers against the base model's forty-two) and llama.cpp
-    # drives them down a different path.
+    # A draft head is only ever the one that shipped beside these weights. Heads are trained
+    # against a specific base, so this is never a generic "make it faster" switch — that is
+    # what the earlier attempt got wrong, pairing an unrelated small model as a draft and
+    # segfaulting llama-server. draft-mtp rather than draft-simple because these heads are a
+    # distinct architecture (gemma4-assistant here: four layers against the base model's
+    # forty-two) that llama.cpp drives down a different path. The ngram-* profiles need no
+    # head at all — they replay literal repeats out of the prompt — which is why speculation
+    # is offered even for models that never shipped one.
     #
     # PROPOSED, not applied. Like everything else here this only pre-fills the form; nothing
-    # reaches models.ini until the user saves, and clearing spec-type before saving turns it
-    # off. That distinction matters more than usual for this setting: speculative decoding is
-    # a throughput trade, not a free win. With a poor acceptance rate it is slower than not
-    # using it at all, and it interacts with continuous batching unpredictably. Benchmark it.
-    if section_name and mtp_rel:
-        cur_spec = (current_section or {}).get("spec-draft-model", "").strip()
-        values["spec-draft-model"] = cur_spec or (mtp_rel if not current_section else "")
-        # Echo an existing choice rather than omitting it. Fill writes exactly these values,
-        # so a setting the user already has must be repeated or Fill silently clears it —
-        # the same reason mmproj is echoed above.
-        #
-        # But an EXISTING section with no spec-type means the user turned it off, and
-        # proposing draft-mtp again would make that undoable: clearing the field, saving,
-        # then re-running Autoconfig would keep switching it back on. Only a section that
-        # does not exist yet gets the suggestion.
-        _is_new_section = not current_section
-        _cur_type = (current_section or {}).get("spec-type", "").strip()
-        if _cur_type:
-            values["spec-type"] = _cur_type
-        elif _is_new_section:
-            values["spec-type"] = "draft-mtp"
-        else:
-            values["spec-type"] = ""          # respect a deliberate opt-out
-        if not (current_section or {}).get("spec-draft-ngl", "").strip():
-            # Without this the head lands on the CPU, and a draft evaluated on the CPU is
-            # slower than the main model it is meant to be racing ahead of.
-            values["spec-draft-ngl"] = "999"
+    # reaches models.ini until the user saves. That distinction matters more than usual for
+    # this setting: speculative decoding is a throughput trade, not a free win. With a poor
+    # acceptance rate it is slower than not using it at all, and it interacts with continuous
+    # batching unpredictably. Benchmark it.
+    #
+    # Which profile applies is resolved in three steps, because the panel is a preview: an
+    # explicit pick from the UI wins, otherwise the saved section is read back, otherwise a
+    # brand-new section gets a conservative default.
+    _saved_spec = match_spec_profile(current_section)
+    _spec_key = (spec_profile or "").strip()
+    if _spec_key not in SPEC_PROFILE_BY_KEY and _spec_key != "custom":
+        # No explicit pick. Fall back to what is saved; a new section gets Balanced when a
+        # head was found beside the weights and Off when there is nothing to draft with.
+        _spec_key = _saved_spec or ("balanced" if mtp_rel else "off")
+    # A profile that needs a head but has none cannot run — llama-server would start and then
+    # fail to load the draft. Fall back rather than offering a configuration that cannot work.
+    _resolved_head = (current_section or {}).get("spec-draft-model", "").strip() or mtp_rel
+    _prof = SPEC_PROFILE_BY_KEY.get(_spec_key)
+    if _prof and _prof.needs_head and not _resolved_head:
+        _prof = SPEC_PROFILE_BY_KEY["off"]
+        _spec_key = "off"
+
+    if section_name:
+        if _spec_key == "custom":
+            # Hand-tuned. Echo every spec key verbatim: Fill writes exactly `values`, so a
+            # setting that is not repeated here is silently erased on the next save.
+            for _k in ("spec-type", "spec-draft-model", "spec-draft-ngl", *SPEC_PROFILE_KEYS):
+                _v = (current_section or {}).get(_k, "").strip()
+                if _v:
+                    values[_k] = _v
+        elif _prof is not None:
+            # Every owned key is written even when empty, so switching profiles CLEARS what
+            # the previous one set. Without this, Coding -> Writing would leave n-min = 1
+            # behind and the result would match neither profile.
+            values["spec-type"] = _prof.spec_type
+            for _k in SPEC_PROFILE_KEYS:
+                values[_k] = _prof.knobs.get(_k, "")
+            if _prof.spec_type and _prof.needs_head:
+                values["spec-draft-model"] = _resolved_head
+                # Without this the head lands on the CPU, and a draft evaluated on the CPU is
+                # slower than the main model it is meant to be racing ahead of.
+                values["spec-draft-ngl"] = (current_section or {}).get("spec-draft-ngl", "").strip() or "999"
+            else:
+                # n-gram strategies have no model to place, and Off has nothing at all.
+                values["spec-draft-model"] = ""
+                values["spec-draft-ngl"] = ""
 
     rope_type = m.get("rope_scaling_type")
 
@@ -1835,6 +1960,13 @@ def analyze(*,
         current_preset=_current_preset,
         has_unsaved=bool(current_diff),
         active_preset=active_preset,
+        # Offered for any named section, not just ones with a head: the n-gram strategies
+        # need no draft model at all, which is the only speculative option most of these
+        # models have.
+        spec_profiles=list(SPEC_PROFILES) if section_name else [],
+        active_spec_profile=_spec_key if section_name else "",
+        current_spec_profile=_saved_spec,
+        spec_head_rel=_resolved_head,
     )
 
 

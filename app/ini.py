@@ -162,23 +162,32 @@ SPECULATIVE_FIELDS: tuple[Field, ...] = (
           choices=("", "none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash",
                    "draft-dspark", "ngram-simple", "ngram-map-k", "ngram-map-k4v",
                    "ngram-mod", "ngram-cache"),
-          help="Speculative decoding algorithm. draft-* needs a smaller draft model; ngram-* is model-free (looks in prompt history)."),
+          help="Strategy. draft-* runs a small model to propose tokens (draft-mtp for a head shipped with the "
+               "weights, draft-simple for a separate GGUF sharing the tokenizer). ngram-* needs no model at all "
+               "and replays literal repeats from the prompt. llama.cpp accepts a comma-separated list, so "
+               "'draft-mtp,ngram-simple' runs both. Autoconfig sets this from the workload profile."),
     Field("spec-draft-model", "Draft model path", "text", placeholder="/models/<stem>/draft.gguf",
           help="Local path to a small 'draft' GGUF used to propose tokens the main model verifies. For Qwen3 with MTP, use the model's official MTP draft head."),
     Field("spec-draft-hf", "Draft HF repo", "text", placeholder="user/repo[:quant]",
           help="Hugging Face repo to pull the draft model from (llama-server auto-downloads at startup)."),
     Field("spec-draft-ngl", "Draft GPU layers", "int", placeholder="999",
-          help="How many draft-model layers to place on GPU. Small drafts fit entirely — 999 offloads everything."),
+          help="How many draft-model layers to place on GPU; 999 offloads everything. Leave this high: a draft "
+               "evaluated on the CPU is slower than the GPU model it is supposed to be racing ahead of, which "
+               "defeats the entire mechanism."),
     Field("spec-draft-device", "Draft device list", "text",
           help="Comma-separated devices for the draft model. Often the same as main; sometimes a spare GPU."),
-    Field("spec-draft-n-max", "Draft n_max", "int", placeholder="8",
-          help="Maximum draft tokens per speculation attempt. More = higher upside if accepted, more waste if rejected. Qwen3 MTP tuned for 8."),
+    Field("spec-draft-n-max", "Draft n_max", "int", placeholder="3",
+          help="How deep to guess: max draft tokens per attempt (llama.cpp default 3). Multiplies the win on "
+               "predictable text and the waste on unpredictable text — 8 for code, 2 for prose. Draft models "
+               "only; ngram-* strategies take their length from spec-ngram-*-size-m instead."),
     Field("spec-draft-n-min", "Draft n_min", "int", placeholder="0",
-          help="Minimum draft tokens to always attempt per step."),
-    Field("spec-draft-p-min", "Draft p_min", "text", placeholder="0.75",
-          help="Minimum probability threshold for the draft to speculate; below this it defers to the main model."),
-    Field("spec-draft-p-split", "Draft p_split", "text", placeholder="float",
-          help="Probability threshold at which speculation branches (tree drafting)."),
+          help="Floor on draft length — always attempt at least this many (default 0)."),
+    Field("spec-draft-p-min", "Draft p_min", "text", placeholder="0.00",
+          help="How sure the drafter must be before it bothers (default 0.00 = always try). Raise it to decline "
+               "the marginal bets when acceptance is poor; lower it when the text is predictable enough that "
+               "even mediocre guesses land."),
+    Field("spec-draft-p-split", "Draft p_split", "text", placeholder="0.10",
+          help="Probability at which speculation branches into a draft tree rather than a single line (default 0.10)."),
     Field("spec-draft-cpu-moe", "Draft: all MoE on CPU", "bool",
           help="For MoE draft models: keep experts on CPU."),
     Field("spec-draft-n-cpu-moe", "Draft: N MoE layers on CPU", "int",

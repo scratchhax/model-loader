@@ -994,7 +994,7 @@ def _container_baseline(name: str) -> list[str]:
 
 @app.get("/config/section/{name}/autoconfig", response_class=HTMLResponse)
 async def config_autoconfig(request: Request, name: str, preset: str = "",
-                            sessions: int = 1) -> HTMLResponse:
+                            sessions: int = 1, spec: str = "") -> HTMLResponse:
     import json as _json
     sessions = max(1, min(int(sessions or 1), 8))
 
@@ -1079,6 +1079,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         models_dir=settings.models_dir,
         section_name=name,
         model_subdir=model_subdir,
+        spec_profile=spec,
     )
 
     # Prepare per-plan row map for the template + which ctx columns to show
