@@ -257,135 +257,315 @@
 
   {# ---------------------------------------------------------------- charts #}
   {% if run and charts_json %}
+  <div id="bench-stats" class="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(11rem,1fr))]"></div>
   <div id="bench-charts" data-charts='{{ charts_json }}' class="grid gap-4 md:grid-cols-2"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script>
   (function () {
     const host = document.getElementById('bench-charts');
+    const statHost = document.getElementById('bench-stats');
     if (!host || typeof Chart === 'undefined') return;
     let C;
     try { C = JSON.parse(host.dataset.charts); } catch (e) { return; }
 
-    // Read the palette off the page rather than hardcoding hex, so the charts follow the
-    // light/dark theme the rest of the app is using.
     const dark = document.documentElement.classList.contains('dark');
-    const fg = dark ? '#cbd5e1' : '#334155';
-    const grid = dark ? 'rgba(148,163,184,.18)' : 'rgba(100,116,139,.18)';
-    const palette = ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#14b8a6'];
+    const fg = dark ? '#94a3b8' : '#475569';
+    const grid = dark ? 'rgba(148,163,184,.10)' : 'rgba(100,116,139,.12)';
+    // Saturated enough to glow on a dark panel, not so loud they fight each other.
+    const P = ['#38bdf8', '#a78bfa', '#34d399', '#fbbf24', '#fb7185', '#2dd4bf'];
+    const rgba = (hex, a) => {
+      const n = parseInt(hex.slice(1), 16);
+      return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+    };
+
     Chart.defaults.color = fg;
     Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
     Chart.defaults.font.size = 11;
+    const T = Chart.defaults.plugins.tooltip;
+    T.backgroundColor = 'rgba(2,6,23,.94)';
+    T.borderColor = 'rgba(148,163,184,.25)';
+    T.borderWidth = 1;
+    T.cornerRadius = 8;
+    T.padding = 10;
+    T.titleColor = '#e2e8f0';
+    T.bodyColor = '#cbd5e1';
+    T.usePointStyle = true;
+    const L = Chart.defaults.plugins.legend.labels;
+    L.usePointStyle = true;
+    L.pointStyle = 'circle';
+    L.boxWidth = 7;
+    L.boxHeight = 7;
+    L.padding = 14;
 
-    function card(title, note) {
-      const d = document.createElement('div');
-      d.className = 'rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4';
-      d.innerHTML = '<div class="text-sm font-semibold">' + title + '</div>' +
-                    '<div class="mt-0.5 mb-2 text-[11px] text-slate-500 dark:text-slate-400">' + note + '</div>' +
-                    '<div style="position:relative;height:230px"><canvas></canvas></div>';
-      host.appendChild(d);
-      return d.querySelector('canvas');
+    // The glow. Canvas shadows are per-draw state, so this wraps each dataset's draw in that
+    // dataset's own colour — the effect that makes a monitoring dashboard read as live rather
+    // than as a spreadsheet with a chart in it.
+    const glow = {
+      id: 'glow',
+      beforeDatasetDraw(chart, args) {
+        const c = chart.ctx;
+        c.save();
+        const o = args.meta.dataset && args.meta.dataset.options;
+        c.shadowColor = (o && (o.borderColor || o.backgroundColor)) || P[0];
+        c.shadowBlur = args.meta.type === 'line' ? 16 : 10;
+        c.shadowOffsetY = args.meta.type === 'line' ? 0 : 2;
+      },
+      afterDatasetDraw(chart) { chart.ctx.restore(); },
+    };
+
+    // Gradients need the laid-out chart area, which does not exist until after first layout,
+    // so they are scriptable rather than computed up front.
+    const fill = (hex, top, bottom) => (c) => {
+      const a = c.chart.chartArea;
+      if (!a) return rgba(hex, top);
+      const g = c.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom);
+      g.addColorStop(0, rgba(hex, top));
+      g.addColorStop(1, rgba(hex, bottom));
+      return g;
+    };
+
+    // ---------------------------------------------------------------- expand overlay
+    // One overlay, reused. The expanded chart is a SECOND Chart instance built from the same
+    // factory rather than the small one relocated: Chart.js binds an instance to its canvas,
+    // and moving it mid-life would leave the card empty once the overlay closes.
+    let modalChart = null;
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 z-50 hidden items-center justify-center p-4 sm:p-8';
+    modal.style.background = 'rgba(2,6,23,.82)';
+    modal.style.backdropFilter = 'blur(3px)';
+    modal.innerHTML =
+      '<div class="relative w-full max-w-6xl rounded-xl border border-slate-200 dark:border-slate-700 ' +
+      'bg-white dark:bg-slate-900 p-5 shadow-2xl" style="height:min(84vh,760px)">' +
+        '<button type="button" data-close aria-label="Close" ' +
+          'class="absolute top-3 right-3 z-10 rounded-md px-2 py-1 text-xl leading-none text-slate-400 ' +
+          'hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800">&times;</button>' +
+        '<div data-title class="text-base font-semibold tracking-tight pr-8"></div>' +
+        '<div data-note class="mt-0.5 mb-3 text-xs text-slate-500 dark:text-slate-400"></div>' +
+        '<div style="height:calc(100% - 4.5rem)"><canvas data-canvas></canvas></div>' +
+      '</div>';
+    document.body.appendChild(modal);
+
+    function closeModal() {
+      if (modalChart) { modalChart.destroy(); modalChart = null; }
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      document.body.style.overflow = '';
     }
-
-    const axes = (xTitle, yTitle) => ({
-      x: { title: { display: !!xTitle, text: xTitle }, grid: { color: grid }, ticks: { color: fg } },
-      y: { title: { display: !!yTitle, text: yTitle }, grid: { color: grid }, ticks: { color: fg },
-           beginAtZero: true },
+    modal.addEventListener('click', function (e) {
+      if (e.target === modal || e.target.closest('[data-close]')) closeModal();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
     });
 
-    // 1. Generation speed by model, one bar group per prompt.
+    function openModal(title, note, factory) {
+      modal.querySelector('[data-title]').textContent = title;
+      modal.querySelector('[data-note]').innerHTML = note;
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      document.body.style.overflow = 'hidden';   // stop the page scrolling behind the overlay
+      const old = modal.querySelector('[data-canvas]');
+      const fresh = old.cloneNode(false);        // a used canvas keeps the old chart's sizing
+      old.replaceWith(fresh);
+      if (modalChart) modalChart.destroy();
+      modalChart = new Chart(fresh, factory());
+    }
+
+    // factory() must return a NEW config each call: Chart.js takes ownership of the datasets
+    // array it is handed, so sharing one object between the card and the overlay corrupts both.
+    function render(title, note, factory) {
+      const d = document.createElement('div');
+      d.className = 'group relative overflow-hidden rounded-xl border border-slate-200 ' +
+                    'dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 shadow-sm ' +
+                    'cursor-zoom-in transition hover:border-sky-400 dark:hover:border-sky-600';
+      d.innerHTML =
+        '<div class="pointer-events-none absolute -top-16 -right-16 w-48 h-48 rounded-full ' +
+          'bg-sky-500/10 blur-3xl"></div>' +
+        '<div class="pointer-events-none absolute top-3 right-3 flex items-center gap-1 text-[10px] ' +
+          'text-slate-400 opacity-0 transition group-hover:opacity-100">' +
+          '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+          'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>' +
+          'expand</div>' +
+        '<div class="relative text-sm font-semibold tracking-tight">' + title + '</div>' +
+        '<div class="relative mt-0.5 mb-3 text-[11px] leading-snug text-slate-500 dark:text-slate-400">' +
+          note + '</div>' +
+        '<div class="relative" style="height:240px"><canvas></canvas></div>';
+      host.appendChild(d);
+      d.addEventListener('click', function () { openModal(title, note, factory); });
+      return new Chart(d.querySelector('canvas'), factory());
+    }
+
+    // ---------------------------------------------------------------- stat panels
+    function stat(label, value, unit, sub, hex) {
+      const d = document.createElement('div');
+      d.className = 'relative overflow-hidden rounded-xl border border-slate-200 dark:border-slate-800 ' +
+                    'bg-white dark:bg-slate-900/70 px-4 py-3';
+      d.innerHTML =
+        '<div class="absolute inset-x-0 top-0 h-[3px]" style="background:linear-gradient(90deg,' +
+          rgba(hex, .95) + ',' + rgba(hex, .15) + ')"></div>' +
+        '<div class="pointer-events-none absolute -bottom-10 -right-8 w-32 h-32 rounded-full blur-2xl" ' +
+          'style="background:' + rgba(hex, .16) + '"></div>' +
+        '<div class="relative text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">' +
+          label + '</div>' +
+        '<div class="relative mt-1 font-semibold leading-none tabular-nums" ' +
+          'style="font-size:1.65rem;color:' + hex + '">' + value +
+          '<span class="ml-1 text-xs font-normal text-slate-500 dark:text-slate-400">' + unit + '</span></div>' +
+        '<div class="relative mt-1 truncate text-[11px] text-slate-500 dark:text-slate-400" title="' +
+          sub + '">' + sub + '</div>';
+      statHost.appendChild(d);
+    }
+
+    const short = s => s.length > 24 ? s.slice(0, 23) + '…' : s;
+    const best = (series, labels, better) => {
+      let bv = null, bl = '';
+      series.forEach(function (s) {
+        s.data.forEach(function (v, i) {
+          if (!v) return;
+          if (bv === null || better(v, bv)) { bv = v; bl = labels[i] + ' · ' + s.label; }
+        });
+      });
+      return [bv, bl];
+    };
+
     if (C.aliases.length && C.gen.length) {
-      new Chart(card('Generation speed', 'Median tok/s per prompt. Cold and contended requests excluded.'), {
-        type: 'bar',
-        data: {
-          labels: C.aliases,
-          datasets: C.gen.map((s, i) => ({
-            label: s.label, data: s.data,
-            backgroundColor: palette[i % palette.length], borderRadius: 3,
-          })),
-        },
-        options: { responsive: true, maintainAspectRatio: false,
-                   plugins: { legend: { position: 'bottom' } }, scales: axes('', 'tok/s') },
-      });
+      const r = best(C.gen, C.aliases, (a, b) => a > b);
+      if (r[0]) stat('Fastest generation', r[0].toFixed(1), 'tok/s', short(r[1]), P[0]);
     }
-
-    // 2. First-token latency. Lower is better, which is the opposite of every other chart
-    //    here, so the axis says so rather than relying on the reader to notice.
     if (C.aliases.length && C.ttft.length) {
-      new Chart(card('Time to first token', 'Median ms until anything appears. Lower is better.'), {
-        type: 'bar',
-        data: {
-          labels: C.aliases,
-          datasets: C.ttft.map((s, i) => ({
-            label: s.label, data: s.data,
-            backgroundColor: palette[i % palette.length], borderRadius: 3,
-          })),
-        },
-        options: { responsive: true, maintainAspectRatio: false,
-                   plugins: { legend: { position: 'bottom' } }, scales: axes('', 'ms (lower is better)') },
-      });
+      const r = best(C.ttft, C.aliases, (a, b) => a < b);
+      if (r[0]) stat('Quickest first token', Math.round(r[0]), 'ms', short(r[1]), P[2]);
+    }
+    if (C.decay.length) {
+      const tg = C.decay.filter(d => d.kind === 'tg');
+      if (tg.length) {
+        const f = tg[0].data.filter(x => x !== null && x !== undefined);
+        if (f.length > 1 && f[0]) {
+          const drop = 100 * (f[0] - f[f.length - 1]) / f[0];
+          stat('Speed lost at depth', drop.toFixed(0), '%',
+               'across ' + C.depths[C.depths.length - 1] + ' cached tokens', P[3]);
+        }
+      }
+    }
+    if (C.vram_measured.length) {
+      const peak = Math.max.apply(null, C.vram_measured);
+      const pct = C.capacity_gb ? Math.round(100 * peak / C.capacity_gb) : 0;
+      stat('Peak VRAM', peak.toFixed(1), 'GB',
+           C.capacity_gb ? pct + '% of ' + C.capacity_gb + ' GB' : 'across all cards',
+           pct > 90 ? P[4] : P[1]);
+    }
+    if (statHost && !statHost.children.length) statHost.remove();
+
+    // ---------------------------------------------------------------- charts
+    const axis = (title) => ({
+      grid: {color: grid, drawTicks: false}, border: {display: false},
+      ticks: {color: fg, padding: 8}, beginAtZero: true,
+      title: {display: !!title, text: title, color: fg},
+    });
+    const xAxis = (title) => ({
+      grid: {color: grid, drawTicks: false}, border: {display: false},
+      ticks: {color: fg, padding: 6},
+      title: {display: !!title, text: title, color: fg},
+    });
+    const common = () => ({
+      responsive: true, maintainAspectRatio: false,
+      interaction: {mode: 'index', intersect: false},
+      animation: {duration: 900, easing: 'easeOutQuart'},
+      plugins: {legend: {position: 'bottom'}},
+    });
+    const bars = (series, offset) => series.map(function (s, i) {
+      const hex = P[(i + offset) % P.length];
+      return {
+        label: s.label, data: s.data.slice(),
+        backgroundColor: fill(hex, .95, .35), borderColor: hex, borderWidth: 0,
+        borderRadius: 6, borderSkipped: false, maxBarThickness: 46,
+      };
+    });
+
+    if (C.aliases.length && C.gen.length) {
+      render('Generation speed',
+             'Median tok/s per prompt. Cold and contended requests excluded.', () => ({
+        type: 'bar', plugins: [glow],
+        data: {labels: C.aliases, datasets: bars(C.gen, 0)},
+        options: Object.assign(common(), {scales: {x: xAxis(''), y: axis('tok/s')}}),
+      }));
     }
 
-    // 3. Throughput against how much context is already in the cache.
+    if (C.aliases.length && C.ttft.length) {
+      render('Time to first token',
+             'Median ms until anything appears. Lower is better — the only chart here where that is true.', () => ({
+        type: 'bar', plugins: [glow],
+        data: {labels: C.aliases, datasets: bars(C.ttft, 2)},
+        options: Object.assign(common(), {scales: {x: xAxis(''), y: axis('ms')}}),
+      }));
+    }
+
     if (C.decay.length) {
-      new Chart(card('Speed vs context depth', 'From llama bench. How much a long conversation costs you.'), {
-        type: 'line',
+      render('Speed vs context depth',
+             'From llama bench. What a long conversation costs you.', () => ({
+        type: 'line', plugins: [glow],
         data: {
           labels: C.depths.map(d => d ? (d >= 1024 ? (d / 1024) + 'K' : d) : '0'),
-          datasets: C.decay.map((s, i) => ({
-            label: s.label, data: s.data,
-            borderColor: palette[i % palette.length],
-            backgroundColor: palette[i % palette.length],
-            borderDash: s.kind === 'pp' ? [4, 3] : [],
-            tension: 0.25, spanGaps: true,
-            // pp and tg differ by an order of magnitude; a shared linear axis would flatten
-            // tg into the floor, so pp goes on its own right-hand axis.
-            yAxisID: s.kind === 'pp' ? 'y2' : 'y',
-          })),
+          datasets: C.decay.map(function (s, i) {
+            const hex = P[i % P.length];
+            return {
+              label: s.label, data: s.data.slice(),
+              borderColor: hex, borderWidth: 2.5,
+              backgroundColor: fill(hex, s.kind === 'pp' ? .12 : .3, 0),
+              fill: s.kind !== 'pp',
+              borderDash: s.kind === 'pp' ? [5, 4] : [],
+              tension: .35, spanGaps: true,
+              pointRadius: 0, pointHoverRadius: 5,
+              pointBackgroundColor: hex, pointBorderColor: '#fff', pointBorderWidth: 2,
+              // pp runs an order of magnitude above tg; a shared linear axis flattens tg
+              // into the floor, so it gets its own scale on the right.
+              yAxisID: s.kind === 'pp' ? 'y2' : 'y',
+            };
+          }),
         },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { position: 'bottom' } },
+        options: Object.assign(common(), {
           scales: {
-            x: { title: { display: true, text: 'tokens already in cache' }, grid: { color: grid } },
-            y: { position: 'left', title: { display: true, text: 'tg tok/s' },
-                 grid: { color: grid }, beginAtZero: true },
-            y2: { position: 'right', title: { display: true, text: 'pp tok/s (dashed)' },
-                  grid: { drawOnChartArea: false }, beginAtZero: true },
+            x: xAxis('tokens already in cache'),
+            y: Object.assign(axis('tg tok/s'), {position: 'left'}),
+            y2: {position: 'right', grid: {drawOnChartArea: false}, border: {display: false},
+                 ticks: {color: fg, padding: 8}, beginAtZero: true,
+                 title: {display: true, text: 'pp tok/s (dashed)', color: fg}},
           },
-        },
-      });
+        }),
+      }));
     }
 
-    // 4. The only chart that can falsify anything: what autoconfig predicted against what the
-    //    cards actually held.
     if (C.vram_labels.length) {
-      const ds = [
-        { label: 'peak in use (everything on the cards)', data: C.vram_measured,
-          backgroundColor: palette[0], borderRadius: 3 },
-        { label: 'autoconfig budget (weights + KV only)', data: C.vram_predicted,
-          backgroundColor: palette[3], borderRadius: 3 },
-      ];
-      // Capacity as a flat reference line. "How close to the edge" is the question this chart
-      // can actually answer; the two bars are not rivals and the caption says why.
-      if (C.capacity_gb) {
-        ds.push({ label: 'card capacity', type: 'line', borderDash: [5, 4],
-                  data: C.vram_labels.map(() => C.capacity_gb),
-                  borderColor: palette[4], pointRadius: 0, fill: false });
-      }
-      new Chart(card('VRAM headroom',
-                     'Peak observed during the run, against total capacity. The budget bar covers weights and KV only — compute buffers and the projector are extra, so the peak sits well above it by design, not by error.'), {
-        type: 'bar',
-        data: { labels: C.vram_labels, datasets: ds },
-        options: { responsive: true, maintainAspectRatio: false,
-                   plugins: { legend: { position: 'bottom' } }, scales: axes('', 'GB') },
-      });
+      const vramDatasets = function () {
+        const ds = [
+          {label: 'peak in use (everything on the cards)', data: C.vram_measured.slice(),
+           backgroundColor: fill(P[1], .95, .3), borderColor: P[1],
+           borderRadius: 6, borderSkipped: false, maxBarThickness: 40},
+          {label: 'autoconfig budget (weights + KV only)', data: C.vram_predicted.slice(),
+           backgroundColor: fill(P[3], .8, .25), borderColor: P[3],
+           borderRadius: 6, borderSkipped: false, maxBarThickness: 40},
+        ];
+        if (C.capacity_gb) {
+          ds.push({label: 'card capacity', type: 'line',
+                   data: C.vram_labels.map(() => C.capacity_gb),
+                   borderColor: P[4], borderDash: [6, 5], borderWidth: 2,
+                   pointRadius: 0, fill: false});
+        }
+        return ds;
+      };
+      render('VRAM headroom',
+             'Peak observed against total capacity. The budget bar covers weights and KV only — compute buffers and the projector are extra, so the peak sits above it by design, not by error.', () => ({
+        type: 'bar', plugins: [glow],
+        data: {labels: C.vram_labels, datasets: vramDatasets()},
+        options: Object.assign(common(), {scales: {x: xAxis(''), y: axis('GB')}}),
+      }));
     }
 
     if (!host.children.length) {
       host.className = '';
       host.innerHTML = '<p class="text-sm text-slate-500 dark:text-slate-400">' +
-        'Not enough clean measurements to chart yet &mdash; every request was cold, contended or failed.</p>';
+        'Not enough clean measurements to chart yet — every request was cold, contended or failed.</p>';
     }
   })();
   </script>
