@@ -59,6 +59,16 @@ _RE_ARGV = re.compile(r"srv\s+load:\s{2,}(\S.*?)\s*$")
 _RE_LOAD = re.compile(r"\[(\d+)\].*?srv\s+load_model: loading model '([^']+)'")
 _RE_TS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\S+?)\s")
 
+# Recorded alongside spec-type so a change to any of them is visible as a different config.
+# Draft depth and the confidence gate both change what an acceptance rate means, so averaging
+# across a change to either silently mixes two populations.
+_SPEC_KNOB_FLAGS = ("--spec-draft-n-max", "--spec-draft-n-min", "--spec-draft-p-min",
+                    "--draft-p-min", "--draft-max", "--draft-min")
+
+# Below this, a single instance has too little data to stand on its own and stats fall back to
+# pooling across instances - flagged as such rather than presented as one configuration.
+_MIN_SAMPLES_PER_CONFIG = 5
+
 _RE_PROMPT = re.compile(
     r"\[(\d+)\].*?print_timing: id\s+(\d+) \| task (\d+) \| prompt eval time =\s*"
     r"([\d.]+) ms /\s*(\d+) tokens \(\s*[\d.]+ ms per token,\s*([\d.]+) tokens per second\)")
@@ -107,6 +117,12 @@ class Stats:
     draft_n: int = 0
     last_ts: float = 0.0
     spec_types: list[str] = field(default_factory=list)
+    # True when the samples come from a single server instance, i.e. one configuration. The
+    # router respawns an instance on any argv change, so an instance boundary is exactly a
+    # config boundary - which makes this the difference between "your current setup does this"
+    # and "the last few setups averaged out to this".
+    single_config: bool = True
+    config_count: int = 1
 
     @property
     def age_str(self) -> str:
@@ -170,12 +186,17 @@ def parse_log(text: str) -> list[Sample]:
         nonlocal pending_alias, pending_port, pending_argv
         if pending_port:
             path, spec = "", ""
+            knobs: list[str] = []
             for i, tok in enumerate(pending_argv):
                 if tok in ("-m", "--model") and i + 1 < len(pending_argv):
                     path = pending_argv[i + 1]
                 elif tok == "--spec-type" and i + 1 < len(pending_argv):
                     spec = pending_argv[i + 1]
+                elif tok in _SPEC_KNOB_FLAGS and i + 1 < len(pending_argv):
+                    knobs.append(f"{tok.split('-')[-1]}={pending_argv[i + 1]}")
             prev = by_pid.get(pending_port, ("", "", ""))
+            if spec and knobs:
+                spec = spec + " (" + " ".join(knobs) + ")"
             by_pid[pending_port] = (path or prev[0], pending_alias or prev[1], spec)
         pending_alias, pending_port, pending_argv = "", "", []
 
@@ -288,6 +309,18 @@ def stats_for(*, model_path: str = "", alias: str = "", limit: int = 400) -> Sta
         return Stats()
     if not rows:
         return Stats()
+
+    # Prefer the newest instance on its own. A respawn means the argv changed, so mixing
+    # instances mixes configurations - and no amount of outlier trimming detects that, because
+    # every sample is a perfectly valid measurement of a setup that no longer applies.
+    all_instances = {r["instance"] for r in rows}
+    newest = rows[0]["instance"]
+    current = [r for r in rows if r["instance"] == newest]
+    if len(current) >= _MIN_SAMPLES_PER_CONFIG:
+        rows, single = current, True
+    else:
+        single = len(all_instances) <= 1
+
     gen = [r["gen_tps"] for r in rows if r["gen_tps"]]
     prompt = [r["prompt_tps"] for r in rows if r["prompt_tps"]]
     acc = [r["draft_acc"] for r in rows if r["draft_acc"] is not None]
@@ -301,4 +334,6 @@ def stats_for(*, model_path: str = "", alias: str = "", limit: int = 400) -> Sta
         draft_n=len(acc),
         last_ts=max((r["ts"] for r in rows), default=0.0),
         spec_types=sorted({(r["spec_type"] or "") for r in rows} - {""}),
+        single_config=single,
+        config_count=len({r["instance"] for r in rows}),
     )

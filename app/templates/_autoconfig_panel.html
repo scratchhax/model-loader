@@ -36,6 +36,13 @@
       <div class="text-xs uppercase tracking-wide text-emerald-800 dark:text-emerald-300">Measured</div>
       <div class="text-[11px] text-emerald-700/70 dark:text-emerald-400/70">
         {{ tel.n }} recent request{{ '' if tel.n == 1 else 's' }}{% if tel.age_str %} &middot; newest {{ tel.age_str }}{% endif %}
+        {%- if tel.single_config %}
+        <span class="ml-1 rounded px-1 bg-emerald-100 dark:bg-emerald-900/60"
+              title="All from one server instance, so all under the same settings. The router respawns on any argument change, which is what makes an instance boundary a config boundary.">one config</span>
+        {%- else %}
+        <span class="ml-1 rounded px-1 bg-amber-100 text-amber-900 dark:bg-amber-900/60 dark:text-amber-200"
+              title="Pooled across {{ tel.config_count }} server instances, i.e. more than one set of settings. The newest instance did not have enough requests to stand alone.">pooled across {{ tel.config_count }} configs</span>
+        {%- endif %}
       </div>
     </div>
 
