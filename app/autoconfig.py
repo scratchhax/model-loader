@@ -970,11 +970,22 @@ def analyze(*,
             # per-card capacities using the same byte-balanced split we will emit, and demote
             # the candidate if the heaviest card cannot hold its share.
             if fits and gpu_count > 1 and card_caps:
+                if eff_moe > 0:
+                    # MoE: attention is always resident, and so are the experts of every layer
+                    # at or above the n-cpu-moe threshold. _balanced_split models that split.
+                    _att = model_gb * (1 - eff_moe)
+                    _exp = (model_gb * eff_moe / layers) if layers else 0.0
+                    _ncm = n_cm if offload_kind == "n-cpu-moe" else (layers if offload_kind == "cpu-moe" else 0)
+                else:
+                    # Dense: only gpu_model_gb is resident — _find_fit may have just moved whole
+                    # layers to the CPU via ngl. Sizing this check against the FULL model instead
+                    # rejected every candidate for any model too large to fit outright, which is
+                    # precisely the case partial offload exists to serve. Dense layers cost the
+                    # same as each other, so an even split is already correct and no tensor-split
+                    # is emitted; this is purely a per-card feasibility test.
+                    _att, _exp, _ncm = gpu_model_gb, 0.0, 0
                 _ts, _loads = _balanced_split(
-                    layers, n_cm if offload_kind == "n-cpu-moe" else (layers if offload_kind == "cpu-moe" else 0),
-                    model_gb * (1 - eff_moe) if eff_moe > 0 else model_gb,
-                    (model_gb * eff_moe / layers) if eff_moe > 0 and layers else 0.0,
-                    kv_gb, gpu_count, pinned_gb, card_caps)
+                    layers, _ncm, _att, _exp, kv_gb, gpu_count, pinned_gb, card_caps)
                 if _loads and any(load > cap for load, cap in zip(_loads, card_caps)):
                     fits = False
             total = gpu_model_gb + kv_gb
