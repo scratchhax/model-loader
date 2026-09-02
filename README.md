@@ -9,6 +9,8 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 - **Search + download GGUFs from Hugging Face** — parallel-range downloader (8 chunks by default), live per-chunk speed sparklines, resume-on-restart, HF token stored locally for gated repos.
 - **Manage `models.ini`** (the llama-server `--models-preset` file) with a 98-field form organized into 10 tiers (Core → Reasoning → Sampling → Server → …). Tooltips on every field. Atomic writes with 10 rolling backups.
 - **Autoconfig** — reads a GGUF's metadata + probes your live GPU VRAM, then picks `ctx-size`, `n-gpu-layers`, RoPE extension, cache quant, MoE offload params, and reasoning-effort flags that actually fit. Handles single-GPU, multi-GPU (`-sm layer`), hybrid attention+SSM (Qwen 3.5/3.6), sliding-window attention (Gemma), and MoE (GPT-OSS, Qwen3-Coder).
+- **Benchmarking** — a fixed prompt suite run through the live server (first-token latency, draft acceptance, VRAM), and throughput sweeps driven by llama.cpp's own `llama bench`. Charts and stat panels; nothing is written back to any config.
+- **Measured throughput, not just predicted** — llama-server already reports prompt speed, generation speed and speculative acceptance for every request it serves. Model Loader reads those back out of the container logs and shows the median in the Autoconfig panel, alongside a comparison of every configuration that model has actually run under.
 - **Per-backend hardware dashboard** — GPU util, VRAM used/total, temperature, power draw; container CPU% and RSS; log tail with grep filter; one-click restart.
 - **Auto-discovers llama containers** on your Docker socket (any `ghcr.io/ggml-org/llama.cpp:*` image). Add a new backend to your compose file, run `docker compose up -d`, it appears in the UI within 2 seconds.
 - **OpenWebUI integration** — detects backends OpenWebUI doesn't know about (or points at containers that no longer exist), and one-click reconciles by writing directly to OpenWebUI's `webui.db` (which is what its PersistentConfig actually reads). Also:
@@ -32,7 +34,7 @@ The two jobs above are one action: downloading a multimodal model auto-queues th
 
 Pick how many chats will hit the model at once, then pick a priority. Each preset shows what you are trading: context size against GPU layers against speed. The table underneath marks every context size as fitting or not on each backend, and names the cost when it doesn't — `9L on CPU` means nine layers had to move off the GPU to make that context fit.
 
-The speed figures are an **ordering hint, not a benchmark**. They come from a calibrated penalty per CPU-resident layer; they will tell you Fast beats Long context, and they will not tell you your tokens per second. The panel says so too.
+The speed figures are an **ordering hint, not a benchmark**. They come from a calibrated penalty per CPU-resident layer; they will tell you Fast beats Long context, and they will not tell you your tokens per second. The panel says so too — and where real requests have been served, it shows the measured median beside the estimate.
 
 ### The models.ini editor
 
@@ -41,6 +43,22 @@ The speed figures are an **ordering hint, not a benchmark**. They come from a ca
 One card per section, with every option you have set shown as a chip, so the whole file is readable at a glance rather than by scrolling a text editor. **Copy CLI** renders the section as the equivalent `llama-server` command line, which is useful for reproducing a config outside Model Loader or pasting into a bug report.
 
 `file present` confirms the section resolves to a GGUF on disk. That check follows the section's `model =` path rather than matching its name against a filename, so renaming a section to give a model a short API id does not break the link.
+
+### Benchmarking
+
+![The Benchmark page: stat panels for fastest generation, quickest first token and peak VRAM, above charts for generation speed and first-token latency by model](docs/benchmarks.png)
+
+Two engines, because they answer different questions and neither can answer the other's.
+
+The **prompt suite** sends real prompts through the running server and records what happened: time to first token, time until the answer proper begins (on a thinking model those are far apart), generation speed, speculative draft acceptance, and peak VRAM per card. It measures the configuration you actually run.
+
+The **throughput sweep** shells out to llama.cpp's own `llama bench`, which warms up, repeats, reports a standard deviation and measures the model directly rather than the HTTP path. It starts from a `models.ini` section and carries that section's real settings across, rather than measuring llama-bench defaults nobody runs.
+
+The gap between them is the point. On a model running `draft-mtp`, `llama bench` reports 133 tok/s and the server delivers 208 — llama-bench has no speculative decoding, no projector and no server slots, so it cannot see them. Both tables say so rather than letting the two numbers be compared naively.
+
+A run is disruptive: the router holds one model at a time, so benchmarking several means evicting and reloading each in turn while everything else on the box stalls. The confirmation dialog states the cost in terms of your actual selection, a banner appears on every page for the duration (the job outlives the tab that started it), and stopping is safe — results already collected are kept. **Nothing is ever written to `models.ini`.**
+
+Results are raw, one row per request, with cold and contended requests flagged rather than averaged in. There is no "apply these findings" button: the output is for you to read.
 
 ### Routing models to backends
 
@@ -250,11 +268,13 @@ FastAPI (app/main.py) ──── Jinja2 templates (app/templates/)
    ├── app/gguf_meta.py   hand-rolled GGUF v3 metadata reader
    ├── app/downloader.py  parallel-range download engine + sqlite job history
    ├── app/ini.py         models.ini schema + parser + atomic writes
-   ├── app/db.py          sqlite prefs
+   ├── app/bench.py       benchmark harness + llama-bench driver
+   ├── app/telemetry.py   per-request timings scraped from llama-server logs
+   ├── app/db.py          sqlite prefs, download history, benchmark results
    └── app/migrate_layout.py  one-shot flat → per-model-subdir migration
 ```
 
-No frontend build step. No JS bundler. Everything ships from CDN or Jinja. Total footprint: ~1200 lines of Python, ~15 templates.
+No frontend build step. No JS bundler. Everything ships from CDN or Jinja. Total footprint: ~9,500 lines of Python across 12 modules, 26 templates.
 
 ## License
 

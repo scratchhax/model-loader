@@ -283,35 +283,6 @@ class ContainerInfo:
     id: str | None = None
 
 
-@dataclass
-class ContainersSnapshot:
-    socket_ok: bool
-    error: str | None
-    containers: list[ContainerInfo]
-
-
-def snapshot_containers() -> ContainersSnapshot:
-    client = _docker_client()
-    if client is None:
-        return ContainersSnapshot(socket_ok=False, error="cannot reach docker socket", containers=[])
-    try:
-        client.ping()
-    except DockerException as e:
-        return ContainersSnapshot(socket_ok=False, error=f"docker ping failed: {e}", containers=[])
-
-    out: list[ContainerInfo] = []
-    for name in settings.llama_container_names:
-        try:
-            c = client.containers.get(name)
-            image = (c.image.tags or [c.image.short_id])[0]
-            out.append(ContainerInfo(name=name, found=True, status=c.status, image=image, id=c.short_id))
-        except NotFound:
-            out.append(ContainerInfo(name=name, found=False))
-        except DockerException as e:
-            out.append(ContainerInfo(name=name, found=False, status=f"error: {e}"))
-    return ContainersSnapshot(socket_ok=True, error=None, containers=out)
-
-
 # ---------- llama backends: richer view + restart + probe ----------
 
 # error-of-last-restart per container, shown in the card until it clears

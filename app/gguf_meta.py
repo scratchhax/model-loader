@@ -287,9 +287,3 @@ def summarize(raw: dict[str, Any]) -> dict[str, Any]:
         "chat_template_features": scan_chat_template_features(raw.get("tokenizer.chat_template") or ""),
     }
 
-
-def read_summary(path: Path) -> dict[str, Any]:
-    try:
-        return summarize(read_raw(path))
-    except (GgufMetaError, OSError) as e:
-        return {"_error": str(e)}

@@ -1194,14 +1194,12 @@ def analyze(*,
                      "Set ctx-size manually in the form and verify it loads."),
         )
 
-    # NOTE: Autoconfig deliberately does NOT auto-wire speculative decoding / draft
-    # models anymore. In practice, community MTP heads (e.g. JonathanColetti's Qwen3.8
-    # Uncensored draft) segfaulted llama.cpp with every main quant we tried, and there's
-    # no reliable programmatic way to tell a working draft from a broken one before load.
-    # The `spec-draft-*` fields are still exposed in the ini schema for manual use if you
-    # find a draft that provably works with your llama.cpp build. `_looks_like_draft` is
-    # kept only so `ini._is_companion` can still hide draft files from the "unregistered
-    # GGUF" list on the Config page.
+    # NOTE: Autoconfig DOES wire speculative decoding now, but only from a head that shipped
+    # beside these weights - see SpecProfile. The rule this replaced came from pairing an
+    # unrelated community draft with a main model, which segfaulted llama.cpp on every quant
+    # tried; a head trained against this exact base is a different proposition. `spec-type`
+    # is only ever proposed for a section that does not exist yet, so clearing it and saving
+    # stays cleared, and the ngram-* profiles need no draft model at all.
 
     # Detect a companion mmproj (multimodal projector — vision, audio, or other) and
     # reserve its real VRAM cost, rather than capping ctx at an arbitrary ceiling.

@@ -235,15 +235,6 @@ def owner_by_filename() -> dict[str, str]:
     return {r["filename"]: (r["repo_id"].split("/", 1)[0] if "/" in r["repo_id"] else r["repo_id"]) for r in rows}
 
 
-def downloaded_repo_ids() -> set[str]:
-    """Set of HF repo ids ('owner/name') that have at least one successfully-downloaded file."""
-    with _LOCK, _conn() as c:
-        rows = c.execute(
-            "SELECT DISTINCT repo_id FROM download_history WHERE status = 'done'"
-        ).fetchall()
-    return {r["repo_id"] for r in rows if r["repo_id"]}
-
-
 def downloaded_files_by_repo() -> dict[str, list[str]]:
     """{repo_id: [filename, ...]} of successfully-downloaded files, one entry per repo."""
     with _LOCK, _conn() as c:
@@ -381,11 +372,6 @@ def recent_timings(*, model_path: str = "", alias: str = "",
             "SELECT * FROM req_timing WHERE " + " AND ".join(where)
             + " ORDER BY ts DESC LIMIT ?", params
         ).fetchall())
-
-
-def timing_row_count() -> int:
-    with _LOCK, _conn() as c:
-        return int(c.execute("SELECT COUNT(*) AS n FROM req_timing").fetchone()["n"])
 
 
 def record_server_configs(backend: str, configs: list) -> int:

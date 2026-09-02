@@ -118,11 +118,6 @@ def state() -> JobState:
         return _STATE
 
 
-def is_running() -> bool:
-    with _LOCK:
-        return _STATE.active
-
-
 def cancel() -> bool:
     """Ask the run to stop. It finishes the request in flight, then unwinds."""
     with _LOCK:

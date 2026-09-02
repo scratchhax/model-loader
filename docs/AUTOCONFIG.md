@@ -61,8 +61,10 @@ Standard attention:
   bytes = 2 (K+V) × n_layers × ctx × n_kv_heads × head_dim × cache_bytes
 
 Sliding-window attention (Gemma):
-  Full-attention layers pay the full-ctx cost; SWA layers cap at window_size.
-  bytes = 2 × Σ_layer (ctx_for_layer × n_kv_heads × head_dim × cache_bytes)
+  Full-attention (global) layers pay the full-ctx cost; SWA (local) layers cap at
+  window_size. Every per-layer quantity is read off the SAME repeating period:
+  which layers are local, how many KV heads each has, and the head dim it uses.
+  bytes = 2 × Σ_layer (ctx_for_layer × n_kv_heads_for_layer × head_dim_for_layer × cache_bytes)
 
 Hybrid attention + SSM (Qwen 3.5/3.6):
   Attention layers use the standard formula.
@@ -70,6 +72,20 @@ Hybrid attention + SSM (Qwen 3.5/3.6):
 ```
 
 `cache_bytes` per element: `f16` 2 bytes, `q8_0` ~1.06 (block-quantised, includes scale overhead), `q4_0` ~0.56.
+
+> **Gemma declares its KV head count per layer, and the layers are not alike.** On gemma-4-12b the array is `[8,8,8,8,8,1,…]`, aligned with the sliding-window pattern: the *global* layer carries **1** KV head against 8 on the local ones (on 26B-A4B it is 2 against 8). Collapsing that array to a single representative value charges every global layer 8× too much — and the global layers are the only ones whose cost scales with context, so that term dominates the whole estimate. It predicted **14.51 GB** at 208K against a real **1.97 GB**.
+>
+> `shared_kv_layers` matters too: those layers reuse another layer's cache and allocate none of their own. They are spread through the stack, so the saving applies to local and global layers alike — charging it all to the local layers (the cheap ones) left gemma-4-E4B 70% high.
+>
+> Both are now read from the declared per-layer arrays, and the result is validated against llama.cpp's own estimator (`llama fit-params`, which reports the memory the allocator will actually request):
+>
+> | | ours | llama.cpp | delta |
+> |---|---|---|---|
+> | gemma-4-12b @262K | 2.29 GB | 2.37 GB | −3% |
+> | gemma-4-26B-A4B @262K | 2.76 GB | 2.81 GB | −2% |
+> | gemma-4-E4B @131K | 1.07 GB | 1.09 GB | −2% |
+>
+> If you change this math, check it against `llama fit-params` before trusting it. It is in the same container image and takes about three seconds per model.
 
 > **A warning about `cache-type-v`.** Dropping V below `q8_0` saves VRAM and can be catastrophically slow. There is no CUDA flash-attention kernel for a `q4_0` V cache at some head dimensions, so attention silently falls back to the CPU. Measured on a 27B with a 256-wide head dim: prompt eval went from **1737 tok/s to 115 tok/s**, a 15× regression. It is invisible on short prompts. If you change this, benchmark a long one and watch GPU utilisation.
 
