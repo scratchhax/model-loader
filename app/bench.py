@@ -320,6 +320,8 @@ def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
     """Kick off a run in the background. One at a time, refused otherwise."""
     global _THREAD, _STATE
     aliases = [a for a in aliases if a]
+    if not (backend or "").strip():
+        return False, "no backend selected"
     if not aliases:
         return False, "no models selected"
     prompts = db.prompts_by_ids(prompt_ids)
@@ -496,6 +498,8 @@ def _sweep_runtime(backend: str) -> tuple[str, dict, bool, str]:
     other than what is deployed.
     """
     from . import services
+    if not (backend or "").strip():
+        return "", {}, False, "no backend selected"
     client = services._docker_client()
     if client is None:
         return "", {}, False, "docker unreachable"
@@ -591,6 +595,8 @@ def start_sweep(*, backend: str, aliases: list[str], n_prompt: int = 512, n_gen:
                 depths: str = "0,4096,16384", reps: int = 3) -> tuple[bool, str]:
     global _THREAD, _STATE
     aliases = [a for a in aliases if a]
+    if not (backend or "").strip():
+        return False, "no backend selected"
     if not aliases:
         return False, "no models selected"
     with _LOCK:

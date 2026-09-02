@@ -735,7 +735,7 @@
       open: false,
       sweepOpen: false,
       mode: 'suite',
-      backend: '',
+      backend: {{ (backends[0] if backends else '') | tojson }},
       sweepAliases: [],
       nPrompt: 512,
       nGen: 128,
