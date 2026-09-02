@@ -117,11 +117,11 @@ class Stats:
         d = max(0.0, time.time() - self.last_ts)
         if d < 90:
             return "just now"
-        for span, unit in ((3600, "min"), (86400, "hour"), (86400 * 30, "day")):
-            if d < span * (60 if unit == "min" else 24 if unit == "hour" else 30):
-                n = int(d // (60 if unit == "min" else 3600 if unit == "hour" else 86400))
+        for cutoff, size, unit in ((3600, 60, "min"), (86400, 3600, "hour"), (None, 86400, "day")):
+            if cutoff is None or d < cutoff:
+                n = int(d // size)
                 return f"{n} {unit}{'s' if n != 1 else ''} ago"
-        return f"{int(d // 86400)} days ago"
+        return ""
 
     @property
     def spread_pct(self) -> int:
