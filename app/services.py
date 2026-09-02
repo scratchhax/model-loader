@@ -544,8 +544,35 @@ def _fit_backends() -> dict[str, float]:
 
 
 def vram_fit_chips(size_bytes: int) -> list[dict]:
-    """For each GPU backend, return {'name', 'vram_gb', 'verdict' in {fits,tight,oom}, 'ratio_pct'}."""
+    """Per-backend fit verdicts: {'name', 'vram_gb', 'verdict', 'ratio_pct'}.
+
+    verdict is one of {fits, tight, oom, impossible}.
+
+    `oom` and `impossible` are genuinely different answers and must not look alike. `oom`
+    means "not on the GPU alone" — offload moves layers into system RAM and it runs, slower.
+    `impossible` means the model exceeds VRAM **plus** RAM, so there is nowhere for those
+    layers to go and no setting rescues it. Rendering both as a red cross against a backend
+    name tells the user the GPU is the constraint, when for `impossible` the machine is.
+
+    An impossible model returns a SINGLE machine-level chip rather than one per backend,
+    because naming backends implies picking a different one would help.
+    """
+    from . import hw
     gb = size_bytes / (1024 ** 3)
+
+    ram = hw.host_ram_gb()
+    pooled = max((v for v in _fit_backends().values() if v > 0), default=0.0)
+    if ram > 0 and pooled > 0 and gb > (pooled + ram):
+        return [{
+            "name": "this machine",
+            "vram_gb": round(pooled, 1),
+            "host_ram_gb": round(ram, 1),
+            "verdict": "impossible",
+            "ratio_pct": round(gb / (pooled + ram) * 100),
+            "needs_gb": round(gb),
+            "ceiling_gb": round(pooled + ram),
+        }]
+
     out: list[dict] = []
     for name, vram in _fit_backends().items():
         if vram <= 0:
