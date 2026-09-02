@@ -1113,6 +1113,16 @@ def analyze(*,
     # The draft head rides along in the same non-layer-split reservation. Its own KV is small
     # (a handful of layers over the drafted window) and folded into this rather than modelled.
     mmproj_vram_gb += mtp_gb * 1.15
+    # Raising ubatch for the vision encoder (see image-max-tokens below) grows the compute
+    # buffer, which is not layer-split and lands on the main GPU with everything else here.
+    # Calibrated from a measured point: a 27B (64 layers, 5120 hidden) at ub=2048 allocated
+    # ~4.7 GB, i.e. ~7 bytes per (ub x layer x hidden). Scaled against the default ub of 512,
+    # only the INCREASE is charged.
+    if has_mmproj and layers > 0:
+        _hidden = int(m.get("embedding_length") or 0)
+        if _hidden > 0:
+            _extra_ub = max(0, 1024 - 512)
+            mmproj_vram_gb += 7.0 * _extra_ub * layers * _hidden / 1e9
 
     # Candidate ctx values: default cap is the model's native ctx. Linear RoPE extension
     # to 2× is possible but (a) degrades quality noticeably, (b) inflates compute buffers
@@ -1527,6 +1537,35 @@ def analyze(*,
         # that value rather than trading away accuracy. Raise it if you have spare VRAM and
         # want finer detail on large images.
         values["image-max-tokens"] = "1024"
+
+        # ubatch-size MUST be at least image-max-tokens, or the model aborts on the first
+        # image. The vision encoder runs non-causal attention, and llama.cpp asserts
+        #     causal_attn || n_ubatch >= n_tokens_all
+        # because a non-causal batch cannot be split — the whole image has to be in one
+        # micro-batch. Default ubatch is 512, so a 1024-token image trips
+        #     GGML_ASSERT(... "non-causal attention requires n_ubatch >= n_tokens") failed
+        # and llama-server dies rather than degrading. Text generation is unaffected, so the
+        # model loads, chats happily, and then dies the moment a picture arrives.
+        #
+        # These two settings were previously chosen independently: image-max-tokens was
+        # raised to 1024 to bound the decode buffer, and ubatch was deliberately left alone
+        # because it costs VRAM. Each was right on its own and the pair was fatal.
+        try:
+            _imt = int(values.get("image-max-tokens") or 0)
+        except ValueError:
+            _imt = 0
+        if _imt > 0:
+            try:
+                _cur_ub = int((current_section or {}).get("ubatch-size") or 0)
+            except ValueError:
+                _cur_ub = 0
+            values["ubatch-size"] = str(max(_imt, _cur_ub))
+            # batch-size must not be below ubatch-size.
+            try:
+                if int(values.get("batch-size") or 0) < _imt:
+                    values["batch-size"] = str(_imt)
+            except ValueError:
+                values["batch-size"] = str(_imt)
 
     # RoPE handling — respect the model's own scaling if declared, otherwise auto-linear
     # for any ctx we chose that exceeds the model's native ctx.
