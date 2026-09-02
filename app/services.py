@@ -1632,6 +1632,25 @@ def projector_modalities(mmproj_rel_or_abs: str) -> frozenset:
     return out
 
 
+def sections_with_speculative() -> dict[str, str]:
+    """{section name -> draft head filename} for sections with speculative decoding wired up.
+
+    Requires BOTH a draft model and a spec-type that is not "none": naming a head without
+    selecting a type does nothing, and a type without a head cannot run.
+    """
+    out: dict[str, str] = {}
+    try:
+        for name in ini.section_names():
+            sec = ini.get_section(name) or {}
+            model = (sec.get("spec-draft-model") or "").strip()
+            stype = (sec.get("spec-type") or "").strip().lower()
+            if model and stype and stype != "none":
+                out[name] = model.rsplit("/", 1)[-1]
+    except (OSError, KeyError, AttributeError):
+        return {}
+    return out
+
+
 def section_modalities() -> dict[str, list[str]]:
     """{section name -> sorted modalities its projector encodes}. Empty list = text-only.
 

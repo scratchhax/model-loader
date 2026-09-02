@@ -212,6 +212,7 @@ def _owui_visibility() -> dict:
     want = services.openwebui_capability_plan()
     have = services.openwebui_capability_state()
     mods = services.section_modalities()
+    spec = services.sections_with_speculative()
     caps: dict[str, dict] = {}
     # Match the id back to its section by NAME, never by splitting on dots: OpenWebUI ids are
     # "<prefix>.<section>" but section names contain dots too (Qwen3.8-27B-Q4_K_M), so
@@ -222,7 +223,8 @@ def _owui_visibility() -> dict:
         if section is None:
             continue
         row = caps.setdefault(section, {"should": should, "current": [], "mismatch": False,
-                                        "modalities": mods.get(section, [])})
+                                        "modalities": mods.get(section, []),
+                                        "speculative": spec.get(section, "")})
         cur = have.get(mid)
         row["current"].append((mid, cur))
         if cur != should:
@@ -642,10 +644,7 @@ async def download_single(repo_id: str = Form(...), path: str = Form(...), size:
         manager.enqueue(repo_id=repo_id, hf_path=path, filename=filename, total_bytes=size)
         return HTMLResponse(_QUEUED_CHIP.format(label="Queued", title=f"Queued {filename} — see Downloads"))
 
-    # Main GGUF: subdir = stem. Also auto-queue any mmproj found in the same HF repo.
-    # Draft / MTP heads are NOT auto-queued — community MTP drafts have proven fragile
-    # (segfaults in llama.cpp) and there's no reliable programmatic pre-check. If you
-    # want to try one, download it manually and set `spec-draft-model` in the ini form.
+    # Main GGUF: subdir = stem. Companions from the same repo are queued alongside it.
     main_stem, filename = _dest_for_main(base)
     manager.enqueue(repo_id=repo_id, hf_path=path, filename=filename, total_bytes=size)
     extras = 0
@@ -663,11 +662,34 @@ async def download_single(repo_id: str = Form(...), path: str = Form(...), size:
                 extras += 1
                 if extras >= 4:
                     break  # cap: some repos have many mmproj variants
+
+        # A speculative-decoding head, when the repo ships one for this model. Only the
+        # SMALLEST is taken: repos commonly publish BF16/F16/Q8_0/Q4_0 of the same head, they
+        # are 60-170 MB, they sit in VRAM all session, and draft quality below Q8 barely moves
+        # the acceptance rate. Queueing all four would waste bandwidth and disk to no purpose.
+        #
+        # These used to be skipped entirely after community draft models segfaulted
+        # llama-server. That was a generic draft paired with an unrelated model; a head shipped
+        # in the model's own repo is trained against it, and llama.cpp drives it through
+        # draft-mtp rather than draft-simple. Autoconfig still only PROPOSES enabling it.
+        heads = [f for f in detail.files
+                 if f.path.lower().endswith(".gguf")
+                 and "mmproj" not in Path(f.path).name.lower()
+                 and autoconfig._looks_like_draft(Path(f.path).name)]
+        if heads:
+            head = min(heads, key=lambda f: f.size or 0)
+            manager.enqueue(
+                repo_id=repo_id,
+                hf_path=head.path,
+                filename=_dest_for_companion(main_stem, Path(head.path).name),
+                total_bytes=head.size,
+            )
+            extras += 1
     except httpx.HTTPError:
-        pass  # non-fatal — user can grab mmproj manually later
+        pass  # non-fatal — companions can be fetched manually later
 
     label = "Queued" if not extras else f"Queued (+ {extras} companion)"
-    return HTMLResponse(_QUEUED_CHIP.format(label=label, title=f"Queued {filename}" + (f" and {extras} mmproj file(s)" if extras else "")))
+    return HTMLResponse(_QUEUED_CHIP.format(label=label, title=f"Queued {filename}" + (f" and {extras} companion file(s)" if extras else "")))
 
 
 @app.post("/download/multi", response_class=HTMLResponse)

@@ -1329,9 +1329,11 @@ def analyze(*,
     # (gemma4-assistant here, four layers against the base model's forty-two) and llama.cpp
     # drives them down a different path.
     #
-    # Left OFF by default. Speculative decoding is a throughput trade, not a free win: when
-    # the acceptance rate is poor it is slower than not using it at all, and it interacts with
-    # continuous batching in ways that are hard to predict. Benchmark before trusting it.
+    # PROPOSED, not applied. Like everything else here this only pre-fills the form; nothing
+    # reaches models.ini until the user saves, and clearing spec-type before saving turns it
+    # off. That distinction matters more than usual for this setting: speculative decoding is
+    # a throughput trade, not a free win. With a poor acceptance rate it is slower than not
+    # using it at all, and it interacts with continuous batching unpredictably. Benchmark it.
     if section_name and mtp_rel:
         cur_spec = (current_section or {}).get("spec-draft-model", "").strip()
         values["spec-draft-model"] = cur_spec or mtp_rel

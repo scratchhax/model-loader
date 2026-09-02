@@ -114,6 +114,12 @@
                 <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
                       title="Has a projector ({{ g.companion_name }}) whose modality could not be read from its metadata.">{{ icon('layers-3', 12) }}</span>
               {% endif %}
+              {% if _cap and _cap.speculative %}
+                <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                      title="Speculative decoding is configured: a draft head ({{ _cap.speculative }}) predicts ahead and the main model verifies. A throughput trade rather than a free win — with a poor acceptance rate it is slower than not using it. Benchmark before relying on it.">
+                  {{ icon('zap', 12) }}
+                </span>
+              {% endif %}
               {% if _cap and _cap.mismatch %}
                 <button type="button"
                         hx-post="/models/align-capability"
