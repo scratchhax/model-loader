@@ -446,8 +446,14 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                      key_length: int | None = None, value_length: int | None = None,
                      full_attention_interval: int | None = None,
                      ssm_state_size: int | None = None,
-                     v_bytes_per_elem: float | None = None) -> list[tuple[int, int, float, float]]:
+                     v_bytes_per_elem: float | None = None,
+                     card_ok: "Callable[[float, float, int], bool] | None" = None) -> list[tuple[int, int, float, float]]:
     """For a MoE model on a given backend, sweep n-cpu-moe from 0..layers.
+
+    `card_ok(weight_gb, kv_gb, n_cpu_moe)` is the same per-card feasibility test the fit table
+    applies. Without it the frontier can propose a point that clears the pooled budget but
+    overflows one card, so a preset card recommends a configuration the table beside it marks
+    as not fitting.
     Return list of (n_cpu_moe, max_per_session_ctx_fitting, gpu_weight_gb, kv_gb_at_max_ctx) — pareto frontier.
     Higher n_cpu_moe → higher max_ctx (more offloaded = less VRAM for weights = more room for KV).
 
@@ -473,6 +479,8 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                                    full_attention_interval=full_attention_interval,
                                    ssm_state_size=ssm_state_size,
                                    v_bytes_per_elem=v_bytes_per_elem) / (1024 ** 3)
+            if card_ok is not None and not card_ok(weight_gb, kv_gb, ncm):
+                continue
             if weight_gb + kv_gb <= budget_gb:
                 if ctx > best_ctx:
                     best_ctx = ctx
@@ -492,7 +500,8 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                     key_length: int | None = None, value_length: int | None = None,
                     full_attention_interval: int | None = None,
                     ssm_state_size: int | None = None,
-                    v_bytes_per_elem: float | None = None) -> list[tuple[int, int, float, float]]:
+                    v_bytes_per_elem: float | None = None,
+                    card_ok: "Callable[[float, float], bool] | None" = None) -> list[tuple[int, int, float, float]]:
     """Context-vs-speed frontier for a DENSE model, by moving whole layers off the GPU.
 
     MoE models offload expert weights (`--cpu-moe` / `--n-cpu-moe`), which is cheap because
@@ -503,6 +512,11 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
 
     Returns (cpu_layers, max_per_session_ctx, gpu_weight_gb, kv_gb_at_that_ctx), same tuple
     shape as _pareto_frontier so the preset builder can consume either.
+
+    `card_ok(weight_gb, kv_gb)` applies the same per-card feasibility test the fit table uses.
+    Without it the frontier proposes points that clear the pooled budget but overflow one
+    card, so a preset card could recommend an ngl the table beside it marks as not fitting —
+    and, worse, that llama.cpp would OOM.
     """
     if layers <= 0 or model_gb <= 0:
         return []
@@ -522,6 +536,8 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                                    ssm_state_size=ssm_state_size,
                                    v_bytes_per_elem=v_bytes_per_elem) / (1024 ** 3)
             if weight_gb + kv_gb <= budget_gb and ctx > best_ctx:
+                if card_ok is not None and not card_ok(weight_gb, kv_gb):
+                    continue
                 best_ctx, best_kv = ctx, kv_gb
         if best_ctx == 0:
             continue
@@ -1156,13 +1172,31 @@ def analyze(*,
             overhead_mul = _MODEL_OVERHEAD_SPLIT if gpu_count > 1 else _MODEL_OVERHEAD_SINGLE
             model_gb_rec = model_gb_raw * overhead_mul
             budget = float(recommended.vram_gb) - _RESERVE_PER_GPU * gpu_count - mmproj_vram_gb
+            # Same per-card test the fit table applies. For a MoE the split is attention
+            # (always resident) plus the experts of every layer at or above n-cpu-moe.
+            _mcaps = [c - _RESERVE_PER_GPU for c in ((rec_backend or {}).get("card_vram_gb") or [])]
+            if gpu_count > 1 and len(_mcaps) != gpu_count:
+                _mcaps = [(float(recommended.vram_gb) / gpu_count) - _RESERVE_PER_GPU] * gpu_count
+
+            def _moe_card_ok(weight_gb: float, kv_gb: float, ncm: int) -> bool:
+                if gpu_count <= 1 or not _mcaps:
+                    return True
+                att = model_gb_rec * (1 - moe_ratio)
+                exp = (model_gb_rec * moe_ratio / layers) if layers else 0.0
+                _ts, loads = _balanced_split(layers, ncm, att, exp, kv_gb,
+                                             gpu_count, mmproj_vram_gb, _mcaps)
+                if not loads:
+                    return True
+                return all(l <= c for l, c in zip(loads, _mcaps))
+
             frontier = _pareto_frontier(arch, layers, kv_heads, head_dim, bytes_per,
                                         model_gb_rec, moe_ratio, budget, cands,
                                         n_sessions=n_sessions,
                                         key_length=key_length, value_length=value_length,
                                         full_attention_interval=full_attention_interval,
                                         ssm_state_size=ssm_state_size,
-                                        v_bytes_per_elem=_cache_dtype_bytes(v_cache_type))
+                                        v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
+                                        card_ok=_moe_card_ok)
             presets = _presets_from_frontier(frontier, recommended.name, layers, native_ctx)
             frontier_opts = _frontier_options(frontier, recommended.name, layers, dense=False)
             if presets:
@@ -1172,11 +1206,13 @@ def analyze(*,
                 off_kind = chosen.offload_kind
                 n_cm = chosen.n_cpu_moe
                 values["ctx-size"] = str(rec_ctx * n_sessions)
-                # Recompute the fit table against this preset's actual GPU-resident weight,
-                # otherwise the table keeps reporting the no-offload ceiling and visibly
-                # contradicts the recommendation above it.
-                plans, _ = _fit_all(bytes_per, weight_for=recommended.name, weight_gb=chosen.gpu_gb)
-                recommended = next((pl for pl in plans if pl.name == recommended.name), recommended)
+                # The fit table is deliberately NOT recomputed against the chosen preset's
+                # weight. Doing so pinned every row to that one offload level, so the table
+                # reported the same GPU-resident weight at every context and claimed 100%
+                # resident everywhere — while the preset card above it said 43/65 layers.
+                # The per-context search already agrees with the frontier (verified: both
+                # pick 22 layers off at 262144), so leaving it alone is both correct and
+                # consistent, and each row answers what THAT context actually costs.
         elif not is_moe_now2 and layers > 0:
             # DENSE model: no experts to offload, so trade whole layers for context via
             # `ngl`. Offered whenever the model fits at all, not only when forced — the
@@ -1186,12 +1222,28 @@ def analyze(*,
             overhead_mul = _MODEL_OVERHEAD_SPLIT if gpu_count > 1 else _MODEL_OVERHEAD_SINGLE
             model_gb_rec = model_gb_raw * overhead_mul
             budget = float(recommended.vram_gb) - _RESERVE_PER_GPU * gpu_count - mmproj_vram_gb
+            # Same per-card test the fit table applies, so the presets cannot propose a
+            # point the table marks as not fitting.
+            _fcaps = [c - _RESERVE_PER_GPU for c in ((rec_backend or {}).get("card_vram_gb") or [])]
+            if gpu_count > 1 and len(_fcaps) != gpu_count:
+                _fcaps = [(float(recommended.vram_gb) / gpu_count) - _RESERVE_PER_GPU] * gpu_count
+
+            def _front_card_ok(weight_gb: float, kv_gb: float) -> bool:
+                if gpu_count <= 1 or not _fcaps:
+                    return True
+                _ts, loads = _balanced_split(layers, 0, weight_gb, 0.0, kv_gb,
+                                             gpu_count, mmproj_vram_gb, _fcaps)
+                if not loads:
+                    return True
+                return all(l <= c for l, c in zip(loads, _fcaps))
+
             dfront = _dense_frontier(arch, layers, kv_heads, head_dim, bytes_per,
                                      model_gb_rec, budget, cands, n_sessions=n_sessions,
                                      key_length=key_length, value_length=value_length,
                                      full_attention_interval=full_attention_interval,
                                      ssm_state_size=ssm_state_size,
-                                     v_bytes_per_elem=_cache_dtype_bytes(v_cache_type))
+                                     v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
+                                     card_ok=_front_card_ok)
             presets = _presets_from_dense_frontier(dfront, recommended.name, layers)
             frontier_opts = _frontier_options(dfront, recommended.name, layers, dense=True)
             if presets:
@@ -1207,9 +1259,8 @@ def analyze(*,
                 values["ctx-size"] = str(rec_ctx * n_sessions)
                 if chosen.ngl > 0:
                     values["ngl"] = str(chosen.ngl)
-                # Same as the MoE branch: keep the fit table consistent with the chosen point.
-                plans, _ = _fit_all(bytes_per, weight_for=recommended.name, weight_gb=chosen.gpu_gb)
-                recommended = next((pl for pl in plans if pl.name == recommended.name), recommended)
+                # Same as the MoE branch: the table stays per-context rather than being
+                # recomputed at the chosen preset's offload level.
         if off_kind == "cpu-moe":
             values["cpu-moe"] = "true"
         elif off_kind == "n-cpu-moe" and n_cm > 0:
