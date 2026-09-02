@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'benchmark' %}
+{% block title %}Benchmark{% endblock %}
+
+{% block content %}
+<div class="space-y-6" x-data="benchForm()">
+
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight">Benchmark</h1>
+    <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">
+      Runs a fixed set of prompts against models and records what your hardware actually does.
+      Nothing here changes any configuration &mdash; it only measures.
+    </p>
+  </div>
+
+  {% include "_bench_progress.html" %}
+
+  {# ---------------------------------------------------------------- setup #}
+  <form id="bench-form" hx-post="/benchmark/start" hx-target="#bench-progress" hx-swap="outerHTML"
+        class="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-4">
+
+    <div>
+      <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Backend</label>
+      <select name="backend" x-model="backend"
+              class="mt-1 block w-full md:w-72 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm">
+        {% for b in backends %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1.5">
+        Models
+        <span class="normal-case tracking-normal text-slate-400">&mdash; run with whatever settings their models.ini section already has</span>
+      </div>
+      <div class="grid gap-1.5 [grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))]">
+        {% for s in sections %}
+        <label class="flex items-center gap-2 text-sm rounded-md border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 cursor-pointer hover:border-sky-400">
+          <input type="checkbox" name="aliases" value="{{ s }}" x-model="aliases"
+                 class="rounded border-slate-300 dark:border-slate-600">
+          <span class="font-mono text-xs truncate" title="{{ s }}">{{ s }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div>
+      <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1.5">
+        Prompts
+        {% if not prompts %}<span class="normal-case tracking-normal text-amber-600 dark:text-amber-400">&mdash; none saved yet, add some on the Prompts page</span>{% endif %}
+      </div>
+      <div class="grid gap-1.5 [grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))]">
+        {% for p in prompts %}
+        <label class="flex items-center gap-2 text-sm rounded-md border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 cursor-pointer hover:border-sky-400">
+          <input type="checkbox" name="prompt_ids" value="{{ p.id }}" x-model="promptIds"
+                 class="rounded border-slate-300 dark:border-slate-600">
+          <span class="truncate" title="{{ p.body[:300] }}">{{ p.name }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="flex flex-wrap gap-4">
+      <div>
+        <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Repetitions</label>
+        <input type="number" name="reps" x-model.number="reps" min="1" max="10"
+               class="mt-1 block w-24 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm tabular-nums">
+        <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Medians need a few; 3 is usually enough.</p>
+      </div>
+      <div>
+        <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Max tokens</label>
+        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="4096" step="16"
+               class="mt-1 block w-28 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm tabular-nums">
+        <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 pt-1">
+      <button type="button" @click="open = true"
+              :disabled="!aliases.length || !promptIds.length || {{ 'true' if job.active else 'false' }}"
+              class="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-white
+                     bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed">
+        {{ icon('play', 14) }} Run benchmark
+      </button>
+      <span class="text-xs text-slate-500 dark:text-slate-400" x-show="aliases.length && promptIds.length">
+        <span x-text="aliases.length"></span> model<span x-show="aliases.length != 1">s</span> ·
+        <span x-text="aliases.length * promptIds.length * reps"></span> requests ·
+        about <span x-text="estimate"></span>
+      </span>
+    </div>
+
+    {# ------------------------------------------------------------ confirmation #}
+    {# A browser confirm() cannot carry this much, and the disruption is real enough that a
+       one-line "are you sure?" would understate it. Numbers come from the actual selection. #}
+    <div x-show="open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4"
+         style="background: rgba(0,0,0,.5)" @keydown.escape.window="open = false">
+      <div class="w-full max-w-lg rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl p-5"
+           @click.outside="open = false">
+        <h2 class="text-lg font-semibold flex items-center gap-2">
+          {{ icon('alert-triangle', 18, 'text-amber-500') }} Run benchmark?
+        </h2>
+        <p class="mt-2 text-sm font-medium">
+          This takes over the machine for about <span x-text="estimate"></span>.
+        </p>
+        <ul class="mt-3 space-y-1.5 text-sm text-slate-600 dark:text-slate-300 list-disc pl-5">
+          <li>
+            <span x-text="aliases.length"></span> model<span x-show="aliases.length != 1">s</span>,
+            <span x-text="promptIds.length"></span> prompt<span x-show="promptIds.length != 1">s</span>
+            &times; <span x-text="reps"></span> repetition<span x-show="reps != 1">s</span>
+            = <span x-text="aliases.length * promptIds.length * reps"></span> requests.
+          </li>
+          <li>Every loaded model gets <strong>unloaded</strong>. OpenWebUI requests will stall or fail
+              for the whole run, including anything mid-conversation.</li>
+          <li>Models are loaded and evicted one at a time &mdash; this backend holds only one.</li>
+          <li><strong>Nothing is written to models.ini.</strong> Models run with the settings they already have.</li>
+          <li>You can stop at any time; results collected so far are kept.</li>
+        </ul>
+        <div class="mt-5 flex justify-end gap-2">
+          <button type="button" @click="open = false"
+                  class="px-3 py-2 text-sm rounded-md border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800">
+            Cancel
+          </button>
+          <button type="submit" form="bench-form" @click="open = false"
+                  class="px-3 py-2 text-sm rounded-md bg-sky-600 hover:bg-sky-500 text-white font-medium">
+            Run benchmark
+          </button>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {# ---------------------------------------------------------------- results #}
+  {% if run %}
+  <div class="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-sm font-semibold">Run #{{ run.id }}</h2>
+      <span class="text-xs text-slate-500 dark:text-slate-400 font-mono">
+        {{ run.status }} · {{ run.backend }} · {{ run.reps }} reps · {{ run.max_tokens }} max tokens
+      </span>
+    </div>
+
+    {% if results %}
+    <div class="mt-3 overflow-x-auto">
+      <table class="w-full text-xs tabular-nums">
+        <thead class="text-slate-500 dark:text-slate-400 text-left">
+          <tr>
+            <th class="pr-3 pb-1.5 font-medium">model</th>
+            <th class="pr-3 pb-1.5 font-medium">prompt</th>
+            <th class="pr-3 pb-1.5 font-medium text-right">rep</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="Time until the first character appears. This is the pause you feel before text starts.">TTFT</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="How fast the model read your prompt. Governs how long a long conversation takes to start responding.">prompt tok/s</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="How fast text is produced once it starts.">gen tok/s</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="Share of speculative draft tokens the model accepted, when speculative decoding is on.">draft</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="VRAM in use per card while this request ran. Sampled, so it is a close reading rather than a true peak.">VRAM</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in results %}
+          <tr class="border-t border-slate-100 dark:border-slate-800">
+            <td class="pr-3 py-1 font-mono truncate max-w-[14rem]" title="{{ r.alias }}">{{ r.alias }}</td>
+            <td class="pr-3 py-1 truncate max-w-[10rem]">{{ r.prompt_name }}</td>
+            <td class="pr-3 py-1 text-right">
+              {{ r.rep }}
+              {% if r.cold %}<span class="ml-1 rounded px-1 bg-slate-200 dark:bg-slate-700 text-[9px]" title="First request: includes model load and an empty cache. Read it separately from the rest.">cold</span>{% endif %}
+              {% if r.contended %}<span class="ml-1 rounded px-1 bg-amber-200 dark:bg-amber-900 text-[9px]" title="Another model served a request while this one ran, so this measurement is not clean.">busy</span>{% endif %}
+            </td>
+            <td class="pr-3 py-1 text-right">{% if r.ttft_ms %}{{ '%.0f' | format(r.ttft_ms) }} ms{% else %}&mdash;{% endif %}</td>
+            <td class="pr-3 py-1 text-right">{% if r.prompt_tps %}{{ '%.0f' | format(r.prompt_tps) }}{% else %}&mdash;{% endif %}</td>
+            <td class="pr-3 py-1 text-right font-semibold">{% if r.gen_tps %}{{ '%.1f' | format(r.gen_tps) }}{% else %}&mdash;{% endif %}</td>
+            <td class="pr-3 py-1 text-right">{% if r.draft_acc is not none %}{{ '%.0f' | format(r.draft_acc * 100) }}%{% else %}&mdash;{% endif %}</td>
+            <td class="pr-3 py-1 text-right font-mono text-[10px]">{{ r.peak_vram_json | replace('[','') | replace(']','') | replace(',', ' / ') or '—' }}</td>
+          </tr>
+          {% if r.err %}
+          <tr><td colspan="8" class="pb-1 text-[11px] font-mono text-rose-600 dark:text-rose-400">{{ r.err }}</td></tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="mt-3 grid gap-2 md:grid-cols-2">
+      {% for v in variants %}
+      <div class="text-[11px] rounded-md bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1.5">
+        <span class="font-mono">{{ v.alias }}</span>
+        &mdash; load time
+        {% if v.load_ms %}<span class="font-semibold">{{ '%.1f' | format(v.load_ms / 1000) }} s</span>
+        {% else %}<span class="text-slate-500">not measured (already resident)</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <p class="mt-3 text-[11px] text-slate-500 dark:text-slate-400">
+      Raw measurements, one row per request. <span class="font-semibold">cold</span> rows include the
+      model load and start from an empty cache, so read them apart from the rest rather than averaging
+      them in. Rows marked <span class="font-semibold">busy</span> ran while another model was being
+      served and are not clean comparisons.
+    </p>
+    {% else %}
+    <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">No results recorded for this run.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# ---------------------------------------------------------------- history #}
+  {% if runs %}
+  <div class="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+    <h2 class="text-sm font-semibold mb-2">Previous runs</h2>
+    <div class="space-y-1">
+      {% for r in runs %}
+      <a href="/benchmark/run/{{ r.id }}"
+         class="flex items-center gap-3 text-xs px-2 py-1.5 rounded-md hover:bg-slate-50 dark:hover:bg-slate-800">
+        <span class="font-mono text-slate-500">#{{ r.id }}</span>
+        <span class="rounded px-1.5 py-0.5 text-[10px]
+          {% if r.status == 'done' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+          {% elif r.status == 'running' %}bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300
+          {% elif r.status == 'error' %}bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300
+          {% else %}bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300{% endif %}">{{ r.status }}</span>
+        <span class="font-mono text-slate-500">{{ r.backend }}</span>
+        <span class="text-slate-500">{{ r.n_variants }} model{{ '' if r.n_variants == 1 else 's' }}, {{ r.n_results }} requests</span>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+  function benchForm() {
+    return {
+      open: false,
+      backend: '',
+      aliases: [],
+      promptIds: [],
+      reps: 3,
+      maxTokens: 256,
+      get estimate() {
+        // Mirrors bench.estimate_seconds. Deliberately pessimistic: a number that undersells
+        // the disruption is worse than one that oversells it.
+        const perReq = 4 + this.maxTokens / 30;
+        const secs = Math.round(this.aliases.length * (25 + this.promptIds.length * this.reps * perReq));
+        if (secs < 90) return secs + ' seconds';
+        const m = Math.round(secs / 60);
+        return m < 60 ? m + ' minutes' : (m / 60).toFixed(1) + ' hours';
+      },
+    };
+  }
+</script>
+{% endblock %}

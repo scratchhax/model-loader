@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
-from . import telemetry, db, gguf_meta, hf, hw, ini, services
+from . import telemetry
+from . import bench, db, gguf_meta, hf, hw, ini, services
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -21,6 +22,7 @@ templates.env.globals["hue"] = lambda s: sum(ord(c) for c in (s or "")) % 360
 @app.on_event("startup")
 def _startup() -> None:
     db.init()
+    db.seed_bench_prompts()
     hw.start_sampler()
 
 
@@ -1430,3 +1432,73 @@ def prompts_body(pid: int) -> HTMLResponse:
     if not p:
         return HTMLResponse("", status_code=404)
     return HTMLResponse(p["body"])
+
+
+# ---------------------------------------------------------------- benchmark
+
+def _bench_ctx(request: Request, flash: str = "") -> dict:
+    """Everything the benchmark page needs. Sections are offered rather than GGUF files:
+    a benchmark runs against an alias the router can serve, which is what a section is."""
+    return {
+        "request": request,
+        "sections": ini.section_names(),
+        "prompts": db.list_prompts(),
+        "backends": services._effective_container_names(),
+        "job": bench.state(),
+        "runs": db.bench_runs(limit=15),
+        "flash": flash,
+    }
+
+
+@app.get("/benchmark", response_class=HTMLResponse)
+def benchmark_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse("benchmark.html", _bench_ctx(request))
+
+
+@app.post("/benchmark/start", response_class=HTMLResponse)
+def benchmark_start(request: Request,
+                    backend: str = Form(...),
+                    aliases: list[str] = Form(default=[]),
+                    prompt_ids: list[int] = Form(default=[]),
+                    reps: int = Form(3),
+                    max_tokens: int = Form(256)) -> HTMLResponse:
+    ok, err = bench.start(backend=backend, aliases=aliases, prompt_ids=prompt_ids,
+                          reps=reps, max_tokens=max_tokens)
+    return templates.TemplateResponse("_bench_progress.html", {
+        "request": request, "job": bench.state(), "flash": "" if ok else err,
+    })
+
+
+@app.get("/benchmark/progress", response_class=HTMLResponse)
+def benchmark_progress(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse("_bench_progress.html", {
+        "request": request, "job": bench.state(), "flash": "",
+    })
+
+
+@app.post("/benchmark/cancel", response_class=HTMLResponse)
+def benchmark_cancel(request: Request) -> HTMLResponse:
+    bench.cancel()
+    return templates.TemplateResponse("_bench_progress.html", {
+        "request": request, "job": bench.state(), "flash": "",
+    })
+
+
+@app.get("/benchmark/banner", response_class=HTMLResponse)
+def benchmark_banner(request: Request) -> HTMLResponse:
+    """Site-wide "a benchmark is running" strip. Polled from every page, so it stays cheap:
+    it reads in-memory job state and touches neither docker nor the database."""
+    return templates.TemplateResponse("_bench_banner.html", {
+        "request": request, "job": bench.state(),
+    })
+
+
+@app.get("/benchmark/run/{run_id}", response_class=HTMLResponse)
+def benchmark_run(request: Request, run_id: int) -> HTMLResponse:
+    ctx = _bench_ctx(request)
+    ctx.update({
+        "run": db.bench_run(run_id),
+        "variants": db.bench_variants(run_id),
+        "results": db.bench_results(run_id),
+    })
+    return templates.TemplateResponse("benchmark.html", ctx)

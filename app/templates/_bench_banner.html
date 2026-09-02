@@ -1,0 +1,28 @@
+{% from "_icons.html" import icon %}
+{# Empty (but still polling) when nothing is running, so the banner appears on its own if a
+   run is started from another tab. #}
+<div id="bench-banner"
+     hx-get="/benchmark/banner"
+     hx-trigger="{% if job.active %}every 3s{% else %}every 15s{% endif %}"
+     hx-swap="outerHTML">
+  {% if job.active %}
+  <div class="sticky top-14 z-20 border-b border-amber-300 dark:border-amber-800 bg-amber-100 dark:bg-amber-950/70">
+    <div class="mx-auto max-w-6xl px-6 py-2 flex items-center gap-3 text-sm text-amber-900 dark:text-amber-200">
+      {{ icon('alert-triangle', 15) }}
+      <span class="font-medium">Benchmark running</span>
+      <span class="text-amber-800/80 dark:text-amber-300/80 tabular-nums">
+        {{ job.done }}/{{ job.total }} requests
+        {%- if job.current %} &middot; <span class="font-mono">{{ job.current }}</span>{% endif %}
+      </span>
+      <span class="text-amber-800/70 dark:text-amber-300/70 hidden sm:inline">
+        models are being loaded and evicted &mdash; other requests will stall or fail
+      </span>
+      <span class="ml-auto flex items-center gap-2">
+        <a href="/benchmark" class="text-xs underline hover:no-underline">view</a>
+        <button type="button" hx-post="/benchmark/cancel" hx-target="#bench-banner" hx-swap="outerHTML"
+                class="text-xs px-2 py-1 rounded-md bg-rose-600 hover:bg-rose-500 text-white">Stop</button>
+      </span>
+    </div>
+  </div>
+  {% endif %}
+</div>

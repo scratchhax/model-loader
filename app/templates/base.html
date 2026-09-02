@@ -130,6 +130,7 @@
         {{ navlink('/config', 'config', 'models.ini', 'file-cog') }}
         {{ navlink('/containers', 'containers', 'Containers', 'server') }}
         {{ navlink('/prompts', 'prompts', 'Prompts', 'message-square-quote') }}
+        {{ navlink('/benchmark', 'benchmark', 'Benchmark', 'gauge') }}
         {{ navlink('/settings', 'settings', 'Settings', 'settings') }}
       </nav>
       <div class="flex items-center gap-1">
@@ -148,6 +149,12 @@
       </div>
     </div>
   </header>
+  {# A benchmark run makes the whole box behave strangely - models evicted mid-conversation,
+     requests stalling - and it keeps running server-side after the tab that started it is
+     closed. Saying so on every page is the difference between "the machine is broken" and
+     "something I started is still going". Polls only while a run is active. #}
+  <div id="bench-banner" hx-get="/benchmark/banner" hx-trigger="load, every 5s" hx-swap="outerHTML"></div>
+
   <main class="mx-auto max-w-6xl px-6 py-8">
     {% block content %}{% endblock %}
   </main>

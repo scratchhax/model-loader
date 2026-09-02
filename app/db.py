@@ -84,6 +84,47 @@ def init() -> None:
             -- JSON, rather than as columns for the flags that seemed interesting: what makes
             -- two runs different is discovered by diffing these, so a fixed column set would
             -- have to be extended every time it guessed wrong.
+            -- Benchmark results. Deliberately a dead end: nothing reads these back into a
+            -- configuration decision. They exist so a person can look at what their hardware
+            -- actually does, which is why every measurement is stored raw rather than reduced
+            -- to a score.
+            CREATE TABLE IF NOT EXISTS bench_run (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                backend     TEXT NOT NULL,
+                status      TEXT NOT NULL,           -- running | done | cancelled | error
+                started_at  REAL NOT NULL,
+                finished_at REAL,
+                reps        INTEGER NOT NULL DEFAULT 1,
+                max_tokens  INTEGER NOT NULL DEFAULT 256,
+                note        TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS bench_variant (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id   INTEGER NOT NULL,
+                alias    TEXT NOT NULL,
+                argv_json TEXT NOT NULL DEFAULT '{}',
+                load_ms  REAL,
+                UNIQUE(run_id, alias)
+            );
+            CREATE TABLE IF NOT EXISTS bench_result (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                variant_id  INTEGER NOT NULL,
+                prompt_name TEXT NOT NULL,
+                rep         INTEGER NOT NULL,
+                cold        INTEGER NOT NULL DEFAULT 0,
+                ttft_ms     REAL,
+                total_ms    REAL,
+                prompt_n    INTEGER,
+                prompt_tps  REAL,
+                gen_n       INTEGER,
+                gen_tps     REAL,
+                draft_n     INTEGER,
+                draft_acc   REAL,
+                peak_vram_json TEXT NOT NULL DEFAULT '[]',
+                contended   INTEGER NOT NULL DEFAULT 0,
+                err         TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS bench_result_variant ON bench_result(variant_id);
             CREATE TABLE IF NOT EXISTS server_config (
                 backend    TEXT NOT NULL,
                 instance   TEXT NOT NULL,
@@ -362,3 +403,130 @@ def server_configs_for(instances: list[str]) -> dict[str, dict]:
         except ValueError:
             out[r["instance"]] = {}
     return out
+
+
+# ---------------------------------------------------------------- benchmark
+
+def bench_create_run(backend: str, reps: int, max_tokens: int, started_at: float) -> int:
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO bench_run(backend, status, started_at, reps, max_tokens) "
+            "VALUES(?, 'running', ?, ?, ?)", (backend, started_at, int(reps), int(max_tokens)))
+        return int(cur.lastrowid)
+
+
+def bench_finish_run(run_id: int, status: str, finished_at: float, note: str = "") -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE bench_run SET status = ?, finished_at = ?, note = ? WHERE id = ?",
+                  (status, finished_at, note, int(run_id)))
+
+
+def bench_add_variant(run_id: int, alias: str, argv_json: str = "{}") -> int:
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO bench_variant(run_id, alias, argv_json) VALUES(?, ?, ?)",
+            (int(run_id), alias, argv_json))
+        if cur.lastrowid:
+            return int(cur.lastrowid)
+        row = c.execute("SELECT id FROM bench_variant WHERE run_id = ? AND alias = ?",
+                        (int(run_id), alias)).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def bench_set_load_ms(variant_id: int, load_ms: float | None) -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE bench_variant SET load_ms = ? WHERE id = ?", (load_ms, int(variant_id)))
+
+
+def bench_add_result(variant_id: int, **kw) -> None:
+    cols = ("prompt_name", "rep", "cold", "ttft_ms", "total_ms", "prompt_n", "prompt_tps",
+            "gen_n", "gen_tps", "draft_n", "draft_acc", "peak_vram_json", "contended", "err")
+    vals = [int(variant_id)] + [kw.get(k) for k in cols]
+    with _LOCK, _conn() as c:
+        c.execute("INSERT INTO bench_result(variant_id, " + ", ".join(cols) + ") "
+                  "VALUES(" + ", ".join("?" * (len(cols) + 1)) + ")", vals)
+
+
+def bench_runs(limit: int = 25) -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT r.*, (SELECT COUNT(*) FROM bench_variant v WHERE v.run_id = r.id) AS n_variants, "
+            "       (SELECT COUNT(*) FROM bench_result x JOIN bench_variant v2 ON x.variant_id = v2.id "
+            "        WHERE v2.run_id = r.id) AS n_results "
+            "FROM bench_run r ORDER BY r.id DESC LIMIT ?", (int(limit),)).fetchall())
+
+
+def bench_run(run_id: int) -> sqlite3.Row | None:
+    with _LOCK, _conn() as c:
+        return c.execute("SELECT * FROM bench_run WHERE id = ?", (int(run_id),)).fetchone()
+
+
+def bench_variants(run_id: int) -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute("SELECT * FROM bench_variant WHERE run_id = ? ORDER BY id",
+                              (int(run_id),)).fetchall())
+
+
+def bench_results(run_id: int) -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT x.*, v.alias FROM bench_result x JOIN bench_variant v ON x.variant_id = v.id "
+            "WHERE v.run_id = ? ORDER BY v.id, x.prompt_name, x.rep", (int(run_id),)).fetchall())
+
+
+def prompts_by_ids(ids: list[int]) -> list[sqlite3.Row]:
+    if not ids:
+        return []
+    qs = ",".join("?" * len(ids))
+    with _LOCK, _conn() as c:
+        return list(c.execute("SELECT * FROM prompts WHERE id IN (%s) ORDER BY name" % qs,
+                              [int(i) for i in ids]).fetchall())
+
+
+# Prompts the benchmark needs to be useful out of the box. Seeded once, guarded by a flag
+# rather than by "is the table empty", so someone who deletes them does not get them back on
+# the next restart. They are ordinary prompts afterwards - editable, deletable, and usable
+# from the Prompts page like any other.
+_BENCH_SEED_KEY = "bench_prompts_seeded"
+
+_SWA_BLURB = (
+    "Sliding-window attention limits each token's view to a fixed span of recent tokens "
+    "rather than the whole sequence. Layers alternate between local windows and full global "
+    "attention, so only the global layers carry a KV cache that grows with context length. "
+    "This keeps memory close to flat as context grows, at some cost to how far information "
+    "can travel in a single layer."
+)
+
+_BENCH_PROMPTS = (
+    ("Bench: creative writing",
+     "Write the opening three paragraphs of a short story about a lighthouse keeper who "
+     "discovers the light has been going out on its own. Establish the setting and their "
+     "state of mind. Do not summarise the plot; write the prose itself."),
+    ("Bench: coding",
+     "Write a Python function merge_intervals(intervals) that takes a list of (start, end) "
+     "tuples and returns them merged and sorted. Handle empty input and touching intervals. "
+     "Include a docstring and three test cases."),
+    ("Bench: reasoning",
+     "A train leaves station A at 14:05 travelling at 80 km/h. A second train leaves station "
+     "B, 300 km away, at 14:35 travelling toward A at 100 km/h. At what time do they meet, "
+     "and how far from station A? Show your working step by step."),
+    # Long input on purpose: prompt processing is a separate cost from generation, and only a
+    # prompt big enough to take real time makes the prompt tok/s column mean anything.
+    ("Bench: summarise long input",
+     "Summarise the following in exactly five bullet points."
+     + (chr(10) + chr(10)) + ((_SWA_BLURB + chr(10) + chr(10)) * 12)),
+)
+
+
+def seed_bench_prompts() -> int:
+    """Add the built-in benchmark prompts once. Returns how many were added."""
+    if get_setting(_BENCH_SEED_KEY, ""):
+        return 0
+    have = {p["name"] for p in list_prompts()}
+    added = 0
+    for name, body in _BENCH_PROMPTS:
+        if name not in have:
+            add_prompt(name, body)
+            added += 1
+    set_setting(_BENCH_SEED_KEY, "1")
+    return added
