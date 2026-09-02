@@ -34,6 +34,14 @@ Pick how many chats will hit the model at once, then pick a priority. Each prese
 
 The speed figures are an **ordering hint, not a benchmark**. They come from a calibrated penalty per CPU-resident layer; they will tell you Fast beats Long context, and they will not tell you your tokens per second. The panel says so too.
 
+### The models.ini editor
+
+![The models.ini page: one card per section showing every set option as a chip — model path, ctx-size, ngl, cache types, tensor-split, n-cpu-moe — with Copy CLI, Edit and Delete per section](docs/models_ini.png)
+
+One card per section, with every option you have set shown as a chip, so the whole file is readable at a glance rather than by scrolling a text editor. **Copy CLI** renders the section as the equivalent `llama-server` command line, which is useful for reproducing a config outside Model Loader or pasting into a bug report.
+
+`file present` confirms the section resolves to a GGUF on disk. That check follows the section's `model =` path rather than matching its name against a filename, so renaming a section to give a model a short API id does not break the link.
+
 ### Routing models to backends
 
 ![The Models directory: each downloaded GGUF with its status, whether it is in models.ini and under what alias, a vision capability chip, and per-backend "serves on" toggles](docs/models_available.png)
