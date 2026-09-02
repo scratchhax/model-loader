@@ -244,12 +244,29 @@
             {% set row = plan_row_map[p.name].get(ctx) %}
             {% if row %}
               {% set title = ('%.2f GB total (%.2f model + %.2f KV) · free %.2f GB' % (row.total_gb, row.model_gb, row.kv_gb, row.free_gb)) %}
-              <td class="py-1.5 px-2 text-right tabular-nums {% if row.fits %}text-emerald-600 dark:text-emerald-400{% else %}text-red-500 dark:text-red-400{% endif %}"
-                  title="{{ title }}{% if row.offload_kind %} · via {{ row.offload_kind }}{% if row.n_cpu_moe %}={{ row.n_cpu_moe }}{% endif %}{% endif %}">
-                {% if row.fits %}✓ {{ '%.1f' % row.total_gb }}{% else %}✗ {{ '%.1f' % row.total_gb }}{% endif %}
-                {% if row.offload_kind == 'cpu-moe' %}<sup class="text-[9px] text-slate-500 font-sans">cpu-moe</sup>
-                {% elif row.offload_kind == 'n-cpu-moe' %}<sup class="text-[9px] text-slate-500 font-sans">ncm={{ row.n_cpu_moe }}</sup>
-                {% elif row.offload_kind == 'ngl' %}<sup class="text-[9px] text-slate-500 font-sans">{{ row.n_cpu_moe }}L on CPU</sup>
+              {# Colour encodes HOW MUCH of the model stays on the GPU, not merely whether it
+                 fits. A tick alone hid the difference between a config that is fully resident
+                 and one clinging on with a quarter of its weights, which is the difference
+                 between fast and unusable. A row that does not fit keeps the cross. #}
+              {% set pct = row.gpu_pct %}
+              {% set tone = 'violet' if pct >= 100 else 'emerald' if pct >= 70 else 'yellow'
+                            if pct >= 50 else 'orange' if pct >= 25 else 'red' %}
+              <td class="py-1.5 px-2 text-right tabular-nums align-top
+                  {% if not row.fits %}text-red-500 dark:text-red-400
+                  {% elif tone == 'violet' %}text-violet-600 dark:text-violet-400
+                  {% elif tone == 'emerald' %}text-emerald-600 dark:text-emerald-400
+                  {% elif tone == 'yellow' %}text-yellow-600 dark:text-yellow-400
+                  {% elif tone == 'orange' %}text-orange-600 dark:text-orange-400
+                  {% else %}text-red-600 dark:text-red-400{% endif %}"
+                  title="{{ title }}{% if row.fits %} · {{ pct }}% of the model on GPU{% endif %}{% if row.offload_kind %} · via {{ row.offload_kind }}{% if row.n_cpu_moe %}={{ row.n_cpu_moe }}{% endif %}{% endif %}">
+                <div>{% if row.fits %}✓{% else %}✗{% endif %} {{ '%.1f' % row.total_gb }}</div>
+                {% if row.offload_kind %}
+                  <div class="text-[9px] leading-tight text-slate-500 dark:text-slate-400 font-sans">
+                    {% if row.offload_kind == 'cpu-moe' %}cpu-moe
+                    {% elif row.offload_kind == 'n-cpu-moe' %}ncm={{ row.n_cpu_moe }}
+                    {% else %}{{ row.n_cpu_moe }}L on CPU{% endif %}
+                    · {{ pct }}%
+                  </div>
                 {% endif %}
               </td>
             {% else %}

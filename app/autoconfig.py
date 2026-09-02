@@ -182,6 +182,10 @@ class FitRow:
     free_gb: float
     offload_kind: str = ""   # "" | "cpu-moe" | "n-cpu-moe"
     n_cpu_moe: int = 0       # populated when offload_kind == "n-cpu-moe"
+    gpu_pct: int = 100       # share of the model's WEIGHTS resident on the GPU, 0-100.
+                             # Measured in bytes rather than layers because for a MoE the
+                             # layer count says little: attention stays resident while only
+                             # experts move, so "layers on GPU" overstates what is really there.
 
 
 @dataclass
@@ -1019,6 +1023,7 @@ def analyze(*,
                 total_gb=round(total, 2), fits=fits,
                 free_gb=round(float(b["vram_gb"]) - total, 2),
                 offload_kind=offload_kind, n_cpu_moe=n_cm,
+                gpu_pct=(round(100.0 * gpu_model_gb / model_gb) if model_gb > 0 else 100),
             ))
             if fits:
                 max_fit = per_session_ctx
