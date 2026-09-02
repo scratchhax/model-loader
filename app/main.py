@@ -1028,12 +1028,13 @@ def _backend_list() -> list[dict]:
 
 
 def _predicted_vram_gb(section: str) -> float | None:
-    """What autoconfig expects this section to occupy in VRAM: weights + KV, in GB.
+    """Autoconfig's budget for this section: weights + KV only, in GB.
 
-    Used only to sit beside a MEASURED figure on the benchmark results page. That comparison is
-    the one thing that makes the fit maths falsifiable - it has been validated against
-    llama.cpp's own estimator, but never against what the cards actually end up holding.
-    Returns None whenever it cannot be worked out; a missing bar is fine, a wrong one is not.
+    NOT the total the cards will hold. Compute buffers and the projector are budgeted elsewhere
+    and are not small - llama.cpp's own estimator puts gemma-4-E4B's compute buffers at 4 GB
+    against 2.4 GB of weights - so a measured peak reads several GB above this by construction.
+    The chart labels both bars accordingly; presenting them as rivals would make a correct
+    estimate look 5 GB wrong.
     """
     try:
         gguf_path, model_rel, rel = _resolve_section_gguf(section)
@@ -1603,6 +1604,12 @@ def _bench_charts(run_id: int, results: list, sweeps: list) -> dict:
     # Measured VRAM against what autoconfig predicted. The one chart that can falsify the fit
     # maths: everything else here measures speed, which the estimator never claimed to know.
     vram_labels, vram_measured, vram_predicted = [], [], []
+    capacity = 0.0
+    try:
+        for b in _backend_list():
+            capacity = max(capacity, float(b.get("vram_gb") or 0))
+    except Exception:  # noqa: BLE001
+        capacity = 0.0
     for a in aliases:
         peaks = []
         for r in clean:
@@ -1619,6 +1626,7 @@ def _bench_charts(run_id: int, results: list, sweeps: list) -> dict:
         vram_predicted.append(_predicted_vram_gb(a))
 
     return {
+        "capacity_gb": round(capacity, 2),
         "aliases": aliases,
         "gen": gen_series,
         "ttft": ttft_series,

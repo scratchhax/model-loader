@@ -360,16 +360,23 @@
     // 4. The only chart that can falsify anything: what autoconfig predicted against what the
     //    cards actually held.
     if (C.vram_labels.length) {
-      new Chart(card('VRAM: measured vs predicted',
-                     'Peak observed during the run against what autoconfig expects. Predicted bars are missing where it could not be worked out.'), {
+      const ds = [
+        { label: 'peak in use (everything on the cards)', data: C.vram_measured,
+          backgroundColor: palette[0], borderRadius: 3 },
+        { label: 'autoconfig budget (weights + KV only)', data: C.vram_predicted,
+          backgroundColor: palette[3], borderRadius: 3 },
+      ];
+      // Capacity as a flat reference line. "How close to the edge" is the question this chart
+      // can actually answer; the two bars are not rivals and the caption says why.
+      if (C.capacity_gb) {
+        ds.push({ label: 'card capacity', type: 'line', borderDash: [5, 4],
+                  data: C.vram_labels.map(() => C.capacity_gb),
+                  borderColor: palette[4], pointRadius: 0, fill: false });
+      }
+      new Chart(card('VRAM headroom',
+                     'Peak observed during the run, against total capacity. The budget bar covers weights and KV only — compute buffers and the projector are extra, so the peak sits well above it by design, not by error.'), {
         type: 'bar',
-        data: {
-          labels: C.vram_labels,
-          datasets: [
-            { label: 'measured peak', data: C.vram_measured, backgroundColor: palette[0], borderRadius: 3 },
-            { label: 'autoconfig prediction', data: C.vram_predicted, backgroundColor: palette[3], borderRadius: 3 },
-          ],
-        },
+        data: { labels: C.vram_labels, datasets: ds },
         options: { responsive: true, maintainAspectRatio: false,
                    plugins: { legend: { position: 'bottom' } }, scales: axes('', 'GB') },
       });
