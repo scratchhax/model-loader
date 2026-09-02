@@ -123,13 +123,33 @@
           {% set cap = (owui.caps if owui else {}).get(g.model_id) %}
           {% if cap %}
           <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <span class="text-[10px] uppercase tracking-wide text-slate-400">vision</span>
-            <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono border
-              {% if cap.should %}bg-violet-100 text-violet-800 border-violet-300 dark:bg-violet-950 dark:text-violet-300 dark:border-violet-800
-              {% else %}bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700{% endif %}"
-                  title="From models.ini: {{ 'has an mmproj projector' if cap.should else 'no mmproj, cannot accept images' }}">
-              {{ 'capable' if cap.should else 'text-only' }}
+            {# Modality chips read from the projector's OWN metadata, not from the mere
+               presence of an mmproj: llama.cpp loads image and audio encoders through the
+               same --mmproj slot, so "has a projector" does not mean "takes pictures".
+               Only the image chip corresponds to an OpenWebUI capability — there is no audio
+               flag to push — so audio is shown here and synced nowhere. #}
+            <span class="text-[10px] uppercase tracking-wide text-slate-400">accepts</span>
+            {% if 'vision' in cap.modalities %}
+            <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border
+                         bg-violet-100 text-violet-800 border-violet-300 dark:bg-violet-950 dark:text-violet-300 dark:border-violet-800"
+                  title="Projector declares clip.vision.* — this model can accept images, and OpenWebUI is told so">
+              {{ icon('image', 10) }} image
             </span>
+            {% endif %}
+            {% if 'audio' in cap.modalities %}
+            <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border
+                         bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950 dark:text-sky-300 dark:border-sky-800"
+                  title="Projector declares clip.audio.* — this model can accept audio directly. OpenWebUI has no audio capability flag, so this is not synced to it.">
+              {{ icon('mic', 10) }} audio
+            </span>
+            {% endif %}
+            {% if not cap.modalities %}
+            <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono border
+                         bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700"
+                  title="No mmproj in this section — text only">
+              text-only
+            </span>
+            {% endif %}
             {% if cap.mismatch %}
             <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800"
                   title="OpenWebUI currently has: {% for mid, cur in cap.current %}{{ mid }}={{ 'on' if cur else ('off' if cur is not none else 'unset') }} {% endfor %}">

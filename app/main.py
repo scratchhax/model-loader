@@ -211,6 +211,7 @@ def _owui_visibility() -> dict:
     # vision flag is just as broken with one connection as with five.
     want = services.openwebui_capability_plan()
     have = services.openwebui_capability_state()
+    mods = services.section_modalities()
     caps: dict[str, dict] = {}
     # Match the id back to its section by NAME, never by splitting on dots: OpenWebUI ids are
     # "<prefix>.<section>" but section names contain dots too (Qwen3.8-27B-Q4_K_M), so
@@ -220,7 +221,8 @@ def _owui_visibility() -> dict:
         section = next((n for n in _sections if mid == n or mid.endswith("." + n)), None)
         if section is None:
             continue
-        row = caps.setdefault(section, {"should": should, "current": [], "mismatch": False})
+        row = caps.setdefault(section, {"should": should, "current": [], "mismatch": False,
+                                        "modalities": mods.get(section, [])})
         cur = have.get(mid)
         row["current"].append((mid, cur))
         if cur != should:

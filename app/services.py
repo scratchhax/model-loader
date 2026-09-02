@@ -1630,3 +1630,21 @@ def projector_modalities(mmproj_rel_or_abs: str) -> frozenset:
         _PROJ_MODALITY_CACHE.clear()
     _PROJ_MODALITY_CACHE[key] = out
     return out
+
+
+def section_modalities() -> dict[str, list[str]]:
+    """{section name -> sorted modalities its projector encodes}. Empty list = text-only.
+
+    Separate from openwebui_capability_plan(), which reduces this to a single vision bool
+    because that is all OpenWebUI models. Audio has no OpenWebUI capability flag at all, so
+    an audio modality can be shown here but cannot be pushed anywhere — it is Model Loader's
+    own display, not a setting.
+    """
+    out: dict[str, list[str]] = {}
+    try:
+        for name in ini.section_names():
+            mm = (ini.get_section(name) or {}).get("mmproj", "").strip()
+            out[name] = sorted(projector_modalities(mm)) if mm else []
+    except (OSError, KeyError, AttributeError):
+        return {}
+    return out
