@@ -1559,7 +1559,15 @@ def analyze(*,
         # If MoE + offload needed, compute the preset frontier on the recommended backend
         # and let the requested preset override ctx / ncm.
         is_moe_now2 = isinstance(experts, int) and experts > 1
-        if is_moe_now2 and off_kind:
+        # Not `and off_kind`. A MoE that needs no offload used to match neither this branch nor
+        # the dense one below, and fell out with no presets AND no frontier - which the template
+        # renders as a missing Priority section and no explanation for its absence, because the
+        # note that covers "too few tradeoffs to show" is itself guarded on having a frontier.
+        # The dense branch already states the rule this now follows: offer the tradeoff whenever
+        # the model fits at all, not only when it is forced, because choosing context over speed
+        # deliberately is the point. Nothing reached this state until a corrected KV estimate let
+        # gemma-4-26B-A4B fit without offload for the first time.
+        if is_moe_now2 and layers > 0:
             gpu_count = max(1, int((rec_backend or {}).get("gpu_count", 1)))
             overhead_mul = _MODEL_OVERHEAD_SPLIT if gpu_count > 1 else _MODEL_OVERHEAD_SINGLE
             model_gb_rec = model_gb_raw * overhead_mul
