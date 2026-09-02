@@ -1284,7 +1284,7 @@ def analyze(*,
                                         n_sessions=n_sessions,
                                         key_length=key_length, value_length=value_length,
                                         full_attention_interval=full_attention_interval,
-                                        ssm_state_size=ssm_state_size, **_swa,
+                                        ssm_state_size=ssm_state_size,
                                         v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
                                         card_ok=_moe_card_ok, swa=_swa)
             presets = _presets_from_frontier(frontier, recommended.name, layers, native_ctx)
@@ -1328,7 +1328,7 @@ def analyze(*,
                                      model_gb_rec, budget, cands, n_sessions=n_sessions,
                                      key_length=key_length, value_length=value_length,
                                      full_attention_interval=full_attention_interval,
-                                     ssm_state_size=ssm_state_size, **_swa,
+                                     ssm_state_size=ssm_state_size,
                                      v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
                                      card_ok=_front_card_ok, swa=_swa)
             presets = _presets_from_dense_frontier(dfront, recommended.name, layers)
