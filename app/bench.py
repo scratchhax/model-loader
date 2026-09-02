@@ -291,7 +291,7 @@ def _other_traffic(container: str, aliases: set[str], since: float) -> bool:
 def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
           reps: int = 3, max_tokens: int = _DEFAULT_MAX_TOKENS) -> tuple[bool, str]:
     """Kick off a run in the background. One at a time, refused otherwise."""
-    global _THREAD
+    global _THREAD, _STATE
     aliases = [a for a in aliases if a]
     if not aliases:
         return False, "no models selected"
@@ -312,7 +312,6 @@ def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
     _CANCEL.clear()
     started = time.time()
     run_id = db.bench_create_run(backend, reps, max_tokens, started)
-    global _STATE
     with _LOCK:
         # A fresh object rather than mutating the last run's, so no field can survive by
         # being one someone forgot to reset.
