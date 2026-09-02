@@ -80,6 +80,19 @@ def init() -> None:
                 ON req_timing(model_path, ts DESC);
             CREATE INDEX IF NOT EXISTS req_timing_alias
                 ON req_timing(alias, ts DESC);
+            -- The arguments one spawned llama-server instance was given. Stored whole, as
+            -- JSON, rather than as columns for the flags that seemed interesting: what makes
+            -- two runs different is discovered by diffing these, so a fixed column set would
+            -- have to be extended every time it guessed wrong.
+            CREATE TABLE IF NOT EXISTS server_config (
+                backend    TEXT NOT NULL,
+                instance   TEXT NOT NULL,
+                alias      TEXT NOT NULL DEFAULT '',
+                model_path TEXT NOT NULL DEFAULT '',
+                argv_json  TEXT NOT NULL DEFAULT '{}',
+                first_seen REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (backend, instance)
+            );
             CREATE TABLE IF NOT EXISTS prompts (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL,
@@ -279,3 +292,70 @@ def recent_timings(*, model_path: str = "", alias: str = "",
 def timing_row_count() -> int:
     with _LOCK, _conn() as c:
         return int(c.execute("SELECT COUNT(*) AS n FROM req_timing").fetchone()["n"])
+
+
+def record_server_configs(backend: str, configs: list) -> int:
+    """Upsert the argv of each spawned instance. Re-ingest overwrites, because a later pass
+    over the log may have seen the full argv block where an earlier one caught only the
+    announcement line."""
+    if not configs:
+        return 0
+    import json as _json
+    rows = [(backend, c.instance, c.alias, c.model_path,
+             _json.dumps(c.argv or {}, sort_keys=True), c.first_seen) for c in configs]
+    with _LOCK, _conn() as c:
+        c.executemany(
+            "INSERT INTO server_config(backend, instance, alias, model_path, argv_json, first_seen) "
+            "VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(backend, instance) DO UPDATE SET "
+            "  alias      = CASE WHEN excluded.alias      != '' THEN excluded.alias      ELSE server_config.alias END, "
+            "  model_path = CASE WHEN excluded.model_path != '' THEN excluded.model_path ELSE server_config.model_path END, "
+            "  argv_json  = CASE WHEN excluded.argv_json  != '{}' THEN excluded.argv_json ELSE server_config.argv_json END, "
+            "  first_seen = CASE WHEN server_config.first_seen = 0 THEN excluded.first_seen ELSE server_config.first_seen END",
+            rows,
+        )
+    return len(rows)
+
+
+def timings_by_instance(*, model_path: str = "", alias: str = "",
+                        min_gen_tokens: int = 0) -> list[sqlite3.Row]:
+    """Per-instance aggregates for one model, newest instance first.
+
+    Grouping is by instance because the router respawns on any argument change, so an instance
+    is exactly one configuration. Percentiles are computed by the caller: SQLite has no median,
+    and the row counts here are small enough that sorting in Python is cheaper than faking it.
+    """
+    where, params = ["gen_tokens >= ?"], [int(min_gen_tokens)]
+    if model_path:
+        where.append("model_path = ?")
+        params.append(model_path)
+    elif alias:
+        where.append("alias = ?")
+        params.append(alias)
+    else:
+        return []
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT t.instance, t.gen_tps, t.prompt_tps, t.draft_acc, t.draft_len, t.ts, "
+            "       t.spec_type, t.backend "
+            "FROM req_timing t WHERE " + " AND ".join(where) + " ORDER BY t.ts DESC", params
+        ).fetchall())
+
+
+def server_configs_for(instances: list[str]) -> dict[str, dict]:
+    """{instance: argv dict} for the given instances."""
+    if not instances:
+        return {}
+    import json as _json
+    qs = ",".join("?" * len(instances))
+    with _LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT instance, argv_json FROM server_config WHERE instance IN (%s)" % qs,
+            list(instances)).fetchall()
+    out = {}
+    for r in rows:
+        try:
+            out[r["instance"]] = _json.loads(r["argv_json"] or "{}")
+        except ValueError:
+            out[r["instance"]] = {}
+    return out

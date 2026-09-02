@@ -83,6 +83,74 @@
       {% endif %}
     </div>
 
+    {# Every configuration this model has actually run under. The columns are not chosen here:
+       config_history diffs the stored argv and returns whichever flags differ, so this table
+       describes ctx and parallel for one model and draft knobs for another without either
+       being anticipated. #}
+    {% if cfgh and cfgh | length > 1 %}
+    <div class="mt-3 pt-3 border-t border-emerald-200 dark:border-emerald-900">
+      <div class="text-[11px] uppercase tracking-wide text-emerald-800 dark:text-emerald-300 mb-1.5">
+        Configurations compared
+        <span class="normal-case tracking-normal text-emerald-700/70 dark:text-emerald-400/70">
+          &mdash; measured, not predicted
+        </span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-[11px] tabular-nums">
+          <thead class="text-emerald-800/70 dark:text-emerald-400/70">
+            <tr class="text-left">
+              <th class="pr-3 pb-1 font-medium">when</th>
+              <th class="pr-3 pb-1 font-medium text-right">tok/s</th>
+              <th class="pr-3 pb-1 font-medium text-right">vs best</th>
+              <th class="pr-3 pb-1 font-medium text-right">n</th>
+              {% if cfgh | selectattr('draft_acc_p50') | list %}
+              <th class="pr-3 pb-1 font-medium text-right">draft</th>
+              {% endif %}
+              {% for k in (cfgh[0].diff.keys() | list) %}
+              <th class="pr-3 pb-1 font-mono font-medium">{{ k | replace('--', '') }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in cfgh %}
+            <tr class="border-t border-emerald-100 dark:border-emerald-900/50
+                       {% if c.is_current %}bg-emerald-100/60 dark:bg-emerald-900/30{% endif %}">
+              <td class="pr-3 py-1 whitespace-nowrap">
+                {{ c.age_str }}
+                {% if c.is_current %}<span class="ml-1 rounded px-1 bg-emerald-600 text-white text-[9px]">now</span>{% endif %}
+              </td>
+              <td class="pr-3 py-1 text-right font-semibold">{{ '%.1f' | format(c.gen_p50) }}</td>
+              <td class="pr-3 py-1 text-right {% if c.rel_pct < 90 %}text-amber-700 dark:text-amber-400{% endif %}">
+                {{ c.rel_pct }}%
+              </td>
+              <td class="pr-3 py-1 text-right text-emerald-700/70 dark:text-emerald-400/70">{{ c.n }}</td>
+              {% if cfgh | selectattr('draft_acc_p50') | list %}
+              <td class="pr-3 py-1 text-right">
+                {% if c.draft_acc_p50 is not none %}
+                  {{ '%.0f' | format(c.draft_acc_p50 * 100) }}%{% if c.draft_len_p50 %}<span class="text-emerald-700/60 dark:text-emerald-400/60"> / {{ '%.1f' | format(c.draft_len_p50) }}</span>{% endif %}
+                {% else %}<span class="text-emerald-700/40 dark:text-emerald-400/40">&mdash;</span>{% endif %}
+              </td>
+              {% endif %}
+              {% for k in (cfgh[0].diff.keys() | list) %}
+              <td class="pr-3 py-1 font-mono whitespace-nowrap
+                         {% if c.diff.get(k) == 'unset' %}text-emerald-700/40 dark:text-emerald-400/40{% endif %}">
+                {{ c.diff.get(k, 'unset') }}
+              </td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-1.5 text-[10px] text-emerald-800/70 dark:text-emerald-400/70">
+        Each row is one set of arguments, pooled across every restart that ran it. Only the flags
+        that actually differ are shown. Medians over real requests, so rows with a small
+        <span class="font-mono">n</span> or from different periods are not a controlled experiment
+        &mdash; a consistent gap across many requests is worth acting on, a few percent is not.
+      </p>
+    </div>
+    {% endif %}
+
     {% if tel.spread_pct > 60 %}
     <p class="mt-2 text-[11px] text-emerald-800/80 dark:text-emerald-400/80">
       Wide spread ({{ tel.spread_pct }}% of the median): these requests ran under varied conditions —

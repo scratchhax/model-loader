@@ -1075,8 +1075,9 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
     try:
         telemetry.ingest(services._effective_container_names())
         tel = telemetry.stats_for(model_path=model_rel, alias=name)
+        cfgh = telemetry.config_history(model_path=model_rel, alias=name)
     except Exception:  # noqa: BLE001
-        tel = telemetry.Stats()
+        tel, cfgh = telemetry.Stats(), []
 
     rec = autoconfig.analyze(
         summary=summary,
@@ -1120,6 +1121,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         "plan_row_map": plan_row_map,
         "format_ctx": autoconfig.format_ctx,
         "tel": tel,
+        "cfgh": cfgh,
         "values_json": _json.dumps(rec.values),
         "values_minimal_json": _json.dumps(rec.values_minimal),
         # Full offload frontier for the custom slider. Every entry is an achievable
