@@ -140,6 +140,35 @@ class Stats:
         return ""
 
     @property
+    def draft_n_max(self) -> int:
+        """The --spec-draft-n-max the samples ran under, or 0 if it was left at the default.
+
+        Recorded from the router's argv dump rather than read from models.ini, because the
+        question being answered is what the MEASUREMENTS ran under, which is not necessarily
+        what the file says now.
+        """
+        for st in self.spec_types:
+            m = re.search(r"max=(\d+)", st)
+            if m:
+                return int(m.group(1))
+        return 0
+
+    @property
+    def draft_utilisation(self) -> float:
+        """Share of the allowed draft depth the drafter actually got accepted, 0..1.
+
+        llama.cpp's `mean len` counts the guaranteed token plus the accepted drafts, so its
+        ceiling is n_max + 1, not n_max. Comparing the raw figure against a fixed threshold is
+        therefore only ever right for one value of n_max; this normalises it. High utilisation
+        means the cap is the binding constraint and is worth raising. Low means the drafter is
+        giving up early and the depth is already more than it can use.
+        """
+        n_max = self.draft_n_max or 3          # llama.cpp's default when unset
+        if self.draft_len_p50 is None or n_max <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (self.draft_len_p50 - 1.0) / n_max))
+
+    @property
     def spread_pct(self) -> int:
         """p25-p75 spread as a percentage of the median. A wide spread means the median is a
         summary of genuinely varied conditions, not a stable rate to plan around."""

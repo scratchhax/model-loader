@@ -442,10 +442,19 @@
       {%- if tel.draft_len_p50 %}, mean draft length <span class="font-mono font-semibold">{{ '%.1f' | format(tel.draft_len_p50) }}</span>{% endif %}
       over {{ tel.draft_n }} request{{ '' if tel.draft_n == 1 else 's' }}{% if tel.spec_types %}
       running <span class="font-mono">{{ tel.spec_types | join(', ') }}</span>{% endif %}.
-      {% if tel.draft_len_p50 and tel.draft_len_p50 >= 2.4 %}
-      The drafter is using most of the depth it is allowed, so raising <span class="font-mono">n-max</span> is worth testing.
-      {% elif tel.draft_len_p50 and tel.draft_len_p50 < 1.5 %}
-      Drafts are dying early &mdash; most of this speculation is wasted work. Try a tighter <span class="font-mono">p-min</span>, or Off.
+      {# Judged on utilisation, not raw mean len: that figure counts the guaranteed token plus
+         accepted drafts, so its ceiling is n-max + 1 and a fixed threshold would only ever be
+         correct for one value of n-max. #}
+      {% set _u = tel.draft_utilisation %}
+      {% if _u >= 0.6 %}
+      Using <span class="font-semibold">{{ '%.0f' | format(_u * 100) }}%</span> of the
+      <span class="font-mono">n-max = {{ tel.draft_n_max or 3 }}</span> depth it is allowed &mdash;
+      the cap is the binding constraint here, so raising it is worth testing.
+      {% elif _u > 0 and _u < 0.25 %}
+      Using only <span class="font-semibold">{{ '%.0f' | format(_u * 100) }}%</span> of the
+      <span class="font-mono">n-max = {{ tel.draft_n_max or 3 }}</span> depth it is allowed &mdash;
+      drafts are dying early and most of this work is being thrown away. Try a tighter
+      <span class="font-mono">p-min</span>, or Off.
       {% endif %}
     </div>
     {% endif %}
