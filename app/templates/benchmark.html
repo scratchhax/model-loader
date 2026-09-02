@@ -368,8 +368,14 @@
       const old = modal.querySelector('[data-canvas]');
       const fresh = old.cloneNode(false);        // a used canvas keeps the old chart's sizing
       old.replaceWith(fresh);
-      if (modalChart) modalChart.destroy();
-      modalChart = new Chart(fresh, factory());
+      if (modalChart) { modalChart.destroy(); modalChart = null; }
+      // The overlay was display:none until a moment ago, and that change does not affect
+      // layout until the browser paints again. Building the chart in this same synchronous
+      // block measures a zero-size canvas, so Chart.js lays out correctly but draws nothing -
+      // it looks like an empty panel. Wait one frame for the box to become measurable.
+      requestAnimationFrame(function () {
+        modalChart = new Chart(fresh, factory());
+      });
     }
 
     // factory() must return a NEW config each call: Chart.js takes ownership of the datasets
