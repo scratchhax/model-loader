@@ -577,13 +577,27 @@ def run_sweep_once(backend: str, model_path: str, extra: list[str],
         raw = cont.logs(stdout=True, stderr=False).decode("utf-8", "replace")
         # llama-bench writes progress and backend chatter to stderr; stdout is the JSON array.
         start = raw.find("[")
-        if start < 0:
-            tail = cont.logs(stdout=False, stderr=True).decode("utf-8", "replace")[-300:]
-            return [], f"no JSON in output. {tail.strip()[:200]}"
-        try:
-            return json.loads(raw[start:]), ""
-        except ValueError as e:
-            return [], f"unparseable output: {e}"
+        if start >= 0:
+            try:
+                return json.loads(raw[start:]), ""
+            except ValueError:
+                pass  # fall through and report what llama-bench actually said
+
+        # Every failure here lands on the same path, because the interesting information is
+        # always on stderr and never on stdout. A truncated stdout is what a failed run looks
+        # like - llama-bench opens the JSON array before it loads the model, so a model that
+        # will not load leaves exactly "[\n" behind. Reporting that as a parse error blamed the
+        # parser for something it had no part in; the actual message is "failed to load model".
+        errtxt = cont.logs(stdout=False, stderr=True).decode("utf-8", "replace")
+        line = ""
+        for cand in reversed(errtxt.strip().splitlines()):
+            c = cand.strip()
+            if c and ("error" in c.lower() or "failed" in c.lower()):
+                line = c
+                break
+        if not line:
+            line = (errtxt.strip().splitlines() or ["no output"])[-1].strip()
+        return [], line[:200]
     finally:
         try:
             cont.remove(force=True)
@@ -627,10 +641,49 @@ def start_sweep(*, backend: str, aliases: list[str], n_prompt: int = 512, n_gen:
     return True, ""
 
 
+def _free_gpu(backend: str, base_url: str) -> None:
+    """Evict whatever the router is holding, so a sweep container has the cards to itself.
+
+    llama-bench loads the model into its OWN process, so anything the server still has resident
+    is competing for the same VRAM - and a large model then simply fails to load, which is what
+    "failed to load model" means when there is apparently plenty of memory. The router has no
+    unload endpoint, so restarting the backend is the available lever. Nothing is lost by it:
+    models are loaded on demand, so the next request brings back whatever it needs.
+    """
+    try:
+        if not loaded_aliases(base_url):
+            return
+    except Exception:  # noqa: BLE001
+        return
+    from . import services
+    _log("freeing GPU: restarting the backend so the sweep has the cards to itself")
+    try:
+        services.restart_llama_backend(backend)
+    except Exception as e:  # noqa: BLE001
+        _log(f"could not restart {backend}: {e}")
+        return
+    # Wait for the router to answer again, so the rest of the app is not left talking to a
+    # container that is still coming up.
+    for _ in range(60):
+        if _CANCEL.is_set():
+            return
+        try:
+            if httpx.get(f"{base_url}/v1/models", timeout=3.0).status_code == 200:
+                _log("backend back up, GPUs clear")
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(1.0)
+    _log("backend did not answer within 60s; continuing anyway")
+
+
 def _run_sweep(run_id: int, backend: str, targets: list, n_prompt: int, n_gen: int,
                depths: str, reps: int) -> None:
     status, err = "done", ""
     try:
+        base_url, _e = _resolve_endpoint(backend)
+        if base_url:
+            _free_gpu(backend, base_url)
         for alias, model_path, extra in targets:
             if _CANCEL.is_set():
                 status = "cancelled"

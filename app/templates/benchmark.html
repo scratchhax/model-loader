@@ -236,7 +236,8 @@
         </p>
         <ul class="mt-3 space-y-1.5 text-sm text-slate-600 dark:text-slate-300 list-disc pl-5">
           <li>Each model is loaded into a <strong>separate container</strong> that takes the GPUs for the
-              duration. Whatever the server has resident will be competing for VRAM, or fail to load.</li>
+              duration, so the backend is <strong>restarted first</strong> to free VRAM &mdash; otherwise a
+              large model simply fails to load. Nothing is lost by that: models reload on demand.</li>
           <li>OpenWebUI requests will stall or fail throughout.</li>
           <li><strong>Nothing is written to models.ini.</strong> Settings are read from it, never changed.</li>
           <li>Speculative decoding and the projector are <strong>not</strong> measured &mdash; llama-bench
