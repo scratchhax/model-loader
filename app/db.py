@@ -268,17 +268,20 @@ def recent_timings(*, model_path: str = "", alias: str = "",
                    min_gen_tokens: int = 0, limit: int = 400) -> list[sqlite3.Row]:
     """Most recent samples for a model, newest first.
 
-    Matched on model_path when given and alias otherwise. Path is preferred because it is what
-    llama-server logs directly; an alias only exists if the router's spawn block was inside the
-    scraped window.
+    Matched on alias first, model_path only as a fallback.
+
+    The alias IS the models.ini section name - it is what the router passes as --alias - so it
+    is the exact key for "this section's history". Path is broader than intended: two sections
+    can point at the same GGUF under completely different settings, and matching on path pooled
+    them, so one section's panel reported another section's throughput as its own.
     """
     where, params = ["gen_tokens >= ?"], [int(min_gen_tokens)]
-    if model_path:
-        where.append("model_path = ?")
-        params.append(model_path)
-    elif alias:
+    if alias:
         where.append("alias = ?")
         params.append(alias)
+    elif model_path:
+        where.append("model_path = ?")
+        params.append(model_path)
     else:
         return []
     params.append(int(limit))
@@ -326,12 +329,12 @@ def timings_by_instance(*, model_path: str = "", alias: str = "",
     and the row counts here are small enough that sorting in Python is cheaper than faking it.
     """
     where, params = ["gen_tokens >= ?"], [int(min_gen_tokens)]
-    if model_path:
-        where.append("model_path = ?")
-        params.append(model_path)
-    elif alias:
+    if alias:
         where.append("alias = ?")
         params.append(alias)
+    elif model_path:
+        where.append("model_path = ?")
+        params.append(model_path)
     else:
         return []
     with _LOCK, _conn() as c:

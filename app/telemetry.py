@@ -469,6 +469,10 @@ def config_history(*, model_path: str = "", alias: str = "",
     each to say anything. A comparison built on two samples a side is worse than none, because
     it looks authoritative.
 
+    Scoped by alias (the models.ini section name) rather than by GGUF path: two sections can
+    serve the same weights under different settings, and matching on path made one section's
+    panel show the other's runs as if they were its own.
+
     Grouping is by ARGUMENTS, not by server instance. The router respawns for all sorts of
     reasons that change nothing - a container restart, an eviction, another model borrowing the
     GPU - and each respawn is a new instance under identical settings. Treating those as rival
