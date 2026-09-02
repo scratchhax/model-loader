@@ -96,7 +96,12 @@ def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
                    key_length: int | None = None, value_length: int | None = None,
                    full_attention_interval: int | None = None,
                    ssm_state_size: int | None = None,
-                   v_bytes_per_elem: float | None = None) -> int:
+                   v_bytes_per_elem: float | None = None,
+                   sliding_window: int | None = None,
+                   sliding_window_pattern: Any = None,
+                   key_length_swa: int | None = None,
+                   value_length_swa: int | None = None,
+                   shared_kv_layers: int | None = None) -> int:
     """Compute KV cache bytes. Handles:
        - explicit key/value_length overrides (Qwen3.x, Yi, etc.)
        - hybrid attention+SSM (Qwen3.5, Zamba) via full_attention_interval + ssm_state_size
@@ -122,16 +127,54 @@ def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
         kv_full = full_layers * per_layer_per_token * ctx
         return int(kv_full + ssm_layers * _SSM_STATE_BYTES)
 
+    # ---- Sliding-window attention, from what the model DECLARES ----
+    #
+    # Earlier this was guessed: 1-in-6 layers global, a 4096-token window, and the same head
+    # dim for every layer. Gemma-4 declares all of it and none of the guesses match — window
+    # 512 not 4096, a 42-entry per-layer pattern rather than a ratio, SWA head dims of 256
+    # against 512 for global layers, and 18 layers that share another layer's KV and so
+    # allocate none of their own. Guessing over-estimated this model's cache by roughly an
+    # order of magnitude, which shows up as far less offered context than it can really do.
+    if sliding_window and sliding_window > 0:
+        # How many layers are local? Prefer the declared pattern; fall back to the gemma ratio.
+        local_layers = None
+        if isinstance(sliding_window_pattern, dict) and sliding_window_pattern.get("_array"):
+            sample = sliding_window_pattern.get("sample") or []
+            count = int(sliding_window_pattern.get("count") or 0)
+            if sample and count == layers:
+                # sample is a prefix of the full array; extrapolate its ratio over all layers
+                local_in_sample = sum(1 for v in sample if v)
+                local_layers = round(layers * local_in_sample / len(sample))
+        elif isinstance(sliding_window_pattern, (list, tuple)) and len(sliding_window_pattern) == layers:
+            local_layers = sum(1 for v in sliding_window_pattern if v)
+        if local_layers is None:
+            local_layers = layers - max(1, layers // 6)
+        local_layers = max(0, min(layers, local_layers))
+        global_layers = layers - local_layers
+
+        # Layers sharing another layer's KV allocate nothing. Charge the saving to the local
+        # layers first, since those are the majority and the cheaper ones to drop.
+        shared = max(0, min(int(shared_kv_layers or 0), layers))
+        local_layers = max(0, local_layers - shared)
+
+        k_swa = int(key_length_swa) if key_length_swa else k_dim
+        v_swa = int(value_length_swa) if value_length_swa else v_dim
+        per_local = kv_heads * (k_swa * bytes_per_elem + v_swa * v_bytes)
+
+        window = min(int(sliding_window), ctx)
+        return int(global_layers * per_layer_per_token * ctx + local_layers * per_local * window)
+
     if arch_l.startswith("gemma") and layers >= 6:
-        # gemma-3/4 pattern: ~1-in-6 layers use full attention, rest are SWA with a ~4096-token window
+        # Older gemma with no declared window: fall back to the 1-in-6 / 4096 approximation.
         full_layers = max(1, layers // 6)
         swa_layers = layers - full_layers
-        swa_window = 4096
         kv_full = full_layers * per_layer_per_token * ctx
-        kv_swa = swa_layers * per_layer_per_token * swa_window
+        kv_swa = swa_layers * per_layer_per_token * 4096
         return int(kv_full + kv_swa)
 
-    return int(layers * per_layer_per_token * ctx)
+    # No sliding window declared, but layers may still share KV.
+    effective_layers = max(1, layers - max(0, min(int(shared_kv_layers or 0), layers - 1)))
+    return int(effective_layers * per_layer_per_token * ctx)
 
 
 # ---- baseline parsing (compose command → ini keys) ----
@@ -485,7 +528,8 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                      full_attention_interval: int | None = None,
                      ssm_state_size: int | None = None,
                      v_bytes_per_elem: float | None = None,
-                     card_ok: "Callable[[float, float, int], bool] | None" = None) -> list[tuple[int, int, float, float]]:
+                     card_ok: "Callable[[float, float, int], bool] | None" = None,
+                     swa: dict | None = None) -> list[tuple[int, int, float, float]]:
     """For a MoE model on a given backend, sweep n-cpu-moe from 0..layers.
 
     `card_ok(weight_gb, kv_gb, n_cpu_moe)` is the same per-card feasibility test the fit table
@@ -497,6 +541,8 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
 
     Candidates are interpreted as PER-SESSION ctx. KV is sized against total_ctx = ctx * n_sessions.
     """
+
+    _swa = swa or {}
     if moe_ratio <= 0 or layers <= 0:
         return []
     attention_gb = model_gb * (1 - moe_ratio)
@@ -515,7 +561,7 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
             kv_gb = kv_cache_bytes(arch, ctx * n, layers, kv_heads, head_dim, bytes_per,
                                    key_length=key_length, value_length=value_length,
                                    full_attention_interval=full_attention_interval,
-                                   ssm_state_size=ssm_state_size,
+                                   ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes_per_elem) / (1024 ** 3)
             if card_ok is not None and not card_ok(weight_gb, kv_gb, ncm):
                 continue
@@ -539,7 +585,8 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                     full_attention_interval: int | None = None,
                     ssm_state_size: int | None = None,
                     v_bytes_per_elem: float | None = None,
-                    card_ok: "Callable[[float, float], bool] | None" = None) -> list[tuple[int, int, float, float]]:
+                    card_ok: "Callable[[float, float], bool] | None" = None,
+                    swa: dict | None = None) -> list[tuple[int, int, float, float]]:
     """Context-vs-speed frontier for a DENSE model, by moving whole layers off the GPU.
 
     MoE models offload expert weights (`--cpu-moe` / `--n-cpu-moe`), which is cheap because
@@ -556,6 +603,7 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
     card, so a preset card could recommend an ngl the table beside it marks as not fitting —
     and, worse, that llama.cpp would OOM.
     """
+    _swa = swa or {}
     if layers <= 0 or model_gb <= 0:
         return []
     per_layer_gb = model_gb / layers
@@ -571,7 +619,7 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
             kv_gb = kv_cache_bytes(arch, ctx * n, layers, kv_heads, head_dim, bytes_per,
                                    key_length=key_length, value_length=value_length,
                                    full_attention_interval=full_attention_interval,
-                                   ssm_state_size=ssm_state_size,
+                                   ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes_per_elem) / (1024 ** 3)
             if weight_gb + kv_gb <= budget_gb and ctx > best_ctx:
                 if card_ok is not None and not card_ok(weight_gb, kv_gb):
@@ -844,6 +892,16 @@ def analyze(*,
     value_length = int(m.get("value_length")) if isinstance(m.get("value_length"), int) else None
     full_attention_interval = int(m.get("full_attention_interval")) if isinstance(m.get("full_attention_interval"), int) else None
     ssm_state_size = int(m.get("ssm_state_size")) if isinstance(m.get("ssm_state_size"), int) else None
+    # Sliding-window attention parameters travel together and are threaded through every
+    # kv_cache_bytes call as one bundle. Absent for models that declare none, in which case
+    # kv_cache_bytes falls back to its previous behaviour.
+    _swa = {
+        "sliding_window": m.get("sliding_window") if isinstance(m.get("sliding_window"), int) else None,
+        "sliding_window_pattern": m.get("sliding_window_pattern"),
+        "key_length_swa": m.get("key_length_swa") if isinstance(m.get("key_length_swa"), int) else None,
+        "value_length_swa": m.get("value_length_swa") if isinstance(m.get("value_length_swa"), int) else None,
+        "shared_kv_layers": m.get("shared_kv_layers") if isinstance(m.get("shared_kv_layers"), int) else None,
+    }
 
     # Model VRAM depends on whether we'll be layer-splitting across multiple GPUs.
     # We check per-backend below; use single-GPU overhead as the base and apply the split
@@ -915,7 +973,7 @@ def analyze(*,
     if kv_cache_bytes(arch, 4096, layers, kv_heads, head_dim, bytes_per,
                       key_length=key_length, value_length=value_length,
                       full_attention_interval=full_attention_interval,
-                      ssm_state_size=ssm_state_size) <= 0:
+                      ssm_state_size=ssm_state_size, **_swa) <= 0:
         missing = [k for k, v in (("block_count", layers),
                                   ("attention_head_count_kv", kv_heads),
                                   ("head_dim (embedding_length / attention_head_count)", head_dim))
@@ -1049,7 +1107,7 @@ def analyze(*,
             kv_gb = kv_cache_bytes(arch, total_ctx, layers, kv_heads, head_dim, bytes_per,
                                    key_length=key_length, value_length=value_length,
                                    full_attention_interval=full_attention_interval,
-                                   ssm_state_size=ssm_state_size,
+                                   ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes) / (1024 ** 3)
             # The per-card test is handed to the search rather than applied to its answer, so
             # it can keep offloading until BOTH the pool and every individual card are happy.
@@ -1226,9 +1284,9 @@ def analyze(*,
                                         n_sessions=n_sessions,
                                         key_length=key_length, value_length=value_length,
                                         full_attention_interval=full_attention_interval,
-                                        ssm_state_size=ssm_state_size,
+                                        ssm_state_size=ssm_state_size, **_swa,
                                         v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
-                                        card_ok=_moe_card_ok)
+                                        card_ok=_moe_card_ok, swa=_swa)
             presets = _presets_from_frontier(frontier, recommended.name, layers, native_ctx)
             frontier_opts = _frontier_options(frontier, recommended.name, layers, dense=False)
             if presets:
@@ -1270,9 +1328,9 @@ def analyze(*,
                                      model_gb_rec, budget, cands, n_sessions=n_sessions,
                                      key_length=key_length, value_length=value_length,
                                      full_attention_interval=full_attention_interval,
-                                     ssm_state_size=ssm_state_size,
+                                     ssm_state_size=ssm_state_size, **_swa,
                                      v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
-                                     card_ok=_front_card_ok)
+                                     card_ok=_front_card_ok, swa=_swa)
             presets = _presets_from_dense_frontier(dfront, recommended.name, layers)
             frontier_opts = _frontier_options(dfront, recommended.name, layers, dense=True)
             if presets:
@@ -1304,7 +1362,7 @@ def analyze(*,
             _kv = kv_cache_bytes(arch, rec_ctx * n_sessions, layers, kv_heads, head_dim,
                                  bytes_per, key_length=key_length, value_length=value_length,
                                  full_attention_interval=full_attention_interval,
-                                 ssm_state_size=ssm_state_size) / (1024 ** 3)
+                                 ssm_state_size=ssm_state_size, **_swa) / (1024 ** 3)
             _caps = [c - _RESERVE_PER_GPU for c in ((rec_backend or {}).get("card_vram_gb") or [])]
             if len(_caps) != _gc:
                 _caps = [(float(recommended.vram_gb) / _gc) - _RESERVE_PER_GPU] * _gc

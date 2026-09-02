@@ -260,6 +260,16 @@ def summarize(raw: dict[str, Any]) -> dict[str, Any]:
             "key_length": _scalar_int(a("attention.key_length")),
             "value_length": _scalar_int(a("attention.value_length")),
             "full_attention_interval": _scalar_int(a("full_attention_interval")),
+            # Sliding-window attention, declared properly rather than guessed. Gemma-4 sets
+            # all four: most layers attend over a short window and use a NARROWER head dim
+            # than the global layers, and some layers share another layer's KV entirely.
+            # Sizing without these over-estimates the cache by an order of magnitude.
+            "sliding_window": _scalar_int(a("attention.sliding_window")),
+            "key_length_swa": _scalar_int(a("attention.key_length_swa")),
+            "value_length_swa": _scalar_int(a("attention.value_length_swa")),
+            "shared_kv_layers": _scalar_int(a("attention.shared_kv_layers")),
+            # kept raw: a per-layer array of which layers are local vs global
+            "sliding_window_pattern": a("attention.sliding_window_pattern"),
             "ssm_state_size": _scalar_int(a("ssm.state_size")),
             "ssm_inner_size": _scalar_int(a("ssm.inner_size")),
         },
