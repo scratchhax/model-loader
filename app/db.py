@@ -127,6 +127,25 @@ def init() -> None:
                 err         TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS bench_result_variant ON bench_result(variant_id);
+            -- Results from llama.cpp's own `llama bench`, which is the right tool for raw
+            -- prompt-processing and generation throughput: it warms up, repeats, reports a
+            -- standard deviation, and sweeps parameters natively. The whole JSON entry is kept
+            -- because it carries every setting the run used; the extracted columns exist only
+            -- so the common questions can be asked in SQL.
+            CREATE TABLE IF NOT EXISTS bench_sweep (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id       INTEGER NOT NULL,
+                alias        TEXT NOT NULL DEFAULT '',
+                model_type   TEXT NOT NULL DEFAULT '',
+                test         TEXT NOT NULL DEFAULT '',
+                n_prompt     INTEGER, n_gen INTEGER, n_depth INTEGER,
+                avg_ts       REAL,    stddev_ts REAL,
+                n_gpu_layers INTEGER, n_cpu_moe INTEGER, n_ubatch INTEGER,
+                type_k       TEXT,    type_v TEXT, flash_attn INTEGER,
+                split_mode   TEXT,
+                raw_json     TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS bench_sweep_run ON bench_sweep(run_id);
             CREATE TABLE IF NOT EXISTS server_config (
                 backend    TEXT NOT NULL,
                 instance   TEXT NOT NULL,
@@ -562,3 +581,32 @@ def seed_bench_prompts() -> int:
             added += 1
     set_setting(_BENCH_SEED_KEY, "1")
     return added
+
+
+def bench_add_sweep(run_id: int, alias: str, entry: dict) -> None:
+    """Store one `llama bench` result row, raw JSON included."""
+    import json as _json
+    npr = int(entry.get("n_prompt") or 0)
+    ngen = int(entry.get("n_gen") or 0)
+    ndep = int(entry.get("n_depth") or 0)
+    # Same label llama-bench prints, so a row here and a row in its own output are obviously
+    # the same measurement.
+    test = (f"pp{npr}" if npr else f"tg{ngen}") + (f" @ d{ndep}" if ndep else "")
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO bench_sweep(run_id, alias, model_type, test, n_prompt, n_gen, n_depth, "
+            "avg_ts, stddev_ts, n_gpu_layers, n_cpu_moe, n_ubatch, type_k, type_v, flash_attn, "
+            "split_mode, raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(run_id), alias, str(entry.get("model_type") or ""), test, npr, ngen, ndep,
+             entry.get("avg_ts"), entry.get("stddev_ts"),
+             entry.get("n_gpu_layers"), entry.get("n_cpu_moe"), entry.get("n_ubatch"),
+             str(entry.get("type_k") or ""), str(entry.get("type_v") or ""),
+             entry.get("flash_attn"), str(entry.get("split_mode") or ""),
+             _json.dumps(entry, sort_keys=True)))
+
+
+def bench_sweeps(run_id: int) -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT * FROM bench_sweep WHERE run_id = ? ORDER BY alias, n_depth, id",
+            (int(run_id),)).fetchall())

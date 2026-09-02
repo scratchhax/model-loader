@@ -426,3 +426,230 @@ def estimate_seconds(n_aliases: int, n_prompts: int, reps: int, max_tokens: int)
     load_s = 25.0                       # cold load of a mid-size model, per variant
     per_req_s = 4.0 + max_tokens / 30.0  # overhead plus generation at a conservative rate
     return int(n_aliases * (load_s + n_prompts * reps * per_req_s))
+
+
+# ---------------------------------------------------------------- throughput sweeps
+#
+# Prompt-processing and generation throughput are llama.cpp's own `llama bench` territory, and
+# it does them better than driving the server would: it warms up, repeats, reports a standard
+# deviation, sweeps parameters natively, and measures the model rather than the HTTP path.
+#
+# What it cannot do is measure the configuration actually in use. It has no speculative
+# decoding, no mmproj and no server slots, so on a model running draft-mtp it reports the
+# unaccelerated speed - 133 tok/s against the 208 the server really delivers. That is why both
+# engines exist rather than one: this for clean throughput under known parameters, the prompt
+# suite for what the running configuration does to a real request.
+#
+# What this adds over running llama-bench by hand is that a sweep starts from a models.ini
+# section, so it measures the settings that section actually uses rather than llama-bench's
+# defaults (f16 cache, flash-attn auto), which would describe a configuration nobody runs.
+
+# ini keys worth carrying into a sweep, mapped to their llama-bench flag. Anything llama-bench
+# does not understand is dropped rather than guessed at.
+_SWEEP_FROM_INI = (
+    ("cache-type-k", "-ctk"),
+    ("cache-type-v", "-ctv"),
+    ("flash-attn", "-fa"),
+    ("ngl", "-ngl"),
+    ("n-gpu-layers", "-ngl"),
+    ("n-cpu-moe", "-ncmoe"),
+    ("split-mode", "-sm"),
+    ("tensor-split", "-ts"),
+    ("main-gpu", "-mg"),
+    ("ubatch-size", "-ub"),
+    ("batch-size", "-b"),
+)
+
+
+def sweep_args_for_section(name: str) -> list[str]:
+    """llama-bench flags reflecting what this models.ini section is configured to do."""
+    from . import ini
+    vals = ini.get_section(name) or {}
+    out: list[str] = []
+    seen: set[str] = set()
+    for key, flag in _SWEEP_FROM_INI:
+        v = str(vals.get(key, "")).strip()
+        if not v or flag in seen:
+            continue
+        if flag == "-ts":
+            # models.ini writes tensor-split comma-separated; llama-bench wants slashes.
+            v = v.replace(",", "/")
+        out += [flag, v]
+        seen.add(flag)
+    return out
+
+
+def _sweep_runtime(backend: str) -> tuple[str, dict, bool, str]:
+    """(image, volume binds, wants_gpu, error) mirrored from the llama backend container.
+
+    Derived from the container rather than configured separately, so a sweep runs against the
+    same image, the same models directory and the same devices as the server. A sweep that
+    measured a different build or a different mount would quietly be answering about something
+    other than what is deployed.
+    """
+    from . import services
+    client = services._docker_client()
+    if client is None:
+        return "", {}, False, "docker unreachable"
+    try:
+        c = client.containers.get(backend)
+    except Exception as e:  # noqa: BLE001
+        return "", {}, False, f"{type(e).__name__}: {e}"
+    attrs = c.attrs or {}
+    try:
+        image = ((c.image.tags or []) or [""])[0]
+    except Exception:  # noqa: BLE001
+        image = ""
+    if not image:
+        return "", {}, False, "cannot determine backend image"
+    binds = {}
+    for m in (attrs.get("Mounts") or []):
+        src, dst = m.get("Source"), m.get("Destination")
+        if src and dst:
+            binds[src] = {"bind": dst, "mode": "ro"}
+    wants_gpu = bool((attrs.get("HostConfig") or {}).get("DeviceRequests"))
+    return image, binds, wants_gpu, ""
+
+
+def run_sweep_once(backend: str, model_path: str, extra: list[str],
+                   n_prompt: int, n_gen: int, depths: str, reps: int,
+                   timeout_s: int = 1800) -> tuple[list[dict], str]:
+    """Run `llama bench` in a throwaway container. Returns (entries, error)."""
+    import docker as _docker
+    from . import services
+
+    image, binds, wants_gpu, err = _sweep_runtime(backend)
+    if err:
+        return [], err
+    cmd = ["bench", "-m", model_path, "-p", str(n_prompt), "-n", str(n_gen),
+           "-r", str(reps), "-o", "json"]
+    if depths.strip():
+        cmd += ["-d", depths.strip()]
+    cmd += extra
+
+    client = services._docker_client()
+    if client is None:
+        return [], "docker unreachable"
+    kwargs: dict = {
+        "image": image, "command": cmd, "entrypoint": "/app/llama",
+        "volumes": binds, "detach": True, "remove": False,
+        "network_mode": "none",   # nothing here needs the network, so keep it off the LAN
+    }
+    if wants_gpu:
+        kwargs["device_requests"] = [_docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]
+
+    try:
+        cont = client.containers.run(**kwargs)
+    except Exception as e:  # noqa: BLE001
+        return [], f"{type(e).__name__}: {e}"
+
+    try:
+        deadline = time.time() + timeout_s
+        while True:
+            cont.reload()
+            if cont.status not in ("running", "created"):
+                break
+            if _CANCEL.is_set():
+                try:
+                    cont.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                return [], "cancelled"
+            if time.time() > deadline:
+                try:
+                    cont.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                return [], f"timed out after {timeout_s}s"
+            time.sleep(1.0)
+        raw = cont.logs(stdout=True, stderr=False).decode("utf-8", "replace")
+        # llama-bench writes progress and backend chatter to stderr; stdout is the JSON array.
+        start = raw.find("[")
+        if start < 0:
+            tail = cont.logs(stdout=False, stderr=True).decode("utf-8", "replace")[-300:]
+            return [], f"no JSON in output. {tail.strip()[:200]}"
+        try:
+            return json.loads(raw[start:]), ""
+        except ValueError as e:
+            return [], f"unparseable output: {e}"
+    finally:
+        try:
+            cont.remove(force=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def start_sweep(*, backend: str, aliases: list[str], n_prompt: int = 512, n_gen: int = 128,
+                depths: str = "0,4096,16384", reps: int = 3) -> tuple[bool, str]:
+    global _THREAD, _STATE
+    aliases = [a for a in aliases if a]
+    if not aliases:
+        return False, "no models selected"
+    with _LOCK:
+        if _STATE.active:
+            return False, "a benchmark is already running"
+
+    from . import ini
+    targets: list[tuple[str, str, list[str]]] = []
+    for a in aliases:
+        vals = ini.get_section(a) or {}
+        rel = str(vals.get("model", "")).strip()
+        if not rel:
+            return False, f"section '{a}' has no model path"
+        # models.ini paths are what llama-server is given, and the sweep container mounts the
+        # same models directory at the same place, so they resolve unchanged.
+        targets.append((a, rel, sweep_args_for_section(a)))
+
+    _CANCEL.clear()
+    started = time.time()
+    run_id = db.bench_create_run(backend, reps, n_gen, started)
+    with _LOCK:
+        _STATE = JobState(run_id=run_id, status="running", backend=backend,
+                          total=len(targets), started_at=started)
+    _THREAD = threading.Thread(target=_run_sweep, name="benchmark-sweep",
+                               args=(run_id, backend, targets, n_prompt, n_gen, depths, reps),
+                               daemon=True)
+    _THREAD.start()
+    return True, ""
+
+
+def _run_sweep(run_id: int, backend: str, targets: list, n_prompt: int, n_gen: int,
+               depths: str, reps: int) -> None:
+    status, err = "done", ""
+    try:
+        for alias, model_path, extra in targets:
+            if _CANCEL.is_set():
+                status = "cancelled"
+                break
+            with _LOCK:
+                _STATE.current = f"{alias} - llama bench"
+            _log(f"{alias}: {' '.join(extra) or 'section defaults'}")
+            entries, e = run_sweep_once(backend, model_path, extra, n_prompt, n_gen, depths, reps)
+            if e:
+                _log(f"{alias}: {e}")
+                if e == "cancelled":
+                    status = "cancelled"
+                    break
+            for entry in entries:
+                db.bench_add_sweep(run_id, alias, entry)
+            if entries:
+                _log(f"{alias}: {len(entries)} measurements")
+            with _LOCK:
+                _STATE.done += 1
+    except Exception as e:  # noqa: BLE001
+        status, err = "error", f"{type(e).__name__}: {e}"
+        _log(f"failed: {err}")
+
+    if _CANCEL.is_set() and status != "error":
+        status = "cancelled"
+    finished = time.time()
+    try:
+        db.bench_finish_run(run_id, status, finished, err)
+    except Exception:  # noqa: BLE001
+        pass
+    with _LOCK:
+        _STATE.status = status
+        _STATE.finished_at = finished
+        _STATE.error = err
+        _STATE.current = ""
+    _CANCEL.clear()

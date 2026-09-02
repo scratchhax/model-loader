@@ -1442,6 +1442,7 @@ def _bench_ctx(request: Request, flash: str = "") -> dict:
     return {
         "request": request,
         "sections": ini.section_names(),
+        "sweep_args": {n: " ".join(bench.sweep_args_for_section(n)) for n in ini.section_names()},
         "prompts": db.list_prompts(),
         "backends": services._effective_container_names(),
         "job": bench.state(),
@@ -1464,6 +1465,21 @@ def benchmark_start(request: Request,
                     max_tokens: int = Form(256)) -> HTMLResponse:
     ok, err = bench.start(backend=backend, aliases=aliases, prompt_ids=prompt_ids,
                           reps=reps, max_tokens=max_tokens)
+    return templates.TemplateResponse("_bench_progress.html", {
+        "request": request, "job": bench.state(), "flash": "" if ok else err,
+    })
+
+
+@app.post("/benchmark/sweep", response_class=HTMLResponse)
+def benchmark_sweep(request: Request,
+                    backend: str = Form(...),
+                    aliases: list[str] = Form(default=[]),
+                    n_prompt: int = Form(512),
+                    n_gen: int = Form(128),
+                    depths: str = Form("0,4096,16384"),
+                    reps: int = Form(3)) -> HTMLResponse:
+    ok, err = bench.start_sweep(backend=backend, aliases=aliases, n_prompt=n_prompt,
+                                n_gen=n_gen, depths=depths, reps=reps)
     return templates.TemplateResponse("_bench_progress.html", {
         "request": request, "job": bench.state(), "flash": "" if ok else err,
     })
@@ -1500,5 +1516,6 @@ def benchmark_run(request: Request, run_id: int) -> HTMLResponse:
         "run": db.bench_run(run_id),
         "variants": db.bench_variants(run_id),
         "results": db.bench_results(run_id),
+        "sweeps": db.bench_sweeps(run_id),
     })
     return templates.TemplateResponse("benchmark.html", ctx)
