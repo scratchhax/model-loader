@@ -441,3 +441,21 @@ def start_sampler() -> None:
     _sampler_started = True
     t = threading.Thread(target=_sample_loop, daemon=True, name="hw-sampler")
     t.start()
+
+
+def host_ram_gb() -> float:
+    """Total host RAM in GiB, or 0.0 if it cannot be read.
+
+    Read from /proc/meminfo, which inside a container reports the HOST's memory unless
+    something like lxcfs is masking it. Needed as a ceiling: CPU-offloaded layers live in
+    system RAM, so a model larger than VRAM + RAM cannot run at any offload setting, and
+    offering it a context estimate is worse than saying nothing.
+    """
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return round(int(line.split()[1]) / 1024 / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0

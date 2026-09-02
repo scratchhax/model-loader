@@ -578,6 +578,7 @@ def _preset_estimates(summary: dict, size_bytes: int, mmproj_gb: float = 0.0) ->
         backends.append({
             "name": name, "vendor": "cuda", "vram_gb": vram,
             "gpu_count": hw.gpu_count_for(name), "card_vram_gb": hw.card_vram_gb_for(name),
+            "host_ram_gb": hw.host_ram_gb(),
             "baseline": {},
         })
     if not backends or not summary:
@@ -1017,6 +1018,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         base = autoconfig.parse_baseline(cmd) if cmd else {}
         backend_list.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
                              "gpu_count": gpu_count, "card_vram_gb": hw.card_vram_gb_for(bn),
+                             "host_ram_gb": hw.host_ram_gb(),
                              "baseline": base})
 
     # Existing section (for diff)

@@ -802,6 +802,21 @@ def analyze(*,
     # any context" — which reads as a verdict on the model when it is really a missing probe.
     # Vulkan images are the common case: they carry neither nvidia-smi nor rocm-smi, so there
     # is nothing to read and GPU_VRAM has to supply the number.
+    # A model larger than VRAM + system RAM cannot run at ANY offload setting: CPU-resident
+    # layers live in system memory, so there is nowhere left to put them. Offering it a
+    # context estimate at 2% speed is worse than saying nothing, because it reads as "slow
+    # but possible" when the honest answer is "not on this machine".
+    _ram = max((float(b.get("host_ram_gb") or 0) for b in backends), default=0.0)
+    _vram = max((float(b.get("vram_gb") or 0) for b in backends), default=0.0)
+    if _ram > 0 and model_gb_raw > (_vram + _ram):
+        return Recommendation(
+            plans=[], recommended_backend="", recommended_ctx=0,
+            error=f"This model needs about {model_gb_raw:.0f} GB, more than this machine's "
+                  f"{_vram:.0f} GB VRAM plus {_ram:.0f} GB RAM ({_vram + _ram:.0f} GB total). "
+                  "CPU offload moves layers into system memory, so there is no offload setting "
+                  "that makes it fit. A smaller quantisation of the same model is the option.",
+        )
+
     _sized = [b for b in backends if float(b.get("vram_gb") or 0) > 0]
     if not _sized:
         _names = ", ".join(str(b.get("name") or "?") for b in backends)
