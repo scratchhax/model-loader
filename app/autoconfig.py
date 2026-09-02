@@ -1346,12 +1346,23 @@ def analyze(*,
     # using it at all, and it interacts with continuous batching unpredictably. Benchmark it.
     if section_name and mtp_rel:
         cur_spec = (current_section or {}).get("spec-draft-model", "").strip()
-        values["spec-draft-model"] = cur_spec or mtp_rel
+        values["spec-draft-model"] = cur_spec or (mtp_rel if not current_section else "")
         # Echo an existing choice rather than omitting it. Fill writes exactly these values,
         # so a setting the user already has must be repeated or Fill silently clears it —
         # the same reason mmproj is echoed above.
+        #
+        # But an EXISTING section with no spec-type means the user turned it off, and
+        # proposing draft-mtp again would make that undoable: clearing the field, saving,
+        # then re-running Autoconfig would keep switching it back on. Only a section that
+        # does not exist yet gets the suggestion.
+        _is_new_section = not current_section
         _cur_type = (current_section or {}).get("spec-type", "").strip()
-        values["spec-type"] = _cur_type or "draft-mtp"
+        if _cur_type:
+            values["spec-type"] = _cur_type
+        elif _is_new_section:
+            values["spec-type"] = "draft-mtp"
+        else:
+            values["spec-type"] = ""          # respect a deliberate opt-out
         if not (current_section or {}).get("spec-draft-ngl", "").strip():
             # Without this the head lands on the CPU, and a draft evaluated on the CPU is
             # slower than the main model it is meant to be racing ahead of.
