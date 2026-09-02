@@ -812,6 +812,64 @@ def _looks_like_draft(filename: str) -> bool:
     return parts and (parts[0] in ("draft", "mtp") or parts[-1] in ("draft", "mtp"))
 
 
+def _find_mtp(models_dir: "Path | None", section_name: str, subdir: str = "") -> str:
+    """Look for THIS model's speculative-decoding draft head. Absolute /models path, or "".
+
+    Same co-location rule as _find_mmproj: a draft head only counts when it sits beside the
+    model it drafts for. A head is matched to the WRONG model at best wastes VRAM and at worst
+    produces garbage, since speculative decoding requires a shared tokenizer.
+
+    Where several heads are present — repos commonly ship BF16, F16, Q8_0 and Q4_0 of the same
+    head — the SMALLEST is chosen. These are tiny to begin with (60-170 MB), they sit in VRAM
+    for the whole session, and draft quality below Q8 barely moves the acceptance rate while
+    the VRAM saving is real.
+    """
+    if models_dir is None:
+        return ""
+    from . import ini
+
+    def _pick(folder: "Path", prefix: str) -> str:
+        cands = []
+        try:
+            for p in sorted(folder.iterdir()):
+                if not (p.is_file() and p.suffix.lower() == ".gguf"):
+                    continue
+                if "mmproj" in p.name.lower() or not _looks_like_draft(p.name):
+                    continue
+                cands.append(p)
+        except OSError:
+            return ""
+        if not cands:
+            return ""
+        best = min(cands, key=lambda q: q.stat().st_size)
+        return f"{prefix}{best.name}"
+
+    if subdir:
+        base = models_dir / subdir
+        # Repos often ship the heads in their own MTP/ folder; the downloader may preserve it.
+        for sub in (base / "MTP", base / "mtp", base):
+            if sub.is_dir():
+                rel = sub.relative_to(models_dir).as_posix()
+                found = _pick(sub, f"/models/{rel}/")
+                if found:
+                    return found
+        return ""
+
+    stem_key = section_name.lower().replace("-", "").replace("_", "").replace(".", "")
+    if not stem_key:
+        return ""
+    try:
+        cands = [p for p in sorted(models_dir.iterdir())
+                 if p.is_file() and p.suffix.lower() == ".gguf"
+                 and _looks_like_draft(p.name) and "mmproj" not in p.name.lower()
+                 and stem_key in p.name.lower().replace("-", "").replace("_", "").replace(".", "")]
+    except OSError:
+        return ""
+    if not cands:
+        return ""
+    return f"/models/{min(cands, key=lambda q: q.stat().st_size).name}"
+
+
 def _find_mmproj(models_dir: "Path | None", section_name: str, subdir: str = "") -> str:
     """Look for THIS model's mmproj companion. Returns an absolute /models path, or "".
 
@@ -1035,9 +1093,26 @@ def analyze(*,
     if mmproj_gb_override is not None and mmproj_gb_override > 0:
         mmproj_gb = mmproj_gb_override
         mmproj_rel = mmproj_rel or "(remote projector)"
+
+    # A draft head is small but it is real VRAM, resident for the whole session, and it is
+    # pinned to the main GPU exactly like the projector. Budget it the same way, or the fit
+    # maths approves a context that leaves no room for the head it is about to recommend.
+    mtp_rel = ""
+    mtp_gb = 0.0
+    if models_dir is not None and section_name:
+        mtp_rel = (current_section or {}).get("spec-draft-model", "").strip()             or _find_mtp(models_dir, section_name, model_subdir)
+        if mtp_rel:
+            try:
+                _mt = Path(str(mtp_rel).replace("/models", str(models_dir), 1))
+                mtp_gb = _mt.stat().st_size / (1024 ** 3)
+            except OSError:
+                mtp_gb = 0.0
     has_mmproj = bool(mmproj_rel)
     # VRAM pinned to the MAIN GPU for multimodal: projector weights + encoder compute buffer.
     mmproj_vram_gb = (mmproj_gb * _MMPROJ_VRAM_MULT + _MMPROJ_COMPUTE_GB) if has_mmproj else 0.0
+    # The draft head rides along in the same non-layer-split reservation. Its own KV is small
+    # (a handful of layers over the drafted window) and folded into this rather than modelled.
+    mmproj_vram_gb += mtp_gb * 1.15
 
     # Candidate ctx values: default cap is the model's native ctx. Linear RoPE extension
     # to 2× is possible but (a) degrades quality noticeably, (b) inflates compute buffers
@@ -1244,6 +1319,28 @@ def analyze(*,
         else:
             if mmproj_rel:  # already resolved above, when sizing the VRAM reservation
                 values["mmproj"] = mmproj_rel
+
+    # Speculative decoding via a matched MTP head.
+    #
+    # Set only when a head ships beside the model. A head is trained against a specific base,
+    # so this is never a generic "make it faster" switch — that is what the earlier attempt at
+    # this got wrong, pairing an unrelated small model as a draft and segfaulting llama-server.
+    # spec-type is draft-mtp rather than draft-simple: these heads are a distinct architecture
+    # (gemma4-assistant here, four layers against the base model's forty-two) and llama.cpp
+    # drives them down a different path.
+    #
+    # Left OFF by default. Speculative decoding is a throughput trade, not a free win: when
+    # the acceptance rate is poor it is slower than not using it at all, and it interacts with
+    # continuous batching in ways that are hard to predict. Benchmark before trusting it.
+    if section_name and mtp_rel:
+        cur_spec = (current_section or {}).get("spec-draft-model", "").strip()
+        values["spec-draft-model"] = cur_spec or mtp_rel
+        if not (current_section or {}).get("spec-type", "").strip():
+            values["spec-type"] = "draft-mtp"
+        if not (current_section or {}).get("spec-draft-ngl", "").strip():
+            # Without this the head lands on the CPU, and a draft evaluated on the CPU is
+            # slower than the main model it is meant to be racing ahead of.
+            values["spec-draft-ngl"] = "999"
 
     rope_type = m.get("rope_scaling_type")
 
