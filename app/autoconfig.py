@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import ini
 
@@ -379,7 +379,8 @@ def _balanced_split(layers: int, n_cpu_moe: int, attention_gb: float,
 
 
 def _find_fit(model_gb_full: float, kv_gb: float, budget_gb: float,
-              layers: int, moe_ratio: float) -> tuple[bool, float, str, int]:
+              layers: int, moe_ratio: float,
+              card_ok: "Callable[[float, str, int], bool] | None" = None) -> tuple[bool, float, str, int]:
     """Return (fits, gpu_model_gb, offload_kind, n_layers) for a given (model, kv, budget).
 
     Strategy: try no offload first; then offload.
@@ -393,8 +394,21 @@ def _find_fit(model_gb_full: float, kv_gb: float, budget_gb: float,
     with some layers on the CPU — that is exactly what the Fast/Balanced/Long presets do. The
     result was a red X and no options for, say, a 27 GB Q8 on 24 GB of VRAM, when the honest
     answer is "yes, with N layers offloaded, and here is the speed cost".
+
+    `card_ok(gpu_gb, kind, n)` is an optional second test, used on multi-GPU backends to check
+    that the per-card split of that configuration actually fits each card. It has to be part
+    of the SEARCH, not a filter applied afterwards: the pooled budget and the per-card limit
+    are satisfied at different offload levels, so the first configuration that clears the pool
+    may still overflow one card while offloading one more layer clears both. Rejecting that
+    first candidate instead of continuing produced a band of contexts reported as impossible
+    while both smaller AND larger ones fitted — non-monotonic, and wrong.
     """
-    if model_gb_full + kv_gb <= budget_gb:
+    def _ok(gpu: float, kind: str, n: int) -> bool:
+        if gpu + kv_gb > budget_gb:
+            return False
+        return card_ok is None or card_ok(gpu, kind, n)
+
+    if _ok(model_gb_full, "", 0):
         return True, model_gb_full, "", 0
     if layers <= 0:
         return False, model_gb_full, "", 0
@@ -405,7 +419,7 @@ def _find_fit(model_gb_full: float, kv_gb: float, budget_gb: float,
         per_layer_gb = model_gb_full / layers
         for cpu_layers in range(1, layers):
             gpu = per_layer_gb * (layers - cpu_layers)
-            if gpu + kv_gb <= budget_gb:
+            if _ok(gpu, "ngl", cpu_layers):
                 return True, gpu, "ngl", cpu_layers
         return False, model_gb_full, "", 0
     attention_gb = model_gb_full * (1 - moe_ratio)
@@ -413,7 +427,8 @@ def _find_fit(model_gb_full: float, kv_gb: float, budget_gb: float,
     # smallest n where fits — n counts CPU-offloaded layers
     for n in range(1, layers + 1):
         gpu = attention_gb + max(0, layers - n) * expert_per_layer_gb
-        if gpu + kv_gb <= budget_gb:
+        kind = "cpu-moe" if n >= layers else "n-cpu-moe"
+        if _ok(gpu, kind, n):
             if n >= layers:
                 return True, attention_gb, "cpu-moe", 0
             return True, gpu, "n-cpu-moe", n
@@ -978,31 +993,25 @@ def analyze(*,
                                    full_attention_interval=full_attention_interval,
                                    ssm_state_size=ssm_state_size,
                                    v_bytes_per_elem=v_bytes) / (1024 ** 3)
-            fits, gpu_model_gb, offload_kind, n_cm = _find_fit(model_gb, kv_gb, budget, layers, eff_moe)
-            # Pooled VRAM is necessary but not sufficient. llama.cpp puts each layer on ONE
-            # card, and under `--n-cpu-moe N` the per-layer cost jumps by ~10x at layer N, so
-            # a config that fits the pool can still blow a single device. Re-check against the
-            # per-card capacities using the same byte-balanced split we will emit, and demote
-            # the candidate if the heaviest card cannot hold its share.
-            if fits and gpu_count > 1 and card_caps:
+            # The per-card test is handed to the search rather than applied to its answer, so
+            # it can keep offloading until BOTH the pool and every individual card are happy.
+            def _card_ok(gpu_gb: float, kind: str, n: int,
+                         _kv=kv_gb, _caps=card_caps, _pin=pinned_gb) -> bool:
+                if gpu_count <= 1 or not _caps:
+                    return True
                 if eff_moe > 0:
-                    # MoE: attention is always resident, and so are the experts of every layer
-                    # at or above the n-cpu-moe threshold. _balanced_split models that split.
-                    _att = model_gb * (1 - eff_moe)
-                    _exp = (model_gb * eff_moe / layers) if layers else 0.0
-                    _ncm = n_cm if offload_kind == "n-cpu-moe" else (layers if offload_kind == "cpu-moe" else 0)
+                    att = model_gb * (1 - eff_moe)
+                    exp = (model_gb * eff_moe / layers) if layers else 0.0
+                    ncm = n if kind == "n-cpu-moe" else (layers if kind == "cpu-moe" else 0)
                 else:
-                    # Dense: only gpu_model_gb is resident — _find_fit may have just moved whole
-                    # layers to the CPU via ngl. Sizing this check against the FULL model instead
-                    # rejected every candidate for any model too large to fit outright, which is
-                    # precisely the case partial offload exists to serve. Dense layers cost the
-                    # same as each other, so an even split is already correct and no tensor-split
-                    # is emitted; this is purely a per-card feasibility test.
-                    _att, _exp, _ncm = gpu_model_gb, 0.0, 0
-                _ts, _loads = _balanced_split(
-                    layers, _ncm, _att, _exp, kv_gb, gpu_count, pinned_gb, card_caps)
-                if _loads and any(load > cap for load, cap in zip(_loads, card_caps)):
-                    fits = False
+                    att, exp, ncm = gpu_gb, 0.0, 0
+                _ts, loads = _balanced_split(layers, ncm, att, exp, _kv, gpu_count, _pin, _caps)
+                if not loads:
+                    return True          # cannot model the split; do not block on it
+                return all(load <= cap for load, cap in zip(loads, _caps))
+
+            fits, gpu_model_gb, offload_kind, n_cm = _find_fit(
+                model_gb, kv_gb, budget, layers, eff_moe, card_ok=_card_ok)
             total = gpu_model_gb + kv_gb
             rows.append(FitRow(
                 ctx=per_session_ctx, total_ctx=total_ctx,
