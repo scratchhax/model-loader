@@ -255,6 +255,135 @@
     </div>
   </form>
 
+  {# ---------------------------------------------------------------- charts #}
+  {% if run and charts_json %}
+  <div id="bench-charts" data-charts='{{ charts_json }}' class="grid gap-4 md:grid-cols-2"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script>
+  (function () {
+    const host = document.getElementById('bench-charts');
+    if (!host || typeof Chart === 'undefined') return;
+    let C;
+    try { C = JSON.parse(host.dataset.charts); } catch (e) { return; }
+
+    // Read the palette off the page rather than hardcoding hex, so the charts follow the
+    // light/dark theme the rest of the app is using.
+    const dark = document.documentElement.classList.contains('dark');
+    const fg = dark ? '#cbd5e1' : '#334155';
+    const grid = dark ? 'rgba(148,163,184,.18)' : 'rgba(100,116,139,.18)';
+    const palette = ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#14b8a6'];
+    Chart.defaults.color = fg;
+    Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
+    Chart.defaults.font.size = 11;
+
+    function card(title, note) {
+      const d = document.createElement('div');
+      d.className = 'rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4';
+      d.innerHTML = '<div class="text-sm font-semibold">' + title + '</div>' +
+                    '<div class="mt-0.5 mb-2 text-[11px] text-slate-500 dark:text-slate-400">' + note + '</div>' +
+                    '<div style="position:relative;height:230px"><canvas></canvas></div>';
+      host.appendChild(d);
+      return d.querySelector('canvas');
+    }
+
+    const axes = (xTitle, yTitle) => ({
+      x: { title: { display: !!xTitle, text: xTitle }, grid: { color: grid }, ticks: { color: fg } },
+      y: { title: { display: !!yTitle, text: yTitle }, grid: { color: grid }, ticks: { color: fg },
+           beginAtZero: true },
+    });
+
+    // 1. Generation speed by model, one bar group per prompt.
+    if (C.aliases.length && C.gen.length) {
+      new Chart(card('Generation speed', 'Median tok/s per prompt. Cold and contended requests excluded.'), {
+        type: 'bar',
+        data: {
+          labels: C.aliases,
+          datasets: C.gen.map((s, i) => ({
+            label: s.label, data: s.data,
+            backgroundColor: palette[i % palette.length], borderRadius: 3,
+          })),
+        },
+        options: { responsive: true, maintainAspectRatio: false,
+                   plugins: { legend: { position: 'bottom' } }, scales: axes('', 'tok/s') },
+      });
+    }
+
+    // 2. First-token latency. Lower is better, which is the opposite of every other chart
+    //    here, so the axis says so rather than relying on the reader to notice.
+    if (C.aliases.length && C.ttft.length) {
+      new Chart(card('Time to first token', 'Median ms until anything appears. Lower is better.'), {
+        type: 'bar',
+        data: {
+          labels: C.aliases,
+          datasets: C.ttft.map((s, i) => ({
+            label: s.label, data: s.data,
+            backgroundColor: palette[i % palette.length], borderRadius: 3,
+          })),
+        },
+        options: { responsive: true, maintainAspectRatio: false,
+                   plugins: { legend: { position: 'bottom' } }, scales: axes('', 'ms (lower is better)') },
+      });
+    }
+
+    // 3. Throughput against how much context is already in the cache.
+    if (C.decay.length) {
+      new Chart(card('Speed vs context depth', 'From llama bench. How much a long conversation costs you.'), {
+        type: 'line',
+        data: {
+          labels: C.depths.map(d => d ? (d >= 1024 ? (d / 1024) + 'K' : d) : '0'),
+          datasets: C.decay.map((s, i) => ({
+            label: s.label, data: s.data,
+            borderColor: palette[i % palette.length],
+            backgroundColor: palette[i % palette.length],
+            borderDash: s.kind === 'pp' ? [4, 3] : [],
+            tension: 0.25, spanGaps: true,
+            // pp and tg differ by an order of magnitude; a shared linear axis would flatten
+            // tg into the floor, so pp goes on its own right-hand axis.
+            yAxisID: s.kind === 'pp' ? 'y2' : 'y',
+          })),
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { position: 'bottom' } },
+          scales: {
+            x: { title: { display: true, text: 'tokens already in cache' }, grid: { color: grid } },
+            y: { position: 'left', title: { display: true, text: 'tg tok/s' },
+                 grid: { color: grid }, beginAtZero: true },
+            y2: { position: 'right', title: { display: true, text: 'pp tok/s (dashed)' },
+                  grid: { drawOnChartArea: false }, beginAtZero: true },
+          },
+        },
+      });
+    }
+
+    // 4. The only chart that can falsify anything: what autoconfig predicted against what the
+    //    cards actually held.
+    if (C.vram_labels.length) {
+      new Chart(card('VRAM: measured vs predicted',
+                     'Peak observed during the run against what autoconfig expects. Predicted bars are missing where it could not be worked out.'), {
+        type: 'bar',
+        data: {
+          labels: C.vram_labels,
+          datasets: [
+            { label: 'measured peak', data: C.vram_measured, backgroundColor: palette[0], borderRadius: 3 },
+            { label: 'autoconfig prediction', data: C.vram_predicted, backgroundColor: palette[3], borderRadius: 3 },
+          ],
+        },
+        options: { responsive: true, maintainAspectRatio: false,
+                   plugins: { legend: { position: 'bottom' } }, scales: axes('', 'GB') },
+      });
+    }
+
+    if (!host.children.length) {
+      host.className = '';
+      host.innerHTML = '<p class="text-sm text-slate-500 dark:text-slate-400">' +
+        'Not enough clean measurements to chart yet &mdash; every request was cold, contended or failed.</p>';
+    }
+  })();
+  </script>
+  {% endif %}
+
   {# ---------------------------------------------------------------- results #}
   {% if run %}
   <div class="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">

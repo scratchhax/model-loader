@@ -995,6 +995,75 @@ def _container_baseline(name: str) -> list[str]:
         return []
 
 
+def _backend_list() -> list[dict]:
+    """Backend descriptors for autoconfig, from the env whitelist or auto-discovery.
+
+    Extracted so the benchmark results page can ask for the same fit estimate the autoconfig
+    panel shows, rather than growing a second, drifting copy of this.
+    """
+    out = []
+    for bn in services._effective_container_names():
+        vram = hw.vram_gb_for(bn)
+        if vram <= 0:
+            continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
+        # detect vendor via hw sampler cache (or docker inspect image)
+        vendor = "unknown"
+        try:
+            client = services._docker_client()
+            if client is not None:
+                img = ((client.containers.get(bn).image.tags or [""]) or [""])[0].lower()
+                if "rocm" in img:
+                    vendor = "rocm"
+                elif "cuda" in img:
+                    vendor = "cuda"
+        except Exception:  # noqa: BLE001
+            pass
+        cmd = _container_baseline(bn)
+        base = autoconfig.parse_baseline(cmd) if cmd else {}
+        out.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
+                    "gpu_count": hw.gpu_count_for(bn), "card_vram_gb": hw.card_vram_gb_for(bn),
+                    "host_ram_gb": hw.host_ram_gb(),
+                    "baseline": base})
+    return out
+
+
+def _predicted_vram_gb(section: str) -> float | None:
+    """What autoconfig expects this section to occupy in VRAM: weights + KV, in GB.
+
+    Used only to sit beside a MEASURED figure on the benchmark results page. That comparison is
+    the one thing that makes the fit maths falsifiable - it has been validated against
+    llama.cpp's own estimator, but never against what the cards actually end up holding.
+    Returns None whenever it cannot be worked out; a missing bar is fine, a wrong one is not.
+    """
+    try:
+        gguf_path, model_rel, rel = _resolve_section_gguf(section)
+        if gguf_path is None or not gguf_path.is_file():
+            return None
+        summary = gguf_meta.summarize(gguf_meta.read_raw(gguf_path))
+        backends = _backend_list()
+        if not backends:
+            return None
+        subdir = rel.split("/", 1)[0] if rel and "/" in rel else ""
+        vals = ini.get_section(section) or {}
+        rec = autoconfig.analyze(
+            summary=summary, file_size=gguf_path.stat().st_size, backends=backends,
+            model_rel=model_rel, current_section=vals, models_dir=settings.models_dir,
+            section_name=section, model_subdir=subdir)
+        if not rec.frontier:
+            return None
+        # Compare at the context the section is actually configured for, not at whatever
+        # autoconfig would recommend - the measurement was taken under the former.
+        try:
+            want = int(str(vals.get("ctx-size", "")).strip() or 0)
+        except ValueError:
+            want = 0
+        want = want or rec.recommended_total_ctx or rec.recommended_ctx
+        row = min(rec.frontier, key=lambda r: abs(r.ctx - want)) if want else rec.frontier[0]
+        return round(row.gpu_gb + row.kv_gb, 2)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.get("/config/section/{name}/autoconfig", response_class=HTMLResponse)
 async def config_autoconfig(request: Request, name: str, preset: str = "",
                             sessions: int = 1, spec: str = "") -> HTMLResponse:
@@ -1037,31 +1106,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         except OSError:
             pass
 
-    # Assemble backend info from whatever we effectively see (env whitelist OR auto-discovery)
-    backend_list = []
-    for bn in services._effective_container_names():
-        vram = hw.vram_gb_for(bn)
-        if vram <= 0:
-            continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
-        gpu_count = hw.gpu_count_for(bn)
-        # detect vendor via hw sampler cache (or docker inspect image)
-        vendor = "unknown"
-        try:
-            client = services._docker_client()
-            if client is not None:
-                img = ((client.containers.get(bn).image.tags or [""]) or [""])[0].lower()
-                if "rocm" in img:
-                    vendor = "rocm"
-                elif "cuda" in img:
-                    vendor = "cuda"
-        except Exception:  # noqa: BLE001
-            pass
-        cmd = _container_baseline(bn)
-        base = autoconfig.parse_baseline(cmd) if cmd else {}
-        backend_list.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
-                             "gpu_count": gpu_count, "card_vram_gb": hw.card_vram_gb_for(bn),
-                             "host_ram_gb": hw.host_ram_gb(),
-                             "baseline": base})
+    backend_list = _backend_list()
 
     # Existing section (for diff)
     current_section = ini.get_section(name)
@@ -1509,13 +1554,93 @@ def benchmark_banner(request: Request) -> HTMLResponse:
     })
 
 
+def _median(xs: list[float]) -> float:
+    """Median, not mean. Same reasoning as everywhere else here: one request that queued behind
+    a model load reads as a fraction of the true rate and drags an average with it."""
+    xs = sorted(x for x in xs if x)
+    if not xs:
+        return 0.0
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+
+
+def _bench_charts(run_id: int, results: list, sweeps: list) -> dict:
+    """Series for the charts, shaped so the template just hands them to Chart.js.
+
+    Cold and contended rows are excluded from every aggregate: one includes a model load, the
+    other ran while something else had the GPU, and neither describes steady-state speed. They
+    stay in the table, where the badges explain them.
+    """
+    import json as _json
+    clean = [r for r in results if not r["cold"] and not r["contended"] and not r["err"]]
+
+    aliases = sorted({r["alias"] for r in clean})
+    prompts = sorted({r["prompt_name"] for r in clean})
+
+    def _pick(alias, prompt, field):
+        return _median([r[field] for r in clean
+                        if r["alias"] == alias and r["prompt_name"] == prompt and r[field]])
+
+    gen_series = [{"label": p, "data": [round(_pick(a, p, "gen_tps"), 1) for a in aliases]}
+                  for p in prompts]
+    ttft_series = [{"label": p, "data": [round(_pick(a, p, "ttft_ms"), 0) for a in aliases]}
+                   for p in prompts]
+
+    # Depth decay, straight from llama bench. One line per model per test kind, x = depth.
+    depths = sorted({w["n_depth"] or 0 for w in sweeps})
+    decay: list[dict] = []
+    for a in sorted({w["alias"] for w in sweeps}):
+        for kind, want_gen in (("tg", True), ("pp", False)):
+            pts = []
+            for d in depths:
+                m = [w["avg_ts"] for w in sweeps
+                     if w["alias"] == a and (w["n_depth"] or 0) == d
+                     and bool(w["n_gen"]) == want_gen and w["avg_ts"]]
+                pts.append(round(m[0], 1) if m else None)
+            if any(p is not None for p in pts):
+                decay.append({"label": f"{a} {kind}", "data": pts, "kind": kind})
+
+    # Measured VRAM against what autoconfig predicted. The one chart that can falsify the fit
+    # maths: everything else here measures speed, which the estimator never claimed to know.
+    vram_labels, vram_measured, vram_predicted = [], [], []
+    for a in aliases:
+        peaks = []
+        for r in clean:
+            if r["alias"] != a:
+                continue
+            try:
+                peaks.append(sum(_json.loads(r["peak_vram_json"] or "[]")))
+            except ValueError:
+                pass
+        if not peaks:
+            continue
+        vram_labels.append(a)
+        vram_measured.append(round(max(peaks), 2))
+        vram_predicted.append(_predicted_vram_gb(a))
+
+    return {
+        "aliases": aliases,
+        "gen": gen_series,
+        "ttft": ttft_series,
+        "depths": depths,
+        "decay": decay,
+        "vram_labels": vram_labels,
+        "vram_measured": vram_measured,
+        "vram_predicted": vram_predicted,
+    }
+
+
 @app.get("/benchmark/run/{run_id}", response_class=HTMLResponse)
 def benchmark_run(request: Request, run_id: int) -> HTMLResponse:
+    import json as _json
     ctx = _bench_ctx(request)
+    results = db.bench_results(run_id)
+    sweeps = db.bench_sweeps(run_id)
     ctx.update({
         "run": db.bench_run(run_id),
         "variants": db.bench_variants(run_id),
-        "results": db.bench_results(run_id),
-        "sweeps": db.bench_sweeps(run_id),
+        "results": results,
+        "sweeps": sweeps,
+        "charts_json": _json.dumps(_bench_charts(run_id, results, sweeps)),
     })
     return templates.TemplateResponse("benchmark.html", ctx)
