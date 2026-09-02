@@ -1491,6 +1491,8 @@ def _bench_ctx(request: Request, flash: str = "") -> dict:
         "sweep_args": {n: " ".join(bench.sweep_args_for_section(n)) for n in ini.section_names()},
         "prompts": db.list_prompts(),
         "backends": services._effective_container_names(),
+        "max_tokens_default": bench.DEFAULT_MAX_TOKENS,
+        "max_tokens_ceiling": bench.MAX_TOKENS_CEILING,
         "job": bench.state(),
         "runs": db.bench_runs(limit=15),
         "flash": flash,
@@ -1578,13 +1580,21 @@ def _bench_charts(run_id: int, results: list, sweeps: list) -> dict:
     aliases = sorted({r["alias"] for r in clean})
     prompts = sorted({r["prompt_name"] for r in clean})
 
-    def _pick(alias, prompt, field):
-        return _median([r[field] for r in clean
-                        if r["alias"] == alias and r["prompt_name"] == prompt and r[field]])
+    def _pick(alias, prompt, field, digits):
+        """Median for one cell, or None when there is nothing clean to report.
 
-    gen_series = [{"label": p, "data": [round(_pick(a, p, "gen_tps"), 1) for a in aliases]}
+        None rather than 0.0: Chart.js skips a null point but draws a zero, and a zero bar on
+        a speed chart reads as "this model produced nothing" when the truth is "every row for
+        it was cold, contended or failed". A model that would not load looked like a model
+        that ran infinitely slowly.
+        """
+        vals = [r[field] for r in clean
+                if r["alias"] == alias and r["prompt_name"] == prompt and r[field]]
+        return round(_median(vals), digits) if vals else None
+
+    gen_series = [{"label": p, "data": [_pick(a, p, "gen_tps", 1) for a in aliases]}
                   for p in prompts]
-    ttft_series = [{"label": p, "data": [round(_pick(a, p, "ttft_ms"), 0) for a in aliases]}
+    ttft_series = [{"label": p, "data": [_pick(a, p, "ttft_ms", 0) for a in aliases]}
                    for p in prompts]
 
     # Depth decay, straight from llama bench. One line per model per test kind, x = depth.

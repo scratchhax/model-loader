@@ -55,6 +55,10 @@ from . import db, hw
 # costing exactly 512 tokens because every request was being cut off.
 DEFAULT_MAX_TOKENS = 3072
 
+# Upper bound accepted from the form. Kept here so the template can render it rather than
+# hard-coding a second number that can drift out of step with the clamp.
+MAX_TOKENS_CEILING = 8192
+
 # Sampling temperature is pinned to 0 for every benchmark request. Output length drives almost
 # every derived number here, so letting it vary run to run would put noise into the one place
 # it cannot be averaged out.
@@ -82,6 +86,8 @@ class JobState:
     started_at: float = 0.0
     finished_at: float = 0.0
     error: str = ""
+    # What `total` counts. The prompt suite works in requests; a sweep works in models.
+    unit: str = "requests"
     lines: list[str] = field(default_factory=list)
 
     @property
@@ -100,14 +106,16 @@ class JobState:
         Only meaningful once something has finished; before that there is no rate to project
         from and the honest answer is "unknown", not a number derived from one guess.
         """
-        if self.done <= 0 or self.status != "running":
+        if self.done <= 0 or self.status not in ("running", "cancelling"):
             return 0.0
         per = self.elapsed_s / self.done
         return max(0.0, per * (self.total - self.done))
 
     @property
     def active(self) -> bool:
-        return self.status in ("running", "cancelling")
+        # "starting" counts: the slot is claimed before the worker exists, so a second caller
+        # arriving in that window must be refused.
+        return self.status in ("starting", "running", "cancelling")
 
 
 _STATE = JobState()
@@ -283,10 +291,31 @@ def _read_load_ms(container: str, alias: str) -> float | None:
         return None
 
     from . import telemetry
+    # The router words this two ways, and only one of them was matched before:
+    #
+    #   free slot : "ensure_model: model name=X is not loaded, loading..."
+    #   eviction  : "ensure_model: evicting idle LRU name=OLD to make room for name=X"
+    #               "ensure_model: waiting until model name=X is fully loaded..."  (repeats)
+    #
+    # At --models-max 1 every model after the first arrives by eviction, so matching only the
+    # free-slot phrasing meant load time was never measured for them - it returned None for
+    # every cold variant ever recorded.
+    starts = (
+        f"ensure_model: model name={alias} is not loaded",
+        f"ensure_model: waiting until model name={alias} is fully loaded",
+        # The eviction line reads "evicting idle LRU name=OLD to make room for name=NEW", so
+        # the prefix cannot include "ensure_model:" - there is text in between. This is the
+        # earliest line of an eviction episode, a beat before the first "waiting until".
+        f"to make room for name={alias}",
+    )
     start_ts = None
     for line in text.splitlines():
-        if f"ensure_model: model name={alias} is not loaded" in line:
-            start_ts = telemetry._parse_ts(line)
+        if any(m in line for m in starts):
+            # Keep the EARLIEST line of a load episode. "waiting until..." is emitted on a
+            # poll loop, so overwriting on each match would time only the last poll and
+            # report a fraction of the real load.
+            if start_ts is None:
+                start_ts = telemetry._parse_ts(line) or None
         elif start_ts and "llama_server: listening on http://127.0.0.1:" in line:
             end_ts = telemetry._parse_ts(line)
             if end_ts and end_ts >= start_ts:
@@ -328,24 +357,34 @@ def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
     if not prompts:
         return False, "no prompts selected"
     reps = max(1, min(int(reps or 1), 10))
-    max_tokens = max(16, min(int(max_tokens or DEFAULT_MAX_TOKENS), 4096))
+    # Must match the max on the form's input, or a value the UI accepts is silently discarded
+    # and the duration estimate - which uses the number the user typed - describes a run that
+    # never happens.
+    max_tokens = max(16, min(int(max_tokens or DEFAULT_MAX_TOKENS), MAX_TOKENS_CEILING))
 
+    started = time.time()
     with _LOCK:
         if _STATE.active:
             return False, "a benchmark is already running"
+        # Claim the slot inside the SAME lock that tested it. Testing and claiming used to sit
+        # in separate blocks with a docker inspect and a sqlite write between them - tens of
+        # milliseconds in which a double-click, a second tab, or another client could both see
+        # idle, both spawn a worker, and have the second overwrite the first's state, leaving
+        # an orphan thread and a run row stuck at "running".
+        _STATE = JobState(status="starting", backend=backend,
+                          total=len(aliases) * len(prompts) * reps, started_at=started)
 
     base_url, err = _resolve_endpoint(backend)
     if err:
+        with _LOCK:
+            _STATE = JobState()      # release the slot; nothing was started
         return False, err
 
     _CANCEL.clear()
-    started = time.time()
     run_id = db.bench_create_run(backend, reps, max_tokens, started)
     with _LOCK:
-        # A fresh object rather than mutating the last run's, so no field can survive by
-        # being one someone forgot to reset.
-        _STATE = JobState(run_id=run_id, status="running", backend=backend,
-                          total=len(aliases) * len(prompts) * reps, started_at=started)
+        _STATE.run_id = run_id
+        _STATE.status = "running"
 
     _THREAD = threading.Thread(
         target=_run, name="benchmark",
@@ -613,9 +652,12 @@ def start_sweep(*, backend: str, aliases: list[str], n_prompt: int = 512, n_gen:
         return False, "no backend selected"
     if not aliases:
         return False, "no models selected"
+    started = time.time()
     with _LOCK:
         if _STATE.active:
             return False, "a benchmark is already running"
+        # Same atomic claim as start(); see the note there.
+        _STATE = JobState(status="starting", backend=backend, started_at=started)
 
     from . import ini
     targets: list[tuple[str, str, list[str]]] = []
@@ -623,17 +665,23 @@ def start_sweep(*, backend: str, aliases: list[str], n_prompt: int = 512, n_gen:
         vals = ini.get_section(a) or {}
         rel = str(vals.get("model", "")).strip()
         if not rel:
+            with _LOCK:
+                _STATE = JobState()      # release the slot; nothing was started
             return False, f"section '{a}' has no model path"
         # models.ini paths are what llama-server is given, and the sweep container mounts the
         # same models directory at the same place, so they resolve unchanged.
         targets.append((a, rel, sweep_args_for_section(a)))
 
     _CANCEL.clear()
-    started = time.time()
     run_id = db.bench_create_run(backend, reps, n_gen, started)
     with _LOCK:
-        _STATE = JobState(run_id=run_id, status="running", backend=backend,
-                          total=len(targets), started_at=started)
+        _STATE.run_id = run_id
+        _STATE.status = "running"
+        _STATE.total = len(targets)
+        # A sweep's unit of work is a model, not a request - it invokes llama-bench once per
+        # model and that one invocation yields several measurements. Saying "requests" here
+        # made a six-model sweep read "6 / 6 requests" while producing 36 of them.
+        _STATE.unit = "models"
     _THREAD = threading.Thread(target=_run_sweep, name="benchmark-sweep",
                                args=(run_id, backend, targets, n_prompt, n_gen, depths, reps),
                                daemon=True)

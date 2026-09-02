@@ -50,7 +50,7 @@
     </div>
 
     <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
-      <span class="tabular-nums">{{ job.done }} / {{ job.total }} requests ({{ job.pct }}%)</span>
+      <span class="tabular-nums">{{ job.done }} / {{ job.total }} {{ job.unit }} ({{ job.pct }}%)</span>
       <span class="tabular-nums">elapsed {{ '%d:%02d' | format(job.elapsed_s // 60, job.elapsed_s % 60) }}</span>
       {% if job.eta_s %}
       {# Only shown once something has finished; before that there is no rate to project from. #}

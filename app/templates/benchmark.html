@@ -84,7 +84,7 @@
       </div>
       <div>
         <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Max tokens</label>
-        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="8192" step="128" value="3072"
+        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="{{ max_tokens_ceiling }}" step="128" value="{{ max_tokens_default }}"
                class="mt-1 block w-28 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm tabular-nums">
         <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.<br>
           Thinking models spend hundreds of tokens reasoning first &mdash; measured here, the hardest prompt
@@ -671,7 +671,16 @@
             </td>
             <td class="pr-3 py-1 text-right">{% if r.ttft_ms %}{{ '%.0f' | format(r.ttft_ms) }} ms{% else %}&mdash;{% endif %}</td>
             <td class="pr-3 py-1 text-right">{% if r.ttft_answer_ms %}{{ '%.0f' | format(r.ttft_answer_ms) }} ms{% else %}<span class="text-slate-400" title="Never reached the answer - the token cap hit while it was still thinking.">&mdash;</span>{% endif %}</td>
-            <td class="pr-3 py-1 text-right">{% if r.prompt_tps %}{{ '%.0f' | format(r.prompt_tps) }}{% else %}&mdash;{% endif %}</td>
+            {# Below this many tokens the prompt was served from cache and the rate is derived
+               from a handful of tokens - on one measured run rep 1 processed 84 tokens at 369
+               tok/s and rep 2 processed 5 at 105, which is not a slowdown, it is a sample too
+               small to mean anything. Showing the two side by side implied a regression that
+               never happened. #}
+            <td class="pr-3 py-1 text-right">
+              {% if r.prompt_tps and (r.prompt_n or 0) >= 32 %}{{ '%.0f' | format(r.prompt_tps) }}
+              {%- elif r.prompt_tps %}<span class="text-slate-400" title="Prompt was served from the cache: only {{ r.prompt_n }} tokens were actually processed, too few for the rate to mean anything.">cached</span>
+              {%- else %}&mdash;{% endif %}
+            </td>
             <td class="pr-3 py-1 text-right font-semibold">{% if r.gen_tps %}{{ '%.1f' | format(r.gen_tps) }}{% else %}&mdash;{% endif %}</td>
             <td class="pr-3 py-1 text-right">{% if r.draft_acc is not none %}{{ '%.0f' | format(r.draft_acc * 100) }}%{% else %}&mdash;{% endif %}</td>
             <td class="pr-3 py-1 text-right font-mono text-[10px]">{{ r.peak_vram_json | replace('[','') | replace(']','') | replace(',', ' / ') or '—' }}</td>
@@ -745,7 +754,7 @@
       aliases: [],
       promptIds: [],
       reps: 3,
-      maxTokens: 3072,
+      maxTokens: {{ max_tokens_default }},
       get sweepDepthCount() {
         return this.depths.split(',').filter(function (d) { return d.trim() !== ''; }).length || 1;
       },
