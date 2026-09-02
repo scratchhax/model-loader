@@ -91,6 +91,27 @@ def _kv_first_int(kv_heads: Any, default: int = 8) -> int:
     return default
 
 
+def _pattern_sample(val: Any, layers: int) -> list:
+    """Per-layer GGUF arrays arrive as {_array, count, sample} holding only a PREFIX of the
+    array. Returns the prefix when it describes this model's layer stack, else []."""
+    if isinstance(val, dict) and val.get("_array"):
+        if int(val.get("count") or 0) == layers:
+            return list(val.get("sample") or [])
+        return []
+    if isinstance(val, (list, tuple)):
+        return list(val)
+    return []
+
+
+def _period_of(seq: list) -> int:
+    """Shortest p with seq[i] == seq[i % p] for all i. These per-layer patterns repeat, and the
+    sample is only a prefix, so the period is what lets one cycle stand for the whole stack."""
+    for p in range(1, len(seq) + 1):
+        if all(seq[i] == seq[i % p] for i in range(len(seq))):
+            return p
+    return len(seq)
+
+
 def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
                    head_dim: int, bytes_per_elem: float,
                    key_length: int | None = None, value_length: int | None = None,
@@ -101,7 +122,8 @@ def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
                    sliding_window_pattern: Any = None,
                    key_length_swa: int | None = None,
                    value_length_swa: int | None = None,
-                   shared_kv_layers: int | None = None) -> int:
+                   shared_kv_layers: int | None = None,
+                   kv_heads_pattern: Any = None) -> int:
     """Compute KV cache bytes. Handles:
        - explicit key/value_length overrides (Qwen3.x, Yi, etc.)
        - hybrid attention+SSM (Qwen3.5, Zamba) via full_attention_interval + ssm_state_size
@@ -136,42 +158,54 @@ def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
     # allocate none of their own. Guessing over-estimated this model's cache by roughly an
     # order of magnitude, which shows up as far less offered context than it can really do.
     if sliding_window and sliding_window > 0:
-        # How many layers are local? Prefer the declared pattern; fall back to the gemma ratio.
-        local_layers = None
-        if isinstance(sliding_window_pattern, dict) and sliding_window_pattern.get("_array"):
-            sample = sliding_window_pattern.get("sample") or []
-            count = int(sliding_window_pattern.get("count") or 0)
-            if sample and count == layers:
-                # The sample is only a PREFIX of the array, and these patterns repeat — gemma
-                # is 5 sliding layers to 1 global. Taking the prefix ratio straight gives 7/8
-                # from an 8-element sample of a 6-periodic pattern instead of 5/6, a 20% error
-                # in the global count, which is the term that dominates the cache. So find the
-                # period first and extrapolate from one full cycle.
-                period = len(sample)
-                for cand in range(1, len(sample)):
-                    if all(sample[i] == sample[i % cand] for i in range(len(sample))):
-                        period = cand
-                        break
-                local_per_period = sum(1 for v in sample[:period] if v)
-                local_layers = round(layers * local_per_period / period)
-        elif isinstance(sliding_window_pattern, (list, tuple)) and len(sliding_window_pattern) == layers:
-            local_layers = sum(1 for v in sliding_window_pattern if v)
-        if local_layers is None:
-            local_layers = layers - max(1, layers // 6)
-        local_layers = max(0, min(layers, local_layers))
-        global_layers = layers - local_layers
+        # Read every per-layer quantity off the SAME repeating period.
+        #
+        # Gemma declares both the local/global pattern and the KV head count as per-layer
+        # arrays, and they are aligned: on gemma-4-12b the global layer (pattern False) carries
+        # 1 KV head against 8 on the local ones, and on 26B-A4B it is 2 against 8. Collapsing
+        # that array to one representative value charged every global layer 8x too much, and
+        # since the global term is the only one that scales with ctx, it dominated the entire
+        # estimate - 14.5 GB predicted against llama.cpp's own 2.0 GB at 208K.
+        pattern = _pattern_sample(sliding_window_pattern, layers)
+        heads_seq = _pattern_sample(kv_heads_pattern, layers)
 
-        # Layers sharing another layer's KV allocate nothing. Charge the saving to the local
-        # layers first, since those are the majority and the cheaper ones to drop.
+        # Layers that reuse another layer's KV allocate none of their own. They are spread
+        # through the stack rather than clustered at one end, so the saving lands on local and
+        # global layers alike; charging it entirely to the local layers (the cheap ones) made
+        # it nearly worthless and left gemma-4-E4B 70% high.
         shared = max(0, min(int(shared_kv_layers or 0), layers))
-        local_layers = max(0, local_layers - shared)
+        alloc_frac = (layers - shared) / layers if layers else 1.0
 
         k_swa = int(key_length_swa) if key_length_swa else k_dim
         v_swa = int(value_length_swa) if value_length_swa else v_dim
-        per_local = kv_heads * (k_swa * bytes_per_elem + v_swa * v_bytes)
-
+        per_local_elem = k_swa * bytes_per_elem + v_swa * v_bytes
+        per_global_elem = k_dim * bytes_per_elem + v_dim * v_bytes
         window = min(int(sliding_window), ctx)
-        return int(global_layers * per_layer_per_token * ctx + local_layers * per_local * window)
+
+        if pattern:
+            period = _period_of(pattern)
+            reps = (layers / period) * alloc_frac
+            total = 0.0
+            for i in range(period):
+                # Fall back to the scalar head count for any position the sample does not
+                # reach; models that declare a scalar (gemma-4-E4B) take this path throughout.
+                h = kv_heads
+                if i < len(heads_seq):
+                    try:
+                        h = max(1, int(heads_seq[i]))
+                    except (TypeError, ValueError):
+                        h = kv_heads
+                if pattern[i]:
+                    total += reps * h * per_local_elem * window
+                else:
+                    total += reps * h * per_global_elem * ctx
+            return int(total)
+
+        # No usable pattern: fall back to gemma's 5-local-to-1-global ratio at one head count.
+        local_layers = max(0, min(layers, layers - max(1, layers // 6)))
+        global_layers = layers - local_layers
+        return int(alloc_frac * (global_layers * kv_heads * per_global_elem * ctx
+                                 + local_layers * kv_heads * per_local_elem * window))
 
     if arch_l.startswith("gemma") and layers >= 6:
         # Older gemma with no declared window: fall back to the 1-in-6 / 4096 approximation.
@@ -1072,6 +1106,8 @@ def analyze(*,
         "key_length_swa": m.get("key_length_swa") if isinstance(m.get("key_length_swa"), int) else None,
         "value_length_swa": m.get("value_length_swa") if isinstance(m.get("value_length_swa"), int) else None,
         "shared_kv_layers": m.get("shared_kv_layers") if isinstance(m.get("shared_kv_layers"), int) else None,
+        # Raw, not collapsed: which layers are global decides which head count applies.
+        "kv_heads_pattern": m.get("attention_head_count_kv"),
     }
 
     # Model VRAM depends on whether we'll be layer-splitting across multiple GPUs.
