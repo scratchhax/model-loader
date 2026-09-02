@@ -18,6 +18,14 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 - **Prompt library** — saved system prompts with copy-to-clipboard, stored in the app's sqlite.
 - **Command palette** (Cmd/Ctrl-K) — jump to any page or model.
 
+### Downloading
+
+![The Downloads page: two concurrent jobs, each split into eight byte-range chunks with an individual speed readout, an aggregate throughput sparkline and an ETA](docs/downloader.png)
+
+Each file is fetched as eight concurrent byte-range requests, so a single slow chunk doesn't gate the whole transfer — the per-chunk readouts make that visible, and they are rarely even. Jobs survive a restart of Model Loader and resume from the last completed chunk rather than starting over.
+
+The two jobs above are one action: downloading a multimodal model auto-queues the matching `mmproj` projector from the same repo into the same directory, because the model is not much use without it.
+
 ### Autoconfig, in practice
 
 ![The Autoconfig panel: a concurrent-sessions picker, four priority presets (Fast, Balanced, Long context, Custom) each showing context size, GPU layers and a relative speed estimate, and a per-backend table marking which context sizes fit and which do not](docs/model_performance_selector.png)
@@ -57,8 +65,13 @@ Model Loader manages any llama.cpp container. What varies is whether it can read
 | Discovery, restart, logs | yes | yes | yes | yes |
 | `models.ini` editing | yes | yes | yes | yes |
 | Live util / VRAM / temp / power | yes | yes | only if an SMI tool is present | n/a |
+| Fit verdict | vs VRAM | vs VRAM | vs VRAM, **needs `GPU_VRAM`** | vs usable **RAM** |
 | Autoconfig sizing | yes | yes | **needs `GPU_VRAM`** | n/a |
 | Per-card fit + `tensor-split` | yes | yes | no per-card data | n/a |
+
+CPU backends are sized against system RAM rather than VRAM, after subtracting `HOST_RAM_RESERVE_GB` (default 32) for the OS and page cache — planning against `MemTotal` produces configs that load and then swap. On CPU, `ctx-size` is the only fit lever: `ngl`, `n-cpu-moe` and `tensor-split` all presuppose a GPU.
+
+A model can fit in RAM and still be unusable there, because CPU generation is RAM-bandwidth-bound, so large models get a distinct "fits but will crawl" verdict rather than a green tick.
 
 Vendor is detected from the image tag, so a custom-built image may need `LLAMA_CONTAINERS` to be discovered and `GPU_VRAM` to be sized.
 
