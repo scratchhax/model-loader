@@ -251,8 +251,12 @@
               {% set pct = row.gpu_pct %}
               {% set tone = 'violet' if pct >= 100 else 'emerald' if pct >= 70 else 'yellow'
                             if pct >= 50 else 'orange' if pct >= 25 else 'red' %}
+              {# Struck through when it does not fit. That is a NON-COLOUR signal, which
+                 matters because the bottom fit tier is also red: hue alone would make "fits,
+                 barely" and "does not fit" look alike, and it would fail entirely for a
+                 colourblind reader or in greyscale. #}
               <td class="py-1.5 px-2 text-right tabular-nums align-top
-                  {% if not row.fits %}text-red-500 dark:text-red-400
+                  {% if not row.fits %}line-through decoration-2 opacity-70 text-red-500 dark:text-red-400
                   {% elif tone == 'violet' %}text-violet-600 dark:text-violet-400
                   {% elif tone == 'emerald' %}text-emerald-600 dark:text-emerald-400
                   {% elif tone == 'yellow' %}text-yellow-600 dark:text-yellow-400
@@ -261,7 +265,7 @@
                   title="{{ title }}{% if row.fits %} · {{ pct }}% of the model on GPU{% endif %}{% if row.offload_kind %} · via {{ row.offload_kind }}{% if row.n_cpu_moe %}={{ row.n_cpu_moe }}{% endif %}{% endif %}">
                 <div>{% if row.fits %}✓{% else %}✗{% endif %} {{ '%.1f' % row.total_gb }}</div>
                 {% if row.offload_kind %}
-                  <div class="text-[9px] leading-tight text-slate-500 dark:text-slate-400 font-sans">
+                  <div class="text-[9px] leading-tight text-slate-500 dark:text-slate-400 font-sans no-underline">
                     {% if row.offload_kind == 'cpu-moe' %}cpu-moe
                     {% elif row.offload_kind == 'n-cpu-moe' %}ncm={{ row.n_cpu_moe }}
                     {% else %}{{ row.n_cpu_moe }}L on CPU{% endif %}
