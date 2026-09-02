@@ -38,7 +38,12 @@ from . import db, hw
 # Generation is capped so a run has a predictable duration and every variant does the same
 # amount of work. Without a cap, one model rambling to its context limit turns a five-minute
 # suite into an hour and makes the per-variant numbers incomparable.
-_DEFAULT_MAX_TOKENS = 256
+# Reasoning models spend their budget thinking before they answer, and a cap that runs out
+# mid-thought measures only how fast a model thinks - never whether it can write the code or
+# the prose the prompt asked for. 512 gives most of them room to finish and start answering;
+# results record whether the cap was hit anyway, so a truncated run is visible rather than
+# quietly mistaken for a complete one.
+_DEFAULT_MAX_TOKENS = 512
 
 # Sampling temperature is pinned to 0 for every benchmark request. Output length drives almost
 # every derived number here, so letting it vary run to run would put noise into the one place
@@ -160,9 +165,16 @@ def loaded_aliases(base_url: str) -> set[str]:
 def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
     """One streamed completion. Returns the server's own timings plus wire-measured TTFT.
 
-    TTFT is taken at the first chunk carrying actual content. Some builds emit an initial
-    role-only delta, and counting that as the first token would report a latency the user
-    never experiences — nothing is on screen until a character is.
+    Two first-token times, because reasoning models have two.
+
+    `ttft_ms` is the first VISIBLE token of any kind, reasoning included - that is the pause a
+    person actually experiences, since a client streaming the thinking shows it immediately.
+    `ttft_answer_ms` is the first token of the answer proper, which on a thinking model can be
+    thousands of tokens later and is the wait before anything useful appears. Reporting only
+    the first would misdescribe one kind of model or the other.
+
+    Neither counts the initial role-only delta llama.cpp emits, which carries no text: nothing
+    is on screen until a character is.
     """
     payload = {
         "model": alias,
@@ -175,6 +187,8 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
     out: dict = {"err": ""}
     t0 = time.perf_counter()
     ttft: float | None = None
+    ttft_answer: float | None = None
+    finish_reason = ""
     timings: dict = {}
     try:
         with httpx.Client(timeout=httpx.Timeout(_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S)) as cl:
@@ -194,11 +208,15 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
                         continue
                     if chunk.get("timings"):
                         timings = chunk["timings"]
-                    if ttft is None:
-                        for ch in (chunk.get("choices") or []):
-                            if ((ch.get("delta") or {}).get("content") or ""):
-                                ttft = time.perf_counter() - t0
-                                break
+                    for ch in (chunk.get("choices") or []):
+                        d = ch.get("delta") or {}
+                        if ch.get("finish_reason"):
+                            finish_reason = str(ch["finish_reason"])
+                        visible = (d.get("content") or "") or (d.get("reasoning_content") or "")
+                        if visible and ttft is None:
+                            ttft = time.perf_counter() - t0
+                        if (d.get("content") or "") and ttft_answer is None:
+                            ttft_answer = time.perf_counter() - t0
     except httpx.HTTPError as e:
         return {"err": f"{type(e).__name__}: {e}"}
 
@@ -207,6 +225,10 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
     draft_ok = int(timings.get("draft_n_accepted") or 0)
     out.update({
         "ttft_ms": round(ttft * 1000, 2) if ttft is not None else None,
+        "ttft_answer_ms": round(ttft_answer * 1000, 2) if ttft_answer is not None else None,
+        # "length" means the token cap cut it off, so this row describes an unfinished
+        # response and its content-based numbers should be read with that in mind.
+        "truncated": 1 if finish_reason == "length" else 0,
         "total_ms": round(total * 1000, 2),
         "prompt_n": int(timings.get("prompt_n") or 0),
         "prompt_tps": timings.get("prompt_per_second"),
@@ -357,7 +379,8 @@ def _run(run_id: int, backend: str, base_url: str, aliases: list[str],
                     m = measure(base_url, alias, prompt_body, max_tokens)
                     db.bench_add_result(
                         variant_id, prompt_name=prompt_name, rep=rep, cold=1 if cold else 0,
-                        ttft_ms=m.get("ttft_ms"), total_ms=m.get("total_ms"),
+                        ttft_ms=m.get("ttft_ms"), ttft_answer_ms=m.get("ttft_answer_ms"),
+                        truncated=m.get("truncated") or 0, total_ms=m.get("total_ms"),
                         prompt_n=m.get("prompt_n"), prompt_tps=m.get("prompt_tps"),
                         gen_n=m.get("gen_n"), gen_tps=m.get("gen_tps"),
                         draft_n=m.get("draft_n"), draft_acc=m.get("draft_acc"),

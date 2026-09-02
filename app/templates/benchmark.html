@@ -69,9 +69,9 @@
       </div>
       <div>
         <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Max tokens</label>
-        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="4096" step="16"
+        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="4096" step="16" value="512"
                class="mt-1 block w-28 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm tabular-nums">
-        <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.</p>
+        <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.<br>Thinking models need room to finish reasoning before they answer.</p>
       </div>
     </div>
 
@@ -147,7 +147,8 @@
             <th class="pr-3 pb-1.5 font-medium">model</th>
             <th class="pr-3 pb-1.5 font-medium">prompt</th>
             <th class="pr-3 pb-1.5 font-medium text-right">rep</th>
-            <th class="pr-3 pb-1.5 font-medium text-right" title="Time until the first character appears. This is the pause you feel before text starts.">TTFT</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="Time until the first character of any kind appears, thinking included. This is the pause you actually feel.">TTFT</th>
+            <th class="pr-3 pb-1.5 font-medium text-right" title="Time until the answer proper begins. On a thinking model this comes well after the first visible token; blank means it was still thinking when the token cap hit.">to answer</th>
             <th class="pr-3 pb-1.5 font-medium text-right" title="How fast the model read your prompt. Governs how long a long conversation takes to start responding.">prompt tok/s</th>
             <th class="pr-3 pb-1.5 font-medium text-right" title="How fast text is produced once it starts.">gen tok/s</th>
             <th class="pr-3 pb-1.5 font-medium text-right" title="Share of speculative draft tokens the model accepted, when speculative decoding is on.">draft</th>
@@ -163,15 +164,17 @@
               {{ r.rep }}
               {% if r.cold %}<span class="ml-1 rounded px-1 bg-slate-200 dark:bg-slate-700 text-[9px]" title="First request: includes model load and an empty cache. Read it separately from the rest.">cold</span>{% endif %}
               {% if r.contended %}<span class="ml-1 rounded px-1 bg-amber-200 dark:bg-amber-900 text-[9px]" title="Another model served a request while this one ran, so this measurement is not clean.">busy</span>{% endif %}
+              {% if r.truncated %}<span class="ml-1 rounded px-1 bg-slate-200 dark:bg-slate-700 text-[9px]" title="Hit the max-tokens cap rather than finishing on its own. Speed figures are still valid; the response is not a complete answer.">cut</span>{% endif %}
             </td>
             <td class="pr-3 py-1 text-right">{% if r.ttft_ms %}{{ '%.0f' | format(r.ttft_ms) }} ms{% else %}&mdash;{% endif %}</td>
+            <td class="pr-3 py-1 text-right">{% if r.ttft_answer_ms %}{{ '%.0f' | format(r.ttft_answer_ms) }} ms{% else %}<span class="text-slate-400" title="Never reached the answer - the token cap hit while it was still thinking.">&mdash;</span>{% endif %}</td>
             <td class="pr-3 py-1 text-right">{% if r.prompt_tps %}{{ '%.0f' | format(r.prompt_tps) }}{% else %}&mdash;{% endif %}</td>
             <td class="pr-3 py-1 text-right font-semibold">{% if r.gen_tps %}{{ '%.1f' | format(r.gen_tps) }}{% else %}&mdash;{% endif %}</td>
             <td class="pr-3 py-1 text-right">{% if r.draft_acc is not none %}{{ '%.0f' | format(r.draft_acc * 100) }}%{% else %}&mdash;{% endif %}</td>
             <td class="pr-3 py-1 text-right font-mono text-[10px]">{{ r.peak_vram_json | replace('[','') | replace(']','') | replace(',', ' / ') or '—' }}</td>
           </tr>
           {% if r.err %}
-          <tr><td colspan="8" class="pb-1 text-[11px] font-mono text-rose-600 dark:text-rose-400">{{ r.err }}</td></tr>
+          <tr><td colspan="9" class="pb-1 text-[11px] font-mono text-rose-600 dark:text-rose-400">{{ r.err }}</td></tr>
           {% endif %}
           {% endfor %}
         </tbody>
@@ -232,7 +235,7 @@
       aliases: [],
       promptIds: [],
       reps: 3,
-      maxTokens: 256,
+      maxTokens: 512,
       get estimate() {
         // Mirrors bench.estimate_seconds. Deliberately pessimistic: a number that undersells
         // the disruption is worse than one that oversells it.

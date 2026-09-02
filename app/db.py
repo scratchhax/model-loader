@@ -113,6 +113,8 @@ def init() -> None:
                 rep         INTEGER NOT NULL,
                 cold        INTEGER NOT NULL DEFAULT 0,
                 ttft_ms     REAL,
+                ttft_answer_ms REAL,
+                truncated   INTEGER NOT NULL DEFAULT 0,
                 total_ms    REAL,
                 prompt_n    INTEGER,
                 prompt_tps  REAL,
@@ -142,6 +144,35 @@ def init() -> None:
             );
             """
         )
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Add columns that were introduced after a table shipped.
+
+    CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a new column
+    has to be ALTERed in on any database created before it was added.
+    """
+    wanted = {
+        "bench_result": (
+            ("ttft_answer_ms", "REAL"),
+            ("truncated", "INTEGER NOT NULL DEFAULT 0"),
+        ),
+    }
+    with _LOCK, _conn() as c:
+        for table, cols in wanted.items():
+            try:
+                have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+            except sqlite3.Error:
+                continue
+            if not have:
+                continue  # table not created yet; the CREATE above already has these
+            for name, decl in cols:
+                if name not in have:
+                    try:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                    except sqlite3.Error:
+                        pass
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -439,7 +470,8 @@ def bench_set_load_ms(variant_id: int, load_ms: float | None) -> None:
 
 
 def bench_add_result(variant_id: int, **kw) -> None:
-    cols = ("prompt_name", "rep", "cold", "ttft_ms", "total_ms", "prompt_n", "prompt_tps",
+    cols = ("prompt_name", "rep", "cold", "ttft_ms", "ttft_answer_ms", "truncated",
+            "total_ms", "prompt_n", "prompt_tps",
             "gen_n", "gen_tps", "draft_n", "draft_acc", "peak_vram_json", "contended", "err")
     vals = [int(variant_id)] + [kw.get(k) for k in cols]
     with _LOCK, _conn() as c:
