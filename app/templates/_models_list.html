@@ -65,129 +65,110 @@
           </div>
         </td>
         <td class="px-4 py-3">
-          <div class="flex flex-wrap items-center gap-1">
-            {% if g.is_companion %}
-              <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
-                    title="companion file (mmproj etc.) — orphaned (no main model in the same folder). Safe to delete.">
-                orphan companion
-              </span>
-            {% endif %}
-            {# Modality is shown as an icon with a tooltip rather than a labelled chip. The
-               old row carried a "multimodal" badge AND an "ACCEPTS image" chip saying the
-               same thing, plus an "ACCEPTS text-only" chip announcing the absence of a
-               feature on most rows. Absence needs no chip; presence needs one glyph. #}
-            {% set _cap = (owui.caps if owui else {}).get(g.model_id) %}
-            {% set _mods = (_cap.modalities if _cap else []) %}
-            {% if 'vision' in _mods %}
-              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
-                    title="Accepts images. The projector declares clip.vision.*, and OpenWebUI is told so — the image-upload control appears for this model.">
-                {{ icon('image', 12) }}
-              </span>
-            {% endif %}
-            {% if 'audio' in _mods %}
-              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                    title="Accepts audio directly. The projector declares clip.audio.*. OpenWebUI has no audio capability flag, so this is shown here but synced nowhere.">
-                {{ icon('mic', 12) }}
-              </span>
-            {% endif %}
-            {% if g.companion_name and not _mods %}
-              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
-                    title="Has a projector ({{ g.companion_name }}) whose modality could not be read. Deleted together with the model.">
-                {{ icon('layers-3', 12) }}
-              </span>
-            {% endif %}
-            {% if g.aliases %}
-              {# A section can be renamed to give the model a short API id, and one file can back
-                 several sections, so spell out the ids rather than implying it is the filename. #}
-              {% set renamed = g.aliases | reject('equalto', g.stem) | list %}
-              <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                    title="served as {{ g.aliases | join(', ') }}">
-                in models.ini{% if renamed %} · as <span class="font-mono ml-1">{{ renamed | join(', ') }}</span>{% endif %}
-              </span>
-            {% endif %}
-            {% set backends_loaded = (loaded_map or {}).get(g.model_id) or [] %}
-            {% for bn in backends_loaded %}
-              <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
-                    title="live on {{ bn }}">
-                loaded · {{ bn }}
-              </span>
-            {% endfor %}
-            {% set us = (update_status or {}).get(g.display_name) %}
-            {% if us %}
-              {% if us.status == 'stale' %}
-              <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                    title="HF has newer version dated {{ us.remote }} ({{ us.delta_days }} day{{ 's' if us.delta_days != 1 else '' }} newer)">
-                update available
-              </span>
-              {% elif us.status == 'up-to-date' %}
-              <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
-                    title="matches HF as of {{ us.remote }}">
-                up to date
-              </span>
+          {# Status is four stacked, labelled rows rather than one wrapped stream of chips.
+             Each answers a different question — is it configured, what can it take, where may
+             it run, where is it running — and mixing them on one line made a model with two
+             aliases wrap into an unreadable block. #}
+          {% set _cap  = (owui.caps if owui else {}).get(g.model_id) %}
+          {% set _mods = (_cap.modalities if _cap else []) %}
+          {% set _loaded = (loaded_map or {}).get(g.model_id) or [] %}
+          {% set _us = (update_status or {}).get(g.display_name) %}
+          {% set _renamed = g.aliases | reject('equalto', g.stem) | list %}
+          <div class="flex flex-col gap-1.5 text-xs">
+
+            {# 1 — configured, and under what id #}
+            <div class="flex flex-wrap items-center gap-1.5">
+              {% if g.is_companion %}
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
+                      title="Companion file (mmproj etc.) with no main model in its folder. Safe to delete.">orphan companion</span>
+              {% elif g.aliases %}
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                      title="Has a section in models.ini. Served as: {{ g.aliases | join(', ') }}">
+                  in models.ini{% if _renamed %} · as <span class="font-mono ml-1">{{ _renamed | join(', ') }}</span>{% endif %}
+                </span>
+              {% else %}
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                      title="No section in models.ini yet — llama-server will not serve this until one exists.">not configured</span>
               {% endif %}
-            {% endif %}
-            {% if not g.aliases and not backends_loaded and not us %}
-              <span class="text-xs text-slate-400 dark:text-slate-600">—</span>
-            {% endif %}
-          </div>
+              {% if _us and _us.status == 'stale' %}
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                      title="Hugging Face has a newer version dated {{ _us.remote }} ({{ _us.delta_days }} day{{ 's' if _us.delta_days != 1 else '' }} newer)">update available</span>
+              {% endif %}
+            </div>
 
-          {# Which OpenWebUI connections offer this model. Only shown with 2+ connections —
-             with one backend everything is on it and a toggle would be noise. #}
-          {# Vision capability, per model. It is DECIDED here (a section is multimodal iff it
-             declares an mmproj) but ENFORCED in OpenWebUI, whose own default is permissive --
-             so without this it offers the image-upload control on text-only models and only
-             fails at inference with "image input is not supported". Shown per model rather
-             than as a global sweep so you can see and fix exactly the one that is wrong. #}
-          {% set cap = (owui.caps if owui else {}).get(g.model_id) %}
-          {% if cap and cap.mismatch %}
-          {# Only surfaced when OpenWebUI disagrees with models.ini. When they agree the icon
-             above already says what the model accepts, and a second row saying the same thing
-             is the clutter this column had too much of. #}
-          <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800"
-                  title="OpenWebUI currently has: {% for mid, cur in cap.current %}{{ mid }}={{ 'on' if cur else ('off' if cur is not none else 'unset') }} {% endfor %}">
-              OpenWebUI disagrees
-            </span>
-            <button type="button"
-                    hx-post="/models/align-capability"
-                    hx-vals='{"section": {{ g.model_id | tojson }}}'
-                    hx-target="#models-owui-toast" hx-swap="innerHTML"
-                    hx-on::after-request="setTimeout(()=>location.reload(),1200)"
-                    class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600 hover:bg-amber-500 text-white">
-              Align
-            </button>
-          </div>
-          {% endif %}
+            {# 2 — what it can take. Text is always shown: every model accepts it, and an
+               explicit icon reads better than inferring capability from an absent one. #}
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">supports</span>
+              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                    title="Text — every model accepts text prompts.">{{ icon('type', 12) }}</span>
+              {% if 'vision' in _mods %}
+                <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+                      title="Images — the projector declares clip.vision.*, and OpenWebUI is told so, which is what makes its image-upload control appear for this model.">{{ icon('image', 12) }}</span>
+              {% endif %}
+              {% if 'audio' in _mods %}
+                <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                      title="Audio — the projector declares clip.audio.*. OpenWebUI has no audio capability flag, so this is shown here but not synced to it.">{{ icon('mic', 12) }}</span>
+              {% endif %}
+              {% if g.companion_name and not _mods %}
+                <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                      title="Has a projector ({{ g.companion_name }}) whose modality could not be read from its metadata.">{{ icon('layers-3', 12) }}</span>
+              {% endif %}
+              {% if _cap and _cap.mismatch %}
+                <button type="button"
+                        hx-post="/models/align-capability"
+                        hx-vals='{"section": {{ g.model_id | tojson }}}'
+                        hx-target="#models-owui-toast" hx-swap="innerHTML"
+                        hx-on::after-request="setTimeout(()=>location.reload(),1200)"
+                        title="OpenWebUI disagrees with models.ini about this model — click to align."
+                        class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600 hover:bg-amber-500 text-white">
+                  fix
+                </button>
+              {% endif %}
+            </div>
 
-          {# One file can back several sections, and visibility is per model id, so give each
-             id its own row instead of silently toggling only the first. #}
-          {% for mid in (g.aliases or [g.model_id]) %}
-          {% set vis = (owui.visible if owui else {}).get(mid) %}
-          {% if vis %}
-          <div class="mt-1.5 flex flex-wrap items-center gap-1">
-            {% if (g.aliases | length) > 1 %}
-              <span class="text-[10px] font-mono text-slate-500 dark:text-slate-400">{{ mid }}</span>
-            {% else %}
-              <span class="text-[10px] uppercase tracking-wide text-slate-400">on</span>
+            {# 3 — where it MAY run. These chips are the per-connection whitelist toggles. #}
+            {% if owui and owui.conns %}
+              {% for mid in (g.aliases or [g.model_id]) %}
+                {% set vis = (owui.visible or {}).get(mid) %}
+                {% if vis %}
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">available</span>
+                  {% if (g.aliases | length) > 1 %}<span class="text-[10px] font-mono text-slate-500 dark:text-slate-400">{{ mid }}</span>{% endif %}
+                  {% for c in owui.conns %}
+                    {% set on = vis.get(c.url) %}
+                    <button type="button"
+                            hx-post="/models/openwebui-visibility"
+                            hx-vals='{"url": {{ c.url | tojson }}, "model_id": {{ mid | tojson }}, "show": "{{ 0 if on else 1 }}"}'
+                            hx-target="#models-owui-toast" hx-swap="innerHTML"
+                            hx-confirm="{{ 'Hide' if on else 'Show' }} {{ mid }} on {{ c.host }}? Restarts open-webui (~5s)."
+                            hx-on::after-request="setTimeout(()=>location.reload(),1600)"
+                            class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono border transition
+                              {% if on %}bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800
+                              {% else %}bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700{% endif %}"
+                            title="{{ 'Offered' if on else 'Not offered' }} on {{ c.host }}{% if not c.explicit %} (this connection currently offers every model){% endif %} — click to {{ 'remove' if on else 'add' }}">
+                      {{ c.prefix_id or c.host }}
+                    </button>
+                  {% endfor %}
+                </div>
+                {% endif %}
+              {% endfor %}
             {% endif %}
-            {% for c in owui.conns %}
-            {% set on = vis.get(c.url) %}
-            <button type="button"
-                    hx-post="/models/openwebui-visibility"
-                    hx-vals='{"url": {{ c.url | tojson }}, "model_id": {{ mid | tojson }}, "show": "{{ 0 if on else 1 }}"}'
-                    hx-target="#models-owui-toast" hx-swap="innerHTML"
-                    hx-confirm="{{ 'Hide' if on else 'Show' }} {{ mid }} on {{ c.host }}? Restarts open-webui (~5s)."
-                    hx-on::after-request="setTimeout(()=>location.reload(),1600)"
-                    class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border transition
-                      {% if on %}bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800
-                      {% else %}bg-slate-100 text-slate-400 border-slate-200 line-through dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700{% endif %}"
-                    title="{{ 'Visible' if on else 'Hidden' }} on {{ c.host }}{% if not c.explicit %} (connection currently offers all models){% endif %} — click to {{ 'hide' if on else 'show' }}">
-              {{ c.prefix_id or c.host }}
-            </button>
-            {% endfor %}
+
+            {# 4 — where it IS running, right now. #}
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">loaded</span>
+              {% if _loaded %}
+                {% for bn in _loaded %}
+                  <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
+                        title="Resident in VRAM on {{ bn }} right now">{{ icon('zap', 10) }} {{ bn }}</span>
+                {% endfor %}
+              {% else %}
+                <span class="text-[10px] text-slate-400 dark:text-slate-600">not loaded</span>
+              {% endif %}
+            </div>
+
           </div>
-          {% endif %}
-          {% endfor %}
         </td>
         <td class="px-4 py-3 text-right tabular-nums text-slate-600 dark:text-slate-300">{{ g.human_size }}</td>
         <td class="px-4 py-3 text-slate-500 dark:text-slate-400 tabular-nums">{{ g.modified }}</td>
