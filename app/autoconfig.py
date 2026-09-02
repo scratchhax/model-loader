@@ -1415,6 +1415,13 @@ def analyze(*,
             recommended = sorted(top_plans, key=lambda p: p.vram_gb)[0]
         rec_ctx = recommended.max_ctx
 
+    # Resolved once, here, because three later blocks need it and each used to derive it for
+    # itself inside its own conditional. That worked only while at least one of those branches
+    # was guaranteed to run first; when a cheaper KV estimate meant a model no longer needed
+    # expert offload, the branch that happened to bind it was skipped and the one that read it
+    # was not, raising UnboundLocalError on a model that had rendered fine the day before.
+    rec_backend = next((b for b in backends if b["name"] == recommended.name), None) if recommended else None
+
     # build values
     values: dict[str, str] = {}
     if model_rel:
@@ -1553,7 +1560,6 @@ def analyze(*,
         # and let the requested preset override ctx / ncm.
         is_moe_now2 = isinstance(experts, int) and experts > 1
         if is_moe_now2 and off_kind:
-            rec_backend = next((b for b in backends if b["name"] == recommended.name), None)
             gpu_count = max(1, int((rec_backend or {}).get("gpu_count", 1)))
             overhead_mul = _MODEL_OVERHEAD_SPLIT if gpu_count > 1 else _MODEL_OVERHEAD_SINGLE
             model_gb_rec = model_gb_raw * overhead_mul
@@ -1600,7 +1606,6 @@ def analyze(*,
             # DENSE model: no experts to offload, so trade whole layers for context via
             # `ngl`. Offered whenever the model fits at all, not only when forced — the
             # whole point is letting you choose context over speed deliberately.
-            rec_backend = next((b for b in backends if b["name"] == recommended.name), None)
             gpu_count = max(1, int((rec_backend or {}).get("gpu_count", 1)))
             overhead_mul = _MODEL_OVERHEAD_SPLIT if gpu_count > 1 else _MODEL_OVERHEAD_SINGLE
             model_gb_rec = model_gb_raw * overhead_mul
@@ -1769,7 +1774,6 @@ def analyze(*,
     baseline_redundant: dict[str, str] = {}
     minimal = dict(values)
     if recommended:
-        rec_backend = next((b for b in backends if b["name"] == recommended.name), None)
         base = (rec_backend or {}).get("baseline") or {}
         for k, v in list(values.items()):
             bv = base.get(k)
