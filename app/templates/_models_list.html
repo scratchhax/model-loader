@@ -72,10 +72,28 @@
                 orphan companion
               </span>
             {% endif %}
-            {% if g.companion_name %}
-              <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
-                    title="Multimodal projector (mmproj): {{ g.companion_name }} ({{ g.companion_bytes // (1024*1024) }} MB) — bundled with this model, deleted together. Could be vision, audio, or another modality.">
-                {{ icon('layers', 11) }} multimodal
+            {# Modality is shown as an icon with a tooltip rather than a labelled chip. The
+               old row carried a "multimodal" badge AND an "ACCEPTS image" chip saying the
+               same thing, plus an "ACCEPTS text-only" chip announcing the absence of a
+               feature on most rows. Absence needs no chip; presence needs one glyph. #}
+            {% set _cap = (owui.caps if owui else {}).get(g.model_id) %}
+            {% set _mods = (_cap.modalities if _cap else []) %}
+            {% if 'vision' in _mods %}
+              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+                    title="Accepts images. The projector declares clip.vision.*, and OpenWebUI is told so — the image-upload control appears for this model.">
+                {{ icon('image', 12) }}
+              </span>
+            {% endif %}
+            {% if 'audio' in _mods %}
+              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                    title="Accepts audio directly. The projector declares clip.audio.*. OpenWebUI has no audio capability flag, so this is shown here but synced nowhere.">
+                {{ icon('mic', 12) }}
+              </span>
+            {% endif %}
+            {% if g.companion_name and not _mods %}
+              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                    title="Has a projector ({{ g.companion_name }}) whose modality could not be read. Deleted together with the model.">
+                {{ icon('layers-3', 12) }}
               </span>
             {% endif %}
             {% if g.aliases %}
@@ -121,36 +139,11 @@
              fails at inference with "image input is not supported". Shown per model rather
              than as a global sweep so you can see and fix exactly the one that is wrong. #}
           {% set cap = (owui.caps if owui else {}).get(g.model_id) %}
-          {% if cap %}
+          {% if cap and cap.mismatch %}
+          {# Only surfaced when OpenWebUI disagrees with models.ini. When they agree the icon
+             above already says what the model accepts, and a second row saying the same thing
+             is the clutter this column had too much of. #}
           <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {# Modality chips read from the projector's OWN metadata, not from the mere
-               presence of an mmproj: llama.cpp loads image and audio encoders through the
-               same --mmproj slot, so "has a projector" does not mean "takes pictures".
-               Only the image chip corresponds to an OpenWebUI capability — there is no audio
-               flag to push — so audio is shown here and synced nowhere. #}
-            <span class="text-[10px] uppercase tracking-wide text-slate-400">accepts</span>
-            {% if 'vision' in cap.modalities %}
-            <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border
-                         bg-violet-100 text-violet-800 border-violet-300 dark:bg-violet-950 dark:text-violet-300 dark:border-violet-800"
-                  title="Projector declares clip.vision.* — this model can accept images, and OpenWebUI is told so">
-              {{ icon('image', 10) }} image
-            </span>
-            {% endif %}
-            {% if 'audio' in cap.modalities %}
-            <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono border
-                         bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950 dark:text-sky-300 dark:border-sky-800"
-                  title="Projector declares clip.audio.* — this model can accept audio directly. OpenWebUI has no audio capability flag, so this is not synced to it.">
-              {{ icon('mic', 10) }} audio
-            </span>
-            {% endif %}
-            {% if not cap.modalities %}
-            <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono border
-                         bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700"
-                  title="No mmproj in this section — text only">
-              text-only
-            </span>
-            {% endif %}
-            {% if cap.mismatch %}
             <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800"
                   title="OpenWebUI currently has: {% for mid, cur in cap.current %}{{ mid }}={{ 'on' if cur else ('off' if cur is not none else 'unset') }} {% endfor %}">
               OpenWebUI disagrees
@@ -163,7 +156,6 @@
                     class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600 hover:bg-amber-500 text-white">
               Align
             </button>
-            {% endif %}
           </div>
           {% endif %}
 
@@ -173,8 +165,11 @@
           {% set vis = (owui.visible if owui else {}).get(mid) %}
           {% if vis %}
           <div class="mt-1.5 flex flex-wrap items-center gap-1">
-            <span class="text-[10px] uppercase tracking-wide text-slate-400">serves on</span>
-            {% if (g.aliases | length) > 1 %}<span class="text-[10px] font-mono text-slate-500 dark:text-slate-400">{{ mid }}</span>{% endif %}
+            {% if (g.aliases | length) > 1 %}
+              <span class="text-[10px] font-mono text-slate-500 dark:text-slate-400">{{ mid }}</span>
+            {% else %}
+              <span class="text-[10px] uppercase tracking-wide text-slate-400">on</span>
+            {% endif %}
             {% for c in owui.conns %}
             {% set on = vis.get(c.url) %}
             <button type="button"
