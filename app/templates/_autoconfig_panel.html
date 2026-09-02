@@ -26,6 +26,65 @@
     {% if params %}&middot; <span class="font-mono">{{ params }}</span>{% endif %}
   </div>
 
+  {# Measured throughput, scraped from llama-server's own per-request logs. Everything else on
+     this panel is a prediction; this is the only part of it that actually happened. Shown as a
+     median with the p25-p75 band rather than a mean: on a shared box a queued request reads as
+     a fraction of the true rate, and one of those moves a mean somewhere misleading. #}
+  {% if tel is defined and tel and tel.n %}
+  <div class="mt-4 rounded-md border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/30 p-3">
+    <div class="flex items-baseline gap-2">
+      <div class="text-xs uppercase tracking-wide text-emerald-800 dark:text-emerald-300">Measured</div>
+      <div class="text-[11px] text-emerald-700/70 dark:text-emerald-400/70">
+        {{ tel.n }} recent request{{ '' if tel.n == 1 else 's' }}{% if tel.age_str %} &middot; newest {{ tel.age_str }}{% endif %}
+      </div>
+    </div>
+
+    <div class="mt-2 flex flex-wrap gap-x-6 gap-y-2">
+      <div>
+        <div class="font-mono text-lg font-semibold text-emerald-900 dark:text-emerald-200 tabular-nums">
+          {{ '%.1f' | format(tel.gen_p50) }}<span class="text-xs font-normal ml-1">tok/s</span>
+        </div>
+        <div class="text-[10px] text-emerald-700/80 dark:text-emerald-400/80">
+          generation &middot; median
+          {%- if tel.gen_p75 > tel.gen_p25 %}
+          <span title="Middle half of requests fell in this band. A wide band means the median summarises varied conditions rather than a stable rate.">
+            (p25&ndash;p75 {{ '%.0f' | format(tel.gen_p25) }}&ndash;{{ '%.0f' | format(tel.gen_p75) }})
+          </span>
+          {%- endif %}
+        </div>
+      </div>
+
+      {% if tel.prompt_p50 %}
+      <div>
+        <div class="font-mono text-lg font-semibold text-emerald-900 dark:text-emerald-200 tabular-nums">
+          {{ '%.0f' | format(tel.prompt_p50) }}<span class="text-xs font-normal ml-1">tok/s</span>
+        </div>
+        <div class="text-[10px] text-emerald-700/80 dark:text-emerald-400/80">prompt &middot; median</div>
+      </div>
+      {% endif %}
+
+      {% if tel.draft_acc_p50 is not none %}
+      <div>
+        <div class="font-mono text-lg font-semibold text-emerald-900 dark:text-emerald-200 tabular-nums">
+          {{ '%.0f' | format(tel.draft_acc_p50 * 100) }}<span class="text-xs font-normal ml-1">%</span>
+        </div>
+        <div class="text-[10px] text-emerald-700/80 dark:text-emerald-400/80">
+          draft accepted &middot; median of {{ tel.draft_n }}
+          {%- if tel.draft_len_p50 %} &middot; mean len {{ '%.1f' | format(tel.draft_len_p50) }}{% endif %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if tel.spread_pct > 60 %}
+    <p class="mt-2 text-[11px] text-emerald-800/80 dark:text-emerald-400/80">
+      Wide spread ({{ tel.spread_pct }}% of the median): these requests ran under varied conditions —
+      concurrent load, or a config that changed between them. Treat the median as a rough guide.
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {# Concurrent sessions picker — always visible. Divides ctx across N slots. #}
   <div class="mt-4">
     <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">
@@ -370,10 +429,28 @@
     </p>
     {% endif %}
 
+    {% if tel is defined and tel and tel.draft_acc_p50 is not none %}
+    <div class="mt-2 rounded-md border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/30 px-3 py-2 text-[11px] text-emerald-900 dark:text-emerald-200">
+      Actually observed: <span class="font-mono font-semibold">{{ '%.0f' | format(tel.draft_acc_p50 * 100) }}%</span> of draft tokens accepted
+      {%- if tel.draft_len_p50 %}, mean draft length <span class="font-mono font-semibold">{{ '%.1f' | format(tel.draft_len_p50) }}</span>{% endif %}
+      over {{ tel.draft_n }} request{{ '' if tel.draft_n == 1 else 's' }}{% if tel.spec_types %}
+      running <span class="font-mono">{{ tel.spec_types | join(', ') }}</span>{% endif %}.
+      {% if tel.draft_len_p50 and tel.draft_len_p50 >= 2.4 %}
+      The drafter is using most of the depth it is allowed, so raising <span class="font-mono">n-max</span> is worth testing.
+      {% elif tel.draft_len_p50 and tel.draft_len_p50 < 1.5 %}
+      Drafts are dying early &mdash; most of this speculation is wasted work. Try a tighter <span class="font-mono">p-min</span>, or Off.
+      {% endif %}
+    </div>
+    {% endif %}
     <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
       A throughput trade, not a free win: rejected drafts are wasted work, so a bad match is
-      <em>slower</em> than leaving it off. llama-server logs the real acceptance rate per request
-      (<span class="font-mono">draft acceptance = …, mean len …</span>) — tune against that, not against these defaults.
+      <em>slower</em> than leaving it off.
+      {% if tel is defined and tel and tel.draft_acc_p50 is not none %}
+        The figures above come from your own traffic, not from these defaults.
+      {% else %}
+        llama-server logs the real acceptance rate per request; once this model has served a
+        few with speculation on, the measured figure appears here.
+      {% endif %}
     </p>
   </div>
   {% endif %}

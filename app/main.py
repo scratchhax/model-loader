@@ -7,7 +7,8 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import autoconfig, db, gguf_meta, hf, hw, ini, services
+from . import autoconfig
+from . import telemetry, db, gguf_meta, hf, hw, ini, services
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -1068,6 +1069,15 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
     if rel and "/" in rel:
         model_subdir = rel.split("/", 1)[0]
 
+    # Fold in whatever llama-server has logged since the last look. Rate-limited internally and
+    # wrapped so a log-format change or a docker hiccup costs the panel its measurements rather
+    # than costing the user the page.
+    try:
+        telemetry.ingest(services._effective_container_names())
+        tel = telemetry.stats_for(model_path=model_rel, alias=name)
+    except Exception:  # noqa: BLE001
+        tel = telemetry.Stats()
+
     rec = autoconfig.analyze(
         summary=summary,
         file_size=file_size,
@@ -1109,6 +1119,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         "ctx_columns": ctx_columns,
         "plan_row_map": plan_row_map,
         "format_ctx": autoconfig.format_ctx,
+        "tel": tel,
         "values_json": _json.dumps(rec.values),
         "values_minimal_json": _json.dumps(rec.values_minimal),
         # Full offload frontier for the custom slider. Every entry is an achievable

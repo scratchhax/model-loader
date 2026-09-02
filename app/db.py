@@ -55,6 +55,31 @@ def init() -> None:
                 hf_last_modified  TEXT,
                 checked_at        REAL NOT NULL
             );
+            -- One row per completed llama-server request, scraped from its logs.
+            -- UNIQUE(backend, instance, task) is what makes ingestion idempotent: the scraper
+            -- re-reads the whole log tail every pass rather than tracking a watermark, and
+            -- relies on this constraint to drop what it has already seen.
+            CREATE TABLE IF NOT EXISTS req_timing (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts            REAL NOT NULL,
+                backend       TEXT NOT NULL,
+                instance      TEXT NOT NULL,
+                task          INTEGER NOT NULL,
+                model_path    TEXT NOT NULL DEFAULT '',
+                alias         TEXT NOT NULL DEFAULT '',
+                spec_type     TEXT NOT NULL DEFAULT '',
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                prompt_tps    REAL    NOT NULL DEFAULT 0,
+                gen_tokens    INTEGER NOT NULL DEFAULT 0,
+                gen_tps       REAL    NOT NULL DEFAULT 0,
+                draft_acc     REAL,
+                draft_len     REAL,
+                UNIQUE(backend, instance, task)
+            );
+            CREATE INDEX IF NOT EXISTS req_timing_model
+                ON req_timing(model_path, ts DESC);
+            CREATE INDEX IF NOT EXISTS req_timing_alias
+                ON req_timing(alias, ts DESC);
             CREATE TABLE IF NOT EXISTS prompts (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL,
@@ -200,3 +225,57 @@ def download_records() -> list[dict]:
             "WHERE status = 'done' GROUP BY filename, repo_id"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def record_timings(backend: str, samples: list) -> int:
+    """Store request samples, ignoring any already held. Returns the number newly inserted.
+
+    INSERT OR IGNORE against UNIQUE(backend, instance, task) is what lets the scraper re-read
+    the same log tail on every pass without either duplicating rows or having to remember how
+    far it got last time.
+    """
+    if not samples:
+        return 0
+    rows = [(s.ts, backend, s.instance, s.task, s.model_path, s.alias, s.spec_type,
+             s.prompt_tokens, s.prompt_tps, s.gen_tokens, s.gen_tps,
+             s.draft_acc, s.draft_len) for s in samples]
+    with _LOCK, _conn() as c:
+        before = c.total_changes
+        c.executemany(
+            "INSERT OR IGNORE INTO req_timing("
+            "ts, backend, instance, task, model_path, alias, spec_type, "
+            "prompt_tokens, prompt_tps, gen_tokens, gen_tps, draft_acc, draft_len) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        return c.total_changes - before
+
+
+def recent_timings(*, model_path: str = "", alias: str = "",
+                   min_gen_tokens: int = 0, limit: int = 400) -> list[sqlite3.Row]:
+    """Most recent samples for a model, newest first.
+
+    Matched on model_path when given and alias otherwise. Path is preferred because it is what
+    llama-server logs directly; an alias only exists if the router's spawn block was inside the
+    scraped window.
+    """
+    where, params = ["gen_tokens >= ?"], [int(min_gen_tokens)]
+    if model_path:
+        where.append("model_path = ?")
+        params.append(model_path)
+    elif alias:
+        where.append("alias = ?")
+        params.append(alias)
+    else:
+        return []
+    params.append(int(limit))
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT * FROM req_timing WHERE " + " AND ".join(where)
+            + " ORDER BY ts DESC LIMIT ?", params
+        ).fetchall())
+
+
+def timing_row_count() -> int:
+    with _LOCK, _conn() as c:
+        return int(c.execute("SELECT COUNT(*) AS n FROM req_timing").fetchone()["n"])
