@@ -278,6 +278,49 @@ def _moe_ratio(expert_count: Any) -> float:
     return 0.65
 
 
+def _layer_costs(layers: int, n_cpu_moe: int, attention_gb: float,
+                 expert_per_layer_gb: float, kv_gb: float) -> list[float]:
+    """Per-layer GPU cost: attention + KV share, plus experts above the n-cpu-moe threshold."""
+    if layers <= 0:
+        return []
+    att = attention_gb / layers
+    kv = kv_gb / layers
+    return [att + kv + (expert_per_layer_gb if i >= n_cpu_moe else 0.0) for i in range(layers)]
+
+
+def _split_feasible(layers: int, n_cpu_moe: int, attention_gb: float,
+                    expert_per_layer_gb: float, kv_gb: float, gpu_count: int,
+                    pinned_gb: float, caps: list[float]) -> bool:
+    """Does ANY contiguous per-card partition fit? One greedy pass.
+
+    The fit search asks only whether a configuration is placeable, never how to place it
+    best. Answering that with _partition_min_max ran a 64-step binary search per call, and
+    the search makes thousands of calls per page load — measured at 2239 for one model,
+    around nine million inner steps, which turned a snappy preset click into a visible wait.
+
+    Filling each card to capacity in order is optimal for CONTIGUOUS feasibility: taking
+    less on an earlier card can only leave more for a later one, never less.
+    """
+    if gpu_count <= 1 or not caps:
+        return True
+    costs = _layer_costs(layers, n_cpu_moe, attention_gb, expert_per_layer_gb, kv_gb)
+    if not costs:
+        return True
+    idx, n = 0, len(costs)
+    for card in range(gpu_count):
+        budget = caps[card] - (pinned_gb if card == 0 else 0.0)
+        took = 0
+        while idx < n and costs[idx] <= budget:
+            budget -= costs[idx]
+            idx += 1
+            took += 1
+        if idx >= n:
+            return True
+        if took == 0:
+            return False          # this card cannot hold even one more layer
+    return idx >= n
+
+
 def _partition_min_max(costs: list[float], k: int, pinned_gb: float,
                        caps: list[float] | None = None) -> list[int]:
     """Split `costs` into k CONTIGUOUS runs, minimizing the heaviest run RELATIVE to its card.
@@ -360,12 +403,7 @@ def _balanced_split(layers: int, n_cpu_moe: int, attention_gb: float,
     """
     if gpu_count < 2 or layers <= 0:
         return "", []
-    kv_per_layer = (kv_gb / layers) if layers else 0.0
-    att_per_layer = (attention_gb / layers) if layers else 0.0
-    costs = [
-        att_per_layer + kv_per_layer + (expert_per_layer_gb if i >= n_cpu_moe else 0.0)
-        for i in range(layers)
-    ]
+    costs = _layer_costs(layers, n_cpu_moe, attention_gb, expert_per_layer_gb, kv_gb)
     counts = _partition_min_max(costs, gpu_count, pinned_gb, caps)
     # A zero is only legitimate when there are genuinely fewer layers than cards; otherwise
     # something went wrong and an even split is the safer answer than a malformed one.
@@ -1025,10 +1063,7 @@ def analyze(*,
                     ncm = n if kind == "n-cpu-moe" else (layers if kind == "cpu-moe" else 0)
                 else:
                     att, exp, ncm = gpu_gb, 0.0, 0
-                _ts, loads = _balanced_split(layers, ncm, att, exp, _kv, gpu_count, _pin, _caps)
-                if not loads:
-                    return True          # cannot model the split; do not block on it
-                return all(load <= cap for load, cap in zip(loads, _caps))
+                return _split_feasible(layers, ncm, att, exp, _kv, gpu_count, _pin, _caps)
 
             fits, gpu_model_gb, offload_kind, n_cm = _find_fit(
                 model_gb, kv_gb, budget, layers, eff_moe, card_ok=_card_ok)
@@ -1183,11 +1218,8 @@ def analyze(*,
                     return True
                 att = model_gb_rec * (1 - moe_ratio)
                 exp = (model_gb_rec * moe_ratio / layers) if layers else 0.0
-                _ts, loads = _balanced_split(layers, ncm, att, exp, kv_gb,
-                                             gpu_count, mmproj_vram_gb, _mcaps)
-                if not loads:
-                    return True
-                return all(l <= c for l, c in zip(loads, _mcaps))
+                return _split_feasible(layers, ncm, att, exp, kv_gb,
+                                       gpu_count, mmproj_vram_gb, _mcaps)
 
             frontier = _pareto_frontier(arch, layers, kv_heads, head_dim, bytes_per,
                                         model_gb_rec, moe_ratio, budget, cands,
@@ -1231,11 +1263,8 @@ def analyze(*,
             def _front_card_ok(weight_gb: float, kv_gb: float) -> bool:
                 if gpu_count <= 1 or not _fcaps:
                     return True
-                _ts, loads = _balanced_split(layers, 0, weight_gb, 0.0, kv_gb,
-                                             gpu_count, mmproj_vram_gb, _fcaps)
-                if not loads:
-                    return True
-                return all(l <= c for l, c in zip(loads, _fcaps))
+                return _split_feasible(layers, 0, weight_gb, 0.0, kv_gb,
+                                       gpu_count, mmproj_vram_gb, _fcaps)
 
             dfront = _dense_frontier(arch, layers, kv_heads, head_dim, bytes_per,
                                      model_gb_rec, budget, cands, n_sessions=n_sessions,
