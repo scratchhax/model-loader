@@ -34,13 +34,15 @@
         <span class="font-normal opacity-90">needs {{ c.needs_gb }}G &gt; {{ c.ceiling_gb }}G</span>
       </span>
     {% else %}
+    {% set unit = 'RAM' if c.is_cpu else 'VRAM' %}
     <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono
       {% if c.verdict == 'fits' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
       {% elif c.verdict == 'tight' %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
+      {% elif c.verdict == 'slow' %}bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300
       {% else %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300{% endif %}"
-      title="{{ c.ratio_pct }}% of {{ c.vram_gb }} GiB VRAM{% if c.verdict == 'oom' %} — needs CPU offload, see the context estimates{% endif %}">
-      {% if c.verdict == 'fits' %}✓{% elif c.verdict == 'tight' %}~{% else %}✗{% endif %}
-      {{ c.name }} ({{ c.vram_gb }}G)
+      title="{{ c.ratio_pct }}% of {{ c.vram_gb }} GiB {{ unit }}{% if c.is_cpu %} (usable, after the OS reserve){% endif %}{% if c.verdict == 'oom' and not c.is_cpu %} — needs CPU offload, see the context estimates{% endif %}{% if c.verdict == 'slow' %} — fits in memory, but CPU generation is RAM-bandwidth-bound and a model this size will produce roughly a token per second. Reduce ctx-size to fit; it will not make it faster.{% endif %}">
+      {% if c.verdict == 'fits' %}✓{% elif c.verdict == 'tight' %}~{% elif c.verdict == 'slow' %}🐢{% else %}✗{% endif %}
+      {{ c.name }} ({{ c.vram_gb }}G{% if c.is_cpu %} RAM{% endif %})
     </span>
     {% endif %}
   {% endfor %}

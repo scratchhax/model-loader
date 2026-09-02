@@ -543,6 +543,34 @@ def _fit_backends() -> dict[str, float]:
     return out
 
 
+# Above this, a CPU-resident model is technically loadable and practically unusable.
+# Calibrated on measured tok/s for dense models on a dual-channel DDR5 box: a 6.6 GB dense
+# model managed 4.4 tok/s, which implies roughly 29 GB/s of effective read bandwidth, so a
+# 30 GB dense model lands near 1 tok/s. MoE models do far better at the same size because
+# only active experts are read, but size alone cannot tell them apart — the ctx estimates,
+# which have the GGUF metadata, make that distinction.
+_CPU_CRAWL_GB = 30.0
+
+
+def _cpu_backends() -> list[str]:
+    """Names of discovered llama containers with no GPU — they run on the CPU.
+
+    _fit_backends() keys on VRAM and so cannot see these at all. They are still real places
+    to run a model: the constraint is system RAM rather than VRAM, and ctx-size is the only
+    fit lever, since ngl, n-cpu-moe and tensor-split all presuppose a GPU.
+    """
+    names = set(_effective_container_names())
+    out: list[str] = []
+    for d in discover_llama_containers():
+        n = d.get("name") or ""
+        if n in names and (d.get("vendor") or "").lower() in ("cpu", "", "unknown"):
+            from . import hw
+            st = hw.stats_for(n)
+            if not (st.ok and st.gpu and st.gpu.vram_total_gb > 0):
+                out.append(n)
+    return out
+
+
 def vram_fit_chips(size_bytes: int) -> list[dict]:
     """Per-backend fit verdicts: {'name', 'vram_gb', 'verdict', 'ratio_pct'}.
 
@@ -560,7 +588,8 @@ def vram_fit_chips(size_bytes: int) -> list[dict]:
     from . import hw
     gb = size_bytes / (1024 ** 3)
 
-    ram = hw.host_ram_gb()
+    # usable, not total: the OS reserve is already spoken for (see hw.usable_ram_gb).
+    ram = hw.usable_ram_gb()
     pooled = max((v for v in _fit_backends().values() if v > 0), default=0.0)
     if ram > 0 and pooled > 0 and gb > (pooled + ram):
         return [{
@@ -589,6 +618,30 @@ def vram_fit_chips(size_bytes: int) -> list[dict]:
             "vram_gb": vram,
             "verdict": verdict,
             "ratio_pct": round(ratio * 100),
+        })
+
+    # CPU backends are sized against usable RAM. "Fits" and "usable" diverge sharply here:
+    # generation is RAM-bandwidth-bound, so a large dense model can occupy memory perfectly
+    # well and still produce well under a token per second. A plain green tick would be
+    # true and misleading, so anything past a threshold gets its own 'slow' verdict.
+    for name in _cpu_backends():
+        if ram <= 0:
+            continue
+        ratio = gb / ram
+        if ratio >= 1.0:
+            verdict = "oom"
+        elif gb >= _CPU_CRAWL_GB:
+            verdict = "slow"
+        elif ratio < 0.75:
+            verdict = "fits"
+        else:
+            verdict = "tight"
+        out.append({
+            "name": name,
+            "vram_gb": ram,
+            "verdict": verdict,
+            "ratio_pct": round(ratio * 100),
+            "is_cpu": True,
         })
     return out
 

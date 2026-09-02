@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     gpu_vram: str = ""  # optional container_name:vram_gib overrides — auto-probed via nvidia-smi/rocm-smi if empty
     bind_port: int = 8090
     max_concurrent_downloads: int = 2
+    # RAM the OS, page cache and everything else on the box need. Subtracted before deciding
+    # whether a model fits in system memory, because total RAM is never all yours: sizing
+    # against it produces plans that swap or get OOM-killed. Raise it on a busy host.
+    host_ram_reserve_gb: float = 32.0
 
     @property
     def llama_container_names(self) -> list[str]:

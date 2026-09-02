@@ -459,3 +459,18 @@ def host_ram_gb() -> float:
     except (OSError, ValueError, IndexError):
         pass
     return 0.0
+
+
+def usable_ram_gb() -> float:
+    """Host RAM minus the reserve the OS and everything else need.
+
+    This, not MemTotal, is what a model may actually occupy. Sizing against total RAM plans
+    for memory that is already spoken for by the page cache, the other containers on the box
+    and the kernel itself — the result loads, then swaps or gets OOM-killed.
+
+    Reserve defaults to 32 GB and is set with HOST_RAM_RESERVE_GB.
+    """
+    total = host_ram_gb()
+    if total <= 0:
+        return 0.0
+    return round(max(0.0, total - float(settings.host_ram_reserve_gb)), 1)
