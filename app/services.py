@@ -1648,3 +1648,54 @@ def section_modalities() -> dict[str, list[str]]:
     except (OSError, KeyError, AttributeError):
         return {}
     return out
+
+
+# Vendors that mean "this backend has a GPU". Read from the image tag by
+# discover_llama_containers, so it needs no live probe — which matters because this decision
+# is made right after a download completes, possibly before the stats sampler has warmed up.
+_GPU_VENDORS = {"cuda", "rocm", "vulkan", "nvidia", "amd"}
+
+
+def assign_new_model_to_gpu(section: str) -> tuple[bool, str]:
+    """Offer a newly-created section on every GPU-backed OpenWebUI connection.
+
+    A connection with a non-empty model_ids list is an explicit whitelist, so a model added
+    later is offered by nothing until someone ticks it — a new download lands in models.ini,
+    works perfectly, and is invisible in the chat UI with no indication why. Defaulting it
+    onto the GPU backends matches what anyone downloading a model actually wants.
+
+    Deliberately narrow:
+      * GPU connections only. A CPU backend should not silently inherit a 27B.
+      * Connections already offering everything (empty whitelist) are skipped — they serve it
+        already, and writing an explicit list would convert them to a whitelist, quietly
+        changing behaviour for every FUTURE model.
+      * Callers must only invoke this on CREATION. Re-running it on an ordinary save would
+        undo a deliberate removal.
+    """
+    try:
+        gpu_hosts = {d.get("name") for d in discover_llama_containers()
+                     if (d.get("vendor") or "").lower() in _GPU_VENDORS}
+    except DockerException:
+        return False, "docker unreachable"
+    if not gpu_hosts:
+        return False, "no GPU-backed llama container discovered"
+
+    st = openwebui_state()
+    if not st.get("found"):
+        return False, st.get("reason") or "open-webui not found"
+
+    touched: list[str] = []
+    for c in st.get("connections") or []:
+        if c.get("stale") or c["host"] not in gpu_hosts:
+            continue
+        ids = list(c.get("model_ids") or [])
+        if not ids:
+            continue                      # already offers everything
+        if section in ids:
+            continue                      # nothing to do
+        ok, _ = set_openwebui_model_filter(c["url"], ids + [section])
+        if ok:
+            touched.append(c.get("prefix_id") or c["host"])
+    if not touched:
+        return True, ""
+    return True, f"offered on {', '.join(touched)}"

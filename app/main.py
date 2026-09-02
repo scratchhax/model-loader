@@ -927,6 +927,10 @@ async def config_section_save(request: Request, name: str) -> Response:
         else:
             values[f.key] = str(raw).strip()
     extras = str(form.get("extras", ""))
+    # Checked BEFORE the write: a section that did not exist a moment ago is a new model,
+    # and only a new model gets a default backend. Re-running this on an ordinary save would
+    # undo a deliberate removal from a connection.
+    is_new_section = name not in ini.section_names()
     try:
         ini.upsert_section(name, values, extras)
     except Exception as e:  # noqa: BLE001
@@ -940,7 +944,18 @@ async def config_section_save(request: Request, name: str) -> Response:
         services.sync_openwebui_capabilities()
     except Exception:  # noqa: BLE001 -- saving the section must not depend on OpenWebUI
         pass
-    return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={name}"})
+    # A brand-new model is offered on the GPU backends by default. Without this it lands in
+    # models.ini, works, and is invisible in OpenWebUI because every connection carries an
+    # explicit whitelist that predates it.
+    note = ""
+    if is_new_section:
+        try:
+            ok, msg = services.assign_new_model_to_gpu(name)
+            if ok and msg:
+                note = f"&note={msg}"
+        except Exception:  # noqa: BLE001
+            pass
+    return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={name}{note}"})
 
 
 def _container_baseline(name: str) -> list[str]:
