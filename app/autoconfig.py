@@ -1347,8 +1347,11 @@ def analyze(*,
     if section_name and mtp_rel:
         cur_spec = (current_section or {}).get("spec-draft-model", "").strip()
         values["spec-draft-model"] = cur_spec or mtp_rel
-        if not (current_section or {}).get("spec-type", "").strip():
-            values["spec-type"] = "draft-mtp"
+        # Echo an existing choice rather than omitting it. Fill writes exactly these values,
+        # so a setting the user already has must be repeated or Fill silently clears it —
+        # the same reason mmproj is echoed above.
+        _cur_type = (current_section or {}).get("spec-type", "").strip()
+        values["spec-type"] = _cur_type or "draft-mtp"
         if not (current_section or {}).get("spec-draft-ngl", "").strip():
             # Without this the head lands on the CPU, and a draft evaluated on the CPU is
             # slower than the main model it is meant to be racing ahead of.
@@ -1560,11 +1563,16 @@ def analyze(*,
             except ValueError:
                 _cur_ub = 0
             values["ubatch-size"] = str(max(_imt, _cur_ub))
-            # batch-size must not be below ubatch-size.
+            # batch-size must be >= ubatch-size, but only RAISE it. An absent batch-size is
+            # not a small one: llama-server defaults to 2048, comfortably above a 1024 ubatch.
+            # Writing _imt unconditionally dropped a multi-session model from 4096 to 1024.
             try:
-                if int(values.get("batch-size") or 0) < _imt:
-                    values["batch-size"] = str(_imt)
+                _cur_b = int(values.get("batch-size") or (current_section or {}).get("batch-size") or 0)
             except ValueError:
+                _cur_b = 0
+            if _cur_b and _cur_b < _imt:
+                values["batch-size"] = str(_imt)
+            elif not _cur_b and _imt > 2048:      # above llama-server's own default
                 values["batch-size"] = str(_imt)
 
     # RoPE handling — respect the model's own scaling if declared, otherwise auto-linear
