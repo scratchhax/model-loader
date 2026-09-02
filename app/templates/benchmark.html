@@ -376,7 +376,15 @@
       // and now. requestAnimationFrame would also work in a visible tab and silently never
       // fire in a hidden one, leaving the overlay blank forever.
       void fresh.parentElement.offsetHeight;
-      modalChart = new Chart(fresh, factory());
+      const cfg = factory();
+      // No animation on the expanded copy. Two reasons, one cosmetic and one load-bearing:
+      // zooming into a chart already on screen should be instant rather than replaying a
+      // draw-in, and Chart.js runs its first render through the animation loop, which is
+      // driven by requestAnimationFrame and does not tick while the document is hidden. An
+      // animated expanded chart therefore lays out correctly and never paints. Without
+      // animation the first draw is synchronous.
+      cfg.options = Object.assign({}, cfg.options, {animation: false});
+      modalChart = new Chart(fresh, cfg);
     }
 
     // factory() must return a NEW config each call: Chart.js takes ownership of the datasets
