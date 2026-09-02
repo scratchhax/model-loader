@@ -444,12 +444,51 @@ async def search_results(request: Request, q: str = "", sort: str = "downloads",
     except httpx.HTTPError as e:
         error = f"network error: {e}"
     # Cross-check against local downloads so we can flag repos the user already has.
-    downloaded = db.downloaded_files_by_repo()
+    # Must be checked against the FILESYSTEM, not just the history log — see the helper.
+    downloaded = _downloaded_and_still_present()
     return templates.TemplateResponse("_search_results.html", {
         "request": request, "results": results, "error": error, "avatars": avatars,
         "browse_mode": browse_mode, "browse_sort": sort,
         "downloaded_by_repo": downloaded,
     })
+
+
+def _files_present_on_disk() -> set[str]:
+    """Every GGUF currently in the models directory, keyed the way download_history stores it.
+
+    History rows use two shapes: bare "model.gguf" for downloads that predate the per-model
+    subdirectory layout, and "stem/model.gguf" for everything since. Both are indexed so a
+    caller can match either.
+    """
+    names: set[str] = set()
+    try:
+        snap = services.snapshot_models_dir()
+    except OSError:
+        return names
+    for g in snap.ggufs:
+        for part in list(g.parts) + list(g.companion_parts):
+            names.add(part.name)
+            if g.subdir:
+                names.add(f"{g.subdir}/{part.name}")
+    return names
+
+
+def _downloaded_and_still_present() -> dict[str, list[str]]:
+    """{repo_id: [filename, ...]} for repos whose files are ACTUALLY on disk right now.
+
+    download_history is a log, not an inventory: a row stays `done` forever, so a model that
+    was downloaded and later deleted keeps being reported as owned. Search then tells you that
+    you already have something you do not, which is exactly backwards from the point of the
+    flag — it exists to stop you re-downloading, and a false positive stops you downloading
+    at all. Intersect the log with the filesystem.
+    """
+    present = _files_present_on_disk()
+    out: dict[str, list[str]] = {}
+    for repo, files in db.downloaded_files_by_repo().items():
+        kept = [f for f in files if f in present or f.rsplit("/", 1)[-1] in present]
+        if kept:
+            out[repo] = kept
+    return out
 
 
 @app.get("/search/repo/{repo_id:path}", response_class=HTMLResponse)
