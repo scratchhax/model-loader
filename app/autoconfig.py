@@ -142,9 +142,18 @@ def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
             sample = sliding_window_pattern.get("sample") or []
             count = int(sliding_window_pattern.get("count") or 0)
             if sample and count == layers:
-                # sample is a prefix of the full array; extrapolate its ratio over all layers
-                local_in_sample = sum(1 for v in sample if v)
-                local_layers = round(layers * local_in_sample / len(sample))
+                # The sample is only a PREFIX of the array, and these patterns repeat — gemma
+                # is 5 sliding layers to 1 global. Taking the prefix ratio straight gives 7/8
+                # from an 8-element sample of a 6-periodic pattern instead of 5/6, a 20% error
+                # in the global count, which is the term that dominates the cache. So find the
+                # period first and extrapolate from one full cycle.
+                period = len(sample)
+                for cand in range(1, len(sample)):
+                    if all(sample[i] == sample[i % cand] for i in range(len(sample))):
+                        period = cand
+                        break
+                local_per_period = sum(1 for v in sample[:period] if v)
+                local_layers = round(layers * local_per_period / period)
         elif isinstance(sliding_window_pattern, (list, tuple)) and len(sliding_window_pattern) == layers:
             local_layers = sum(1 for v in sliding_window_pattern if v)
         if local_layers is None:
