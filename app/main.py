@@ -1508,7 +1508,7 @@ def benchmark_start(request: Request,
                     aliases: list[str] = Form(default=[]),
                     prompt_ids: list[int] = Form(default=[]),
                     reps: int = Form(3),
-                    max_tokens: int = Form(256)) -> HTMLResponse:
+                    max_tokens: int = Form(bench.DEFAULT_MAX_TOKENS)) -> HTMLResponse:
     ok, err = bench.start(backend=backend, aliases=aliases, prompt_ids=prompt_ids,
                           reps=reps, max_tokens=max_tokens)
     return templates.TemplateResponse("_bench_progress.html", {

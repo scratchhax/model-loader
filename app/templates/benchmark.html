@@ -84,9 +84,11 @@
       </div>
       <div>
         <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Max tokens</label>
-        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="4096" step="16" value="512"
+        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="8192" step="128" value="3072"
                class="mt-1 block w-28 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm tabular-nums">
-        <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.<br>Thinking models need room to finish reasoning before they answer.</p>
+        <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.<br>
+          Thinking models spend hundreds of tokens reasoning first &mdash; measured here, the hardest prompt
+          needed 2394 before it finished on its own. A cap only costs time when it is actually reached.</p>
       </div>
     </div>
 
@@ -742,7 +744,7 @@
       aliases: [],
       promptIds: [],
       reps: 3,
-      maxTokens: 512,
+      maxTokens: 3072,
       get sweepDepthCount() {
         return this.depths.split(',').filter(function (d) { return d.trim() !== ''; }).length || 1;
       },
@@ -759,7 +761,8 @@
       get estimate() {
         // Mirrors bench.estimate_seconds. Deliberately pessimistic: a number that undersells
         // the disruption is worse than one that oversells it.
-        const perReq = 4 + this.maxTokens / 30;
+        // Mirrors bench.estimate_seconds: a request typically uses ~60% of its cap, not all of it.
+        const perReq = 4 + (this.maxTokens * 0.6) / 35;
         const secs = Math.round(this.aliases.length * (25 + this.promptIds.length * this.reps * perReq));
         if (secs < 90) return secs + ' seconds';
         const m = Math.round(secs / 60);

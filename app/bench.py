@@ -38,12 +38,22 @@ from . import db, hw
 # Generation is capped so a run has a predictable duration and every variant does the same
 # amount of work. Without a cap, one model rambling to its context limit turns a five-minute
 # suite into an hour and makes the per-variant numbers incomparable.
-# Reasoning models spend their budget thinking before they answer, and a cap that runs out
-# mid-thought measures only how fast a model thinks - never whether it can write the code or
-# the prose the prompt asked for. 512 gives most of them room to finish and start answering;
-# results record whether the cap was hit anyway, so a truncated run is visible rather than
-# quietly mistaken for a complete one.
-_DEFAULT_MAX_TOKENS = 512
+# Reasoning models spend a large part of their budget thinking before they answer, and a cap
+# that runs out mid-thought measures only how fast a model thinks - never whether it can write
+# the code or the prose the prompt was asking for.
+#
+# Measured against the seeded prompts, letting both local models run to a natural stop:
+#
+#   gemma-4-E4B   coding 1376 (406 thinking)   reasoning 2394 (1247 thinking)
+#   gemma-4-12b   coding 1500 (716 thinking)   reasoning 2115 (1292 thinking)
+#
+# So 512 truncated three prompts out of four and 1024 would still have cut the two hardest.
+# 3072 clears the worst observed case with room to spare.
+#
+# Raising the cap costs less time than it looks: a cap is only paid when it is reached, and
+# these finish on their own between 550 and 2400 tokens. What it does end is every request
+# costing exactly 512 tokens because every request was being cut off.
+DEFAULT_MAX_TOKENS = 3072
 
 # Sampling temperature is pinned to 0 for every benchmark request. Output length drives almost
 # every derived number here, so letting it vary run to run would put noise into the one place
@@ -311,7 +321,7 @@ def _other_traffic(container: str, aliases: set[str], since: float) -> bool:
 
 
 def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
-          reps: int = 3, max_tokens: int = _DEFAULT_MAX_TOKENS) -> tuple[bool, str]:
+          reps: int = 3, max_tokens: int = DEFAULT_MAX_TOKENS) -> tuple[bool, str]:
     """Kick off a run in the background. One at a time, refused otherwise."""
     global _THREAD, _STATE
     aliases = [a for a in aliases if a]
@@ -321,7 +331,7 @@ def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
     if not prompts:
         return False, "no prompts selected"
     reps = max(1, min(int(reps or 1), 10))
-    max_tokens = max(16, min(int(max_tokens or _DEFAULT_MAX_TOKENS), 4096))
+    max_tokens = max(16, min(int(max_tokens or DEFAULT_MAX_TOKENS), 4096))
 
     with _LOCK:
         if _STATE.active:
@@ -423,8 +433,11 @@ def estimate_seconds(n_aliases: int, n_prompts: int, reps: int, max_tokens: int)
     oversells it: the whole point of showing it is so nobody starts an hour-long run thinking
     it will take five minutes.
     """
-    load_s = 25.0                       # cold load of a mid-size model, per variant
-    per_req_s = 4.0 + max_tokens / 30.0  # overhead plus generation at a conservative rate
+    load_s = 25.0                        # cold load of a mid-size model, per variant
+    # Assume a request uses roughly 60% of its cap rather than all of it: models stop when they
+    # are done, and measured completions ran 550-2400 tokens against a 4096 cap. Costing every
+    # request at the full cap made the estimate grow with a number that is rarely reached.
+    per_req_s = 4.0 + (max_tokens * 0.6) / 35.0
     return int(n_aliases * (load_s + n_prompts * reps * per_req_s))
 
 
