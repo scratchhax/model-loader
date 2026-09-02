@@ -64,10 +64,27 @@
     {% endif %}
 
     {% if job.lines %}
-    <details class="mt-2">
+    {# This whole fragment is replaced every couple of seconds while a run is active, which
+       takes the <details> element with it and loses whether it was open. The state therefore
+       cannot live in the element - it is kept outside the swap and reapplied on each one. #}
+    <details id="bench-log" class="mt-2">
       <summary class="text-xs cursor-pointer text-slate-500 dark:text-slate-400">log</summary>
-      <pre class="mt-1 text-[11px] font-mono whitespace-pre-wrap text-slate-600 dark:text-slate-300 max-h-40 overflow-y-auto">{{ job.lines[-30:] | join('\n') }}</pre>
+      <pre id="bench-log-body" class="mt-1 text-[11px] font-mono whitespace-pre-wrap text-slate-600 dark:text-slate-300 max-h-40 overflow-y-auto">{{ job.lines[-30:] | join('\n') }}</pre>
     </details>
+    <script>
+      (function () {
+        var d = document.getElementById('bench-log');
+        if (!d) return;
+        var KEY = 'benchLogOpen';
+        try { d.open = sessionStorage.getItem(KEY) === '1'; } catch (e) {}
+        d.addEventListener('toggle', function () {
+          try { sessionStorage.setItem(KEY, d.open ? '1' : '0'); } catch (e) {}
+        });
+        // A log is read from the end, and every swap resets the scroll box to the top.
+        var body = document.getElementById('bench-log-body');
+        if (d.open && body) body.scrollTop = body.scrollHeight;
+      })();
+    </script>
     {% endif %}
   </div>
   {% endif %}
