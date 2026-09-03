@@ -1084,9 +1084,9 @@ def align_openwebui_capabilities() -> tuple[bool, str]:
     """Make OpenWebUI's per-model capabilities match models.ini, authoritatively.
 
     Differs from sync_openwebui_capabilities() in two ways:
-      * REPLACES the capabilities block on backend records instead of merging into it, so
-        OpenWebUI's permissive defaults (vision on for everything) are overwritten rather
-        than preserved.
+      * OVERWRITES `capabilities.vision` on backend records instead of deferring to what is
+        already there, so OpenWebUI's permissive default (vision on for everything) loses.
+        Only that one key is touched -- other capabilities are left exactly as found.
       * DELETES backend records for model ids nothing serves any more -- the residue of
         deleted or renamed models, which otherwise keep claiming capabilities forever.
 
@@ -1135,7 +1135,15 @@ for mid, vision in plan.items():
         try: meta = json.loads(cur[0]) if cur[0] else {}
         except Exception: meta = {}
         if not isinstance(meta, dict): meta = {}
-    meta['capabilities'] = {'vision': bool(vision)}   # replace, not merge
+    # Authoritative about `vision` ONLY. Replacing the whole capabilities block also
+    # destroyed image_generation, web_search, code_interpreter and citations -- flags this
+    # app knows nothing about and has no business clearing. Aligning vision used to switch
+    # off image generation for every model it touched.
+    caps = meta.get('capabilities')
+    if not isinstance(caps, dict):
+        caps = {}
+    caps['vision'] = bool(vision)
+    meta['capabilities'] = caps
     if cur is None:
         name = mid.split('.', 1)[1] if '.' in mid else mid
         c.execute('INSERT INTO model(id, user_id, base_model_id, name, params, meta, updated_at, created_at, is_active)'
@@ -1530,7 +1538,12 @@ for mid, vision in plan.items():
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
-    meta['capabilities'] = {'vision': bool(vision)}
+    # Same rule as align_openwebui_capabilities(): own `vision`, leave the rest alone.
+    caps = meta.get('capabilities')
+    if not isinstance(caps, dict):
+        caps = {}
+    caps['vision'] = bool(vision)
+    meta['capabilities'] = caps
     if cur is None:
         name = mid.split('.', 1)[1] if '.' in mid else mid
         c.execute('INSERT INTO model(id, user_id, base_model_id, name, params, meta, updated_at, created_at, is_active)'
