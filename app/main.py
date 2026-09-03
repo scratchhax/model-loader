@@ -330,10 +330,11 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
 @app.post("/models/delete", response_class=HTMLResponse)
 async def models_delete(request: Request, name: str = Form(...)) -> HTMLResponse:
     ok, msg, freed = services.delete_gguf(name)
-    # Deleting the weights does not remove the id from OpenWebUI's whitelist, and OpenWebUI
-    # RENDERS that whitelist rather than intersecting it with what the backend serves -- so a
-    # deleted model keeps appearing in the picker and fails with "model not found" on use.
-    # Prune here; it is a no-op (and costs no restart) when nothing is actually stale.
+    # Prune here catches ids orphaned EARLIER -- it cannot catch the model just deleted.
+    # delete_gguf removes files, not the models.ini section, so at this point the section is
+    # still there and the id still resolves; `unknown_ids` means "no section provides this".
+    # What makes an id dead is deleting its section, and that path prunes for itself.
+    # A no-op (and no restart) when nothing is actually stale.
     if ok:
         try:
             pruned = services.prune_openwebui_unknown_ids()
@@ -1242,6 +1243,25 @@ def config_section_delete(name: str) -> Response:
     ok = ini.delete_section(name)
     if not ok:
         return Response(status_code=200, headers={"HX-Redirect": f"/config?err=no+such+section:+{name}"})
+
+    # Removing the section is the moment the id stops being servable -- llama-server resolves
+    # model ids out of models.ini, so from here OpenWebUI is offering something no backend can
+    # answer. And it RENDERS its whitelist rather than intersecting it with what the backend
+    # reports, so the model sits in the picker looking fine and fails with "model not found"
+    # only when somebody selects it.
+    #
+    # The rename path already reconciles for exactly this reason; delete did not, which is how
+    # a deleted model kept appearing. Deleting the GGUF does not help either: that leaves the
+    # section in place, so the id is still "known" at that point and nothing is pruned.
+    #
+    # Two writes, one restart. The whitelist lives in OpenWebUI's config table, which it reads
+    # only at boot, so changing it costs a restart. The stale per-model record lives in its
+    # `model` table, which is read per request, so clearing that one is free.
+    try:
+        services.prune_openwebui_unknown_ids()
+        services.align_openwebui_capabilities()
+    except Exception:  # noqa: BLE001 -- deleting a section must succeed even if OpenWebUI is down
+        pass
     return Response(status_code=200, headers={"HX-Redirect": f"/config?deleted={name}"})
 
 
