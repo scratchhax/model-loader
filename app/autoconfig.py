@@ -420,6 +420,12 @@ SPEC_PROFILE_KEYS: tuple[str, ...] = (
     "spec-draft-n-max", "spec-draft-n-min", "spec-draft-p-min",
 )
 
+# Fold the profile-owned keys into the domain by REFERENCE rather than restating them, so the
+# two can't drift. These are written from a profile's `knobs` dict rather than by a literal
+# `values[...] =`, which is exactly why enumerating assignments by eye missed them — the
+# _domain_gaps() guard caught all three on its first run.
+AUTOCONFIG_DOMAIN = AUTOCONFIG_DOMAIN | frozenset(SPEC_PROFILE_KEYS)
+
 
 def match_spec_profile(section: dict[str, str] | None) -> str:
     """Which profile an existing section corresponds to: a key, "custom", or "".
