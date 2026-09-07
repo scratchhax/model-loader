@@ -1948,8 +1948,14 @@ def analyze(*,
     # Anything the user set that we don't touch (mmproj, chat-template-file, lora, override-*, etc.)
     # is left alone: not reported as a diff, and Fill/Fill minimal doesn't overwrite it.
     current_diff: list[str] = []
-    # Keys we may explicitly displace (e.g. cpu-moe when we set n-cpu-moe instead)
+    # Keys we may explicitly displace (e.g. cpu-moe when we set n-cpu-moe instead).
+    # Placement keys belong here too: autoconfig has a firm opinion on all of them, and on the
+    # fit path it deliberately emits NONE of them. Without this the panel reports a single line
+    # ("n-cpu-moe -> unset") while Fill also silently drops ngl, tensor-split and split-mode -
+    # the three settings that decide whether the model loads at all. A diff that hides the
+    # important half is worse than no diff.
     _displaces = {"cpu-moe", "n-cpu-moe"} if is_moe else set()
+    _displaces |= {"ngl", "tensor-split", "split-mode"}
     if current_section:
         cur = {k: str(v) for k, v in current_section.items()}
         for k, v in values.items():
