@@ -155,7 +155,12 @@ def snapshot_models_dir() -> ModelsDirSnapshot:
         stem_no_ext = base[:-5] if base.lower().endswith(".gguf") else base
         rel = f"{subdir}/{parts[0].name}" if subdir else parts[0].name
         matched = by_file.get(rel) or [a for a in aliases if a == stem_no_ext]
-        is_comp = "mmproj" in base.lower()
+        # Use the same predicate the ini layer uses to decide what may become its own section,
+        # rather than a second, narrower rule. This one only tested for mmproj, so speculative
+        # draft heads - Qwen MTP files, generic -draft- - were listed as standalone models even
+        # though nothing can be done with them: they cannot be run or configured alone, and they
+        # are already referenced from their main model's section via `model-draft`.
+        is_comp = ini._is_companion(base)
         entries.append(GgufEntry(
             display_name=base,
             parts=parts,
@@ -167,11 +172,12 @@ def snapshot_models_dir() -> ModelsDirSnapshot:
             aliases=matched,
         ))
 
-    # Fold companion mmproj entries into their same-subdir main model.
-    # A companion is a standalone file that only makes sense paired with its main model:
-    # you can't run it alone, can't configure it, can't do anything with it. So we hide
-    # it from the list and expose it as a badge on the main model instead. Un-paired
-    # companions (mmproj in a subdir with no main model) stay visible for cleanup.
+    # Fold companion entries into their same-subdir main model.
+    # A companion is a file that only makes sense paired with its main model: a multimodal
+    # projector (mmproj) or a speculative draft head (MTP). You can't run one alone, can't
+    # configure it, can't do anything with it. So we hide it from the list and expose it as a
+    # badge on the main model instead. Un-paired companions (one sitting in a subdir with no
+    # main model) stay visible so they can be cleaned up.
     main_by_subdir: dict[str, GgufEntry] = {
         e.subdir: e for e in entries if not e.is_companion and e.subdir
     }
