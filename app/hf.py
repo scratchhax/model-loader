@@ -94,11 +94,37 @@ class HfRepoDetail:
     readme_snippet: str | None
 
 
+_NEXT_LINK_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
+
+# The tree endpoint pages at 50 entries and ignores a larger ?limit (passing limit=1000 returns a
+# single entry). The only way through is the cursor in the Link header. Without this a repo with
+# more than 50 files loses everything past the 50th in path order - on
+# unsloth/Qwen3.8-Flash-Next-GGUF that silently hid UD-Q3_K_XL, UD-Q4_K_XL, UD-Q5_K_XL,
+# UD-Q6_K_XL and the mmproj files, with no error and no indication anything was missing.
+_TREE_MAX_PAGES = 40
+
+
 async def repo_detail(repo_id: str, revision: str = "main") -> HfRepoDetail:
+    entries: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=30.0, headers=_auth_headers(), follow_redirects=True) as client:
-        tree = await client.get(f"{HF_API}/models/{repo_id}/tree/{revision}", params={"recursive": "true", "expand": "true"})
-        tree.raise_for_status()
-        entries: list[dict[str, Any]] = tree.json()
+        url: str | None = f"{HF_API}/models/{repo_id}/tree/{revision}"
+        params: dict[str, str] | None = {"recursive": "true", "expand": "true"}
+        for _ in range(_TREE_MAX_PAGES):
+            tree = await client.get(url, params=params)
+            tree.raise_for_status()
+            page = tree.json()
+            if not isinstance(page, list):
+                break
+            entries.extend(page)
+            m = _NEXT_LINK_RE.search(tree.headers.get("link", ""))
+            if not m:
+                break
+            # the cursor URL already carries recursive/expand/limit, so don't re-apply params
+            url, params = m.group(1), None
+        else:
+            # Ran out of pages rather than reaching the end. Better to serve a truncated list than
+            # to loop forever, but this should never happen for a real repo.
+            pass
 
     files: list[HfFile] = []
     for e in entries:
