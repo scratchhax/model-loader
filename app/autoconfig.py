@@ -575,40 +575,6 @@ def _partition_min_max(costs: list[float], k: int, pinned_gb: float,
     return best
 
 
-def _balanced_split(layers: int, n_cpu_moe: int, attention_gb: float,
-                    expert_per_layer_gb: float, kv_gb: float, gpu_count: int,
-                    pinned_gb: float, caps: list[float] | None = None) -> tuple[str, list[float]]:
-    """(tensor-split string, per-card GB) for a layer split balanced by BYTES.
-
-    llama.cpp's `split-mode = layer` divides layers by COUNT, weighted by --tensor-split. That
-    is correct for a dense model, where every layer costs the same, and badly wrong for a MoE
-    under `--n-cpu-moe N`: layers 0..N-1 keep only attention on the GPU while the rest carry
-    full experts, so the per-layer cost jumps by an order of magnitude partway through. An even
-    count split therefore hands one card nearly all the expensive layers.
-
-    Measured on a 40-layer, 256-expert 35B at n-cpu-moe=24: llama.cpp tried to allocate
-    15.0 GiB on device 1 of a 11.9 GiB card while device 0 still had ~9 GiB free. Balancing by
-    bytes instead loaded it at 9.7/10.8 GiB across the two cards with the full 256K context.
-    """
-    if gpu_count < 2 or layers <= 0:
-        return "", []
-    costs = _layer_costs(layers, n_cpu_moe, attention_gb, expert_per_layer_gb, kv_gb)
-    counts = _partition_min_max(costs, gpu_count, pinned_gb, caps)
-    # A zero is only legitimate when there are genuinely fewer layers than cards; otherwise
-    # something went wrong and an even split is the safer answer than a malformed one.
-    if not counts or sum(counts) != layers:
-        return "", []
-    if any(c <= 0 for c in counts) and layers >= gpu_count:
-        return "", []
-    loads: list[float] = []
-    at = 0
-    for i, n in enumerate(counts):
-        load = sum(costs[at:at + n]) + (pinned_gb if i == 0 else 0.0)
-        loads.append(round(load, 2))
-        at += n
-    return ",".join(str(c) for c in counts), loads
-
-
 def _find_fit(model_gb_full: float, kv_gb: float, budget_gb: float,
               layers: int, moe_ratio: float,
               card_ok: "Callable[[float, str, int], bool] | None" = None) -> tuple[bool, float, str, int]:
@@ -1652,31 +1618,40 @@ def analyze(*,
                     values["ngl"] = str(chosen.ngl)
                 # Same as the MoE branch: the table stays per-context rather than being
                 # recomputed at the chosen preset's offload level.
-        if off_kind == "cpu-moe":
-            values["cpu-moe"] = "true"
-        elif off_kind == "n-cpu-moe" and n_cm > 0:
-            values["n-cpu-moe"] = str(n_cm)
-
-        # With expert offload on a multi-GPU layer split, an even split is a byte imbalance:
-        # layers below n-cpu-moe keep only attention on the GPU, the rest carry full experts.
-        # Emit proportions that equalize actual bytes, or one card OOMs while the other idles.
-        _gc = max(1, int((rec_backend or {}).get("gpu_count", 1)))
-        if _gc > 1 and off_kind in ("n-cpu-moe", "cpu-moe") and layers > 0 and moe_ratio > 0:
-            _mg = model_gb_raw * _MODEL_OVERHEAD_SPLIT
-            _kv = kv_cache_bytes(arch, rec_ctx * n_sessions, layers, kv_heads, head_dim,
-                                 bytes_per, key_length=key_length, value_length=value_length,
-                                 full_attention_interval=full_attention_interval,
-                                 ssm_state_size=ssm_state_size, **_swa) / (1024 ** 3)
-            _caps = [c - _RESERVE_PER_GPU for c in ((rec_backend or {}).get("card_vram_gb") or [])]
-            if len(_caps) != _gc:
-                _caps = [(float(recommended.vram_gb) / _gc) - _RESERVE_PER_GPU] * _gc
-            _ts, _loads = _balanced_split(
-                layers, layers if off_kind == "cpu-moe" else n_cm,
-                _mg * (1 - moe_ratio), _mg * moe_ratio / layers,
-                _kv, _gc, mmproj_vram_gb, _caps)
-            if _ts:
-                values["tensor-split"] = _ts
-                values["split-mode"] = "layer"
+        if off_kind in ("cpu-moe", "n-cpu-moe"):
+            # Placement is handed to llama.cpp's own fitter rather than pinned here.
+            #
+            # Why: our estimate has to be exactly right or the model will not load, and on a
+            # model that massively overflows VRAM it is not. Measured on Qwen3.8-Flash-Next
+            # (177B, qwen4exp, 83.8 GiB of weights against 23.9 GiB of VRAM):
+            #
+            #   * we emitted tensor-split 40,8; llama.cpp's fitter computes 20,29 - close to
+            #     inverted. The load OOMed on device 0, the card we had loaded 5:1.
+            #   * compute buffers are not in our budget at all. The note above the fit table
+            #     assumed "~1-2 GB absorbed by the overhead multiplier" and asked to revisit
+            #     "if we hit OOMs on models the picker approves". Measured here: 3.6 GiB on a
+            #     single card. Worse, it scales with CONTEXT, which our 8*ub*layers*hidden
+            #     rule does not model - the same card wanted 672 MiB at 32K and 3608 MiB at
+            #     256K.
+            #
+            # `--fit` adjusts only arguments that are UNSET, so pinning ngl/tensor-split is
+            # what disabled it: the log says "n_gpu_layers already set by user to 999, abort".
+            # Leaving them unset lets llama-server size placement at load time, when it can
+            # see real free VRAM and knows its own allocator. Verified on Flash-Next: 19.86
+            # tok/s at the full 262144 ctx, versus a hard OOM from our pinned config, and the
+            # same speed our best hand-tuned n-cpu-moe reached at 1/8th the context.
+            #
+            # This is deliberately not architecture-specific. Qwen4 proper will land with
+            # another layout we have never seen, and llama.cpp will know how to size it before
+            # we do.
+            values["fit"] = "on"
+            values.pop("ngl", None)
+            values.pop("cpu-moe", None)
+            values.pop("n-cpu-moe", None)
+            values.pop("tensor-split", None)
+            # ctx-size stays pinned: --fit adjusts placement around the context the user asked
+            # for rather than silently shrinking it. If it genuinely cannot fit, it falls back
+            # to more layers on CPU, which is slower but still runs.
 
     # Reasoning / thinking — infer from chat-template scanning
     features = summary.get("chat_template_features") or {}
@@ -1921,22 +1896,23 @@ def analyze(*,
     if is_moe:
         if recommended:
             off_kind, n_cm = per_backend_offload.get(recommended.name, ("", 0))
-            if off_kind == "cpu-moe":
-                quirks.append(f"MoE model ({experts} experts): all expert weights offloaded to CPU via cpu-moe=true. "
-                              "Attention stays on GPU. Expect slower generation than a fully-GPU model.")
-            elif off_kind == "n-cpu-moe":
-                quirks.append(f"MoE model ({experts} experts): first {n_cm} of {layers} layers' experts offloaded to CPU. "
-                              "Remaining layers keep experts on GPU for speed. Tune n-cpu-moe up/down to trade VRAM for tok/s.")
+            if off_kind in ("cpu-moe", "n-cpu-moe"):
+                est = (f"all {layers} layers'" if off_kind == "cpu-moe"
+                       else f"roughly the first {n_cm} of {layers} layers'")
+                quirks.append(
+                    f"MoE model ({experts} experts): needs expert weights on the CPU — estimated {est} worth. "
+                    "Placement is left to llama.cpp: `fit = on` with ngl, tensor-split and n-cpu-moe all unset, "
+                    "so llama-server sizes it at load time against real free VRAM. That estimate is advisory; "
+                    "the loader decides. Expect slower generation than a fully-GPU model."
+                )
+                quirks.append(
+                    "Pinning ngl or tensor-split here would DISABLE that fitting (`--fit` only adjusts unset "
+                    "arguments — the log says \"n_gpu_layers already set by user to 999, abort\"), and our own "
+                    "placement maths has no term for compute buffers, which reached 3.6 GiB on a single card "
+                    "on a 177B model at 256K ctx. Leave them unset unless you are tuning by measurement."
+                )
             else:
                 quirks.append(f"MoE model ({experts} experts): fits fully on GPU at this ctx — no CPU offload needed.")
-            _ts = values.get("tensor-split")
-            if _ts:
-                quirks.append(
-                    f"Multi-GPU + expert offload: `tensor-split = {_ts}` balances the split by BYTES, not "
-                    "layer count. Layers below n-cpu-moe keep only attention on the GPU while the rest carry "
-                    "full experts, so an even split loads one card ~10x heavier than the other and OOMs it "
-                    "while the other sits half empty. Don't remove it."
-                )
         else:
             quirks.append(f"MoE model ({experts} experts): does not fit even with all experts offloaded to CPU. "
                           f"You need a bigger GPU, a smaller quant, or a shorter context.")
