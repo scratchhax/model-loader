@@ -39,6 +39,46 @@ _RESERVE_PER_GPU = 1.0   # CUDA runtime + driver context + scratch/cuBLAS worksp
                          # inference. Empirical: Qwen3.8-27B at ctx=159744 loaded fine but OOM'd
                          # on first inference (cuBLAS workspace on device 1). At ctx=131072 fits
                          # cleanly. If you pin an older image and want more ctx, drop this back to 0.5.
+# Every key autoconfig has an opinion about. For each one it either SETS a value or wants the
+# key GONE — nothing here may survive a Fill untouched. The list is what makes "Fill form" honest:
+# Fill writes the keys present in `values` and clears the rest of this set, so a recommendation
+# cannot leave a stale placement pin behind and report success.
+#
+# This replaces a hand-maintained set that held only {cpu-moe, n-cpu-moe}. Because ngl and
+# tensor-split were missing from it, the panel reported "n-cpu-moe -> unset" while Fill silently
+# left ngl=999 and tensor-split=17,13 in place — Save then wrote them straight back and the user
+# saw no change at all. _domain_gaps() below guards against that returning: any key assigned but
+# not declared here is surfaced as a quirk rather than silently escaping.
+AUTOCONFIG_DOMAIN: frozenset[str] = frozenset({
+    # placement / fit — the ones that decide whether the model loads
+    "ngl", "tensor-split", "split-mode", "cpu-moe", "n-cpu-moe", "fit",
+    # context and cache
+    "ctx-size", "parallel", "batch-size", "ubatch-size", "keep", "cache-reuse", "cache-ram",
+    "cache-type-k", "cache-type-v", "flash-attn", "cont-batching", "context-shift",
+    # rope
+    "rope-scaling", "rope-scale",
+    # speculative decoding
+    "spec-type", "spec-draft-model", "spec-draft-ngl",
+    # multimodal
+    "mmproj", "mmproj-offload", "image-max-tokens",
+    # templating / reasoning
+    "jinja", "chat-template-kwargs", "reasoning", "reasoning-format", "reasoning-preserve",
+})
+
+# Clearing this would break the section outright — a section with no model file is not a model.
+# It stays out of the displaced list even when a recommendation happens not to set it.
+_NEVER_CLEAR: frozenset[str] = frozenset({"model"})
+
+
+def _domain_gaps(values: dict[str, str]) -> list[str]:
+    """Keys a recommendation set that AUTOCONFIG_DOMAIN does not declare.
+
+    Non-fatal on purpose: a missing declaration should be visible, not a 500 on a page the user
+    is trying to read. Surfaced as a quirk so it gets noticed and fixed.
+    """
+    return sorted(set(values) - AUTOCONFIG_DOMAIN - _NEVER_CLEAR)
+
+
 # --- prompt cache (--cache-ram) sizing. See the block that consumes these for the measurements.
 _CACHE_RAM_DEFAULT_MIB = 8192   # llama-server's own default; never suggest worse without cause
 _CACHE_RAM_CONVOS = 4           # conversations to keep warm at the recommended context
@@ -1995,14 +2035,10 @@ def analyze(*,
     # Anything the user set that we don't touch (mmproj, chat-template-file, lora, override-*, etc.)
     # is left alone: not reported as a diff, and Fill/Fill minimal doesn't overwrite it.
     current_diff: list[str] = []
-    # Keys we may explicitly displace (e.g. cpu-moe when we set n-cpu-moe instead).
-    # Placement keys belong here too: autoconfig has a firm opinion on all of them, and on the
-    # fit path it deliberately emits NONE of them. Without this the panel reports a single line
-    # ("n-cpu-moe -> unset") while Fill also silently drops ngl, tensor-split and split-mode -
-    # the three settings that decide whether the model loads at all. A diff that hides the
-    # important half is worse than no diff.
-    _displaces = {"cpu-moe", "n-cpu-moe"} if is_moe else set()
-    _displaces |= {"ngl", "tensor-split", "split-mode"}
+    # Everything autoconfig opinions on, minus what this recommendation actually set: that is
+    # exactly the set it wants gone. Declared once in AUTOCONFIG_DOMAIN rather than remembered
+    # per-branch, so a key can no longer be quietly left behind.
+    _displaces = set(AUTOCONFIG_DOMAIN) - _NEVER_CLEAR
     if current_section:
         cur = {k: str(v) for k, v in current_section.items()}
         for k, v in values.items():
@@ -2021,6 +2057,16 @@ def analyze(*,
     # — the current section — and Save writes it straight back. The diff would promise
     # "n-cpu-moe: '6' -> unset" while nothing changed. Fill has to be told what to clear.
     displaced = sorted(k for k in _displaces if k not in values)
+
+    # A key we set but never declared would escape both the diff and Fill's clearing, which is
+    # how the "Save does nothing" bug worked. Make it visible instead of silent.
+    _gaps = _domain_gaps(values)
+    if _gaps:
+        quirks.append(
+            "Autoconfig set %s, which AUTOCONFIG_DOMAIN does not declare. Fill will not clear "
+            "%s on a later run, so a stale value could survive. Add them to the domain."
+            % (", ".join("`%s`" % g for g in _gaps), "them" if len(_gaps) > 1 else "it")
+        )
 
     return Recommendation(
         plans=plans,
