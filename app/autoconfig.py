@@ -415,6 +415,7 @@ class Recommendation:
     quirks: list[str] = field(default_factory=list)
     unavailable: list[str] = field(default_factory=list)              # which knobs don't apply to this model
     current_diff: list[str] = field(default_factory=list)             # human-readable diff vs existing section (empty if new)
+    displaced: list[str] = field(default_factory=list)                # keys Fill must CLEAR, not set — see note at the assignment
     presets: list[PresetOption] = field(default_factory=list)  # Fast/Balanced/Long-ctx samples
     # Every point on the offload frontier, ascending by ctx. The presets above are three
     # samples from this; the UI exposes the whole curve via a slider so any achievable
@@ -1969,8 +1970,15 @@ def analyze(*,
             if k in cur and cur[k] and k not in values:
                 current_diff.append(f"{k}: {cur[k]!r} → unset (superseded)")
 
+    # Keys the recommendation wants GONE. "Fill form" walks `values` and writes each key it
+    # finds, so a key we deliberately omit is simply left holding whatever the form already had
+    # — the current section — and Save writes it straight back. The diff would promise
+    # "n-cpu-moe: '6' -> unset" while nothing changed. Fill has to be told what to clear.
+    displaced = sorted(k for k in _displaces if k not in values)
+
     return Recommendation(
         plans=plans,
+        displaced=displaced,
         recommended_backend=(recommended.name if recommended else ""),
         recommended_ctx=rec_ctx,
         recommended_total_ctx=rec_ctx * n_sessions if rec_ctx > 0 else 0,

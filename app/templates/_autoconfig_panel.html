@@ -7,6 +7,7 @@
 <div id="autoconfig-panel"
      data-values='{{ values_json }}'
      data-values-minimal='{{ values_minimal_json }}'
+     data-displaced='{{ displaced_json }}'
      data-frontier='{{ frontier_json }}'
      class="mt-4 rounded-xl border border-sky-200 dark:border-sky-900 bg-sky-50/40 dark:bg-sky-950/20 p-4">
 
@@ -648,10 +649,9 @@ function applyAutoconfig(mode) {
     else if (c.kind === 'cpu-moe')   { values['cpu-moe'] = 'true'; values['ngl'] = '999'; }
     else                             { values['ngl'] = '999'; }
   }
-  for (const [k, v] of Object.entries(values)) {
+  const setField = (k, v) => {
     const sel = 'input[name="fld_' + CSS.escape(k) + '"], select[name="fld_' + CSS.escape(k) + '"], textarea[name="fld_' + CSS.escape(k) + '"]';
-    const els = document.querySelectorAll(sel);
-    for (const el of els) {
+    for (const el of document.querySelectorAll(sel)) {
       if (el.type === 'checkbox') {
         el.checked = ['true','on','yes','1'].includes(String(v).toLowerCase());
       } else {
@@ -660,6 +660,19 @@ function applyAutoconfig(mode) {
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
+  };
+
+  for (const [k, v] of Object.entries(values)) setField(k, v);
+
+  // Clear the keys the recommendation wants GONE. Setting only what is in `values` leaves a
+  // displaced key holding whatever the form already had — the current section — so Save writes
+  // it straight back and the user sees "no changes" while the diff promised a removal.
+  // Skipped for anything the Custom slider re-set above, which is why this reads `values`
+  // rather than the raw recommendation.
+  let displaced = [];
+  try { displaced = JSON.parse(panel.dataset.displaced || '[]'); } catch (e) { displaced = []; }
+  for (const k of displaced) {
+    if (!(k in values)) setField(k, '');
   }
   panel.remove();
 }

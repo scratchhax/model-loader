@@ -1173,6 +1173,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         "cfgh": cfgh,
         "values_json": _json.dumps(rec.values),
         "values_minimal_json": _json.dumps(rec.values_minimal),
+        "displaced_json": _json.dumps(rec.displaced),
         # Full offload frontier for the custom slider. Every entry is an achievable
         # config, so the slider snaps to real points rather than interpolating.
         "frontier_json": _json.dumps([
