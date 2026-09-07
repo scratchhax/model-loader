@@ -39,6 +39,11 @@ _RESERVE_PER_GPU = 1.0   # CUDA runtime + driver context + scratch/cuBLAS worksp
                          # inference. Empirical: Qwen3.8-27B at ctx=159744 loaded fine but OOM'd
                          # on first inference (cuBLAS workspace on device 1). At ctx=131072 fits
                          # cleanly. If you pin an older image and want more ctx, drop this back to 0.5.
+# --- prompt cache (--cache-ram) sizing. See the block that consumes these for the measurements.
+_CACHE_RAM_DEFAULT_MIB = 8192   # llama-server's own default; never suggest worse without cause
+_CACHE_RAM_CONVOS = 4           # conversations to keep warm at the recommended context
+_CACHE_RAM_HEADROOM_GB = 8.0    # left for the OS, the other containers and page cache churn
+
 _MODEL_OVERHEAD_SINGLE = 1.00  # Q_K_M loads at ~file size when everything's on one card
 _MODEL_OVERHEAD_SPLIT = 1.08   # +8% for cross-GPU handoffs, duplicated activation buffers, layer-imbalance.
 _CACHE_DEFAULT = "q8_0"  # symmetric K/V; K stays q8, V could drop to q4 for +20% ctx (future preset)
@@ -1653,6 +1658,47 @@ def analyze(*,
             # ctx-size stays pinned: --fit adjusts placement around the context the user asked
             # for rather than silently shrinking it. If it genuinely cannot fit, it falls back
             # to more layers on CPU, which is slower but still runs.
+
+        # ---- cache-ram: host-RAM budget for the server-side prompt cache.
+        #
+        # llama-server defaults to 8192 MiB, which is sized for small contexts. Measured here on
+        # gemma-4-26B-A4B, re-asking a conversation after another had displaced it:
+        #
+        #   cache-ram 8192  ->    5 prompt tokens re-evaluated, 111 ms   (1179 cached)
+        #   cache-ram   64  -> 1177 prompt tokens re-evaluated, 283 ms   (7 cached)
+        #   cache-ram    0  -> 1177 prompt tokens re-evaluated, 285 ms   (7 cached)
+        #
+        # So the budget is load-bearing: undersize it and the 3.7x TTFT win vanishes entirely.
+        # It matters most for OpenWebUI-style clients, which resend the whole history each turn.
+        #
+        # Size it from what a conversation actually costs rather than from the model's size.
+        # kv_cache_bytes() already understands per-layer KV arrays and hybrid attention, which
+        # is what makes this correct for qwen4exp: only 12 of its 48 layers carry a growing KV
+        # cache, the other 36 hold a fixed-size recurrent state. Measured per conversation:
+        # Flash-Next 0.52 GiB at 32K, against 1.45 for gemma-4-26B and 1.25 for Qwen3.8-27B.
+        # A rule keyed on parameter count would size the 177B model ~3x too generously.
+        _kv_convo_gb = kv_cache_bytes(
+            arch, rec_ctx * n_sessions, layers, kv_heads, head_dim, bytes_per,
+            key_length=key_length, value_length=value_length,
+            full_attention_interval=full_attention_interval,
+            ssm_state_size=ssm_state_size, **_swa) / (1024 ** 3)
+        if _kv_convo_gb > 0:
+            _host_ram_gb = float((rec_backend or {}).get("host_ram_gb") or 0.0)
+            # Weights that will live in host RAM. For an offloaded MoE these are mmapped and
+            # want to stay in page cache — that is what makes the model fast — so the prompt
+            # cache must not crowd them out. Flash-Next needs ~84 GiB resident to hold 19.9
+            # tok/s; handing it a 48 GiB prompt cache on a 125 GiB box would thrash.
+            _cpu_weight_gb = (max(0.0, model_gb_raw - float(recommended.vram_gb))
+                              if off_kind in ("cpu-moe", "n-cpu-moe") else 0.0)
+            _upper_gb = _host_ram_gb - _cpu_weight_gb - _CACHE_RAM_HEADROOM_GB
+            _want_gb = _CACHE_RAM_CONVOS * _kv_convo_gb
+            _cache_gb = min(_want_gb, _upper_gb) if _upper_gb > 0 else 0.0
+            if _cache_gb > 0:
+                # Never suggest worse than llama.cpp's own default unless headroom forbids it.
+                _mib = int(round(_cache_gb * 1024))
+                if _upper_gb * 1024 >= _CACHE_RAM_DEFAULT_MIB:
+                    _mib = max(_mib, _CACHE_RAM_DEFAULT_MIB)
+                values["cache-ram"] = str(_mib)
 
     # Reasoning / thinking — infer from chat-template scanning
     features = summary.get("chat_template_features") or {}
