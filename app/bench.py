@@ -16,6 +16,11 @@ Two things follow from that being the whole purpose:
     makes sure the warning is true by refusing to run two at once and by supporting cancel
     between every unit of work.
 
+The generated text IS kept, in `bench_result.response_text`. That is the one thing here a
+pure timing harness would not do. Nothing in this module scores it - grading belongs to the
+`eval_*` tables and happens as a separate offline pass - but a run that discarded its output
+could never be graded at all, and re-running to recover it costs hours of GPU time.
+
 Measurements come from llama-server's own response rather than being timed from outside where
 possible. A streaming request with stream_options.include_usage ends with a `timings` object
 carrying prompt_n/prompt_ms, predicted_n/predicted_ms and draft_n/draft_n_accepted, which are
@@ -198,6 +203,7 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
         "stream_options": {"include_usage": True},
     }
     out: dict = {"err": ""}
+    answer: list[str] = []
     t0 = time.perf_counter()
     ttft: float | None = None
     ttft_answer: float | None = None
@@ -225,11 +231,16 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
                         d = ch.get("delta") or {}
                         if ch.get("finish_reason"):
                             finish_reason = str(ch["finish_reason"])
-                        visible = (d.get("content") or "") or (d.get("reasoning_content") or "")
+                        content = d.get("content") or ""
+                        visible = content or (d.get("reasoning_content") or "")
                         if visible and ttft is None:
                             ttft = time.perf_counter() - t0
-                        if (d.get("content") or "") and ttft_answer is None:
-                            ttft_answer = time.perf_counter() - t0
+                        if content:
+                            if ttft_answer is None:
+                                ttft_answer = time.perf_counter() - t0
+                            # Retained so the run can be graded later. Answer only, not
+                            # reasoning - see the response_text column comment in db.py.
+                            answer.append(content)
     except httpx.HTTPError as e:
         return {"err": f"{type(e).__name__}: {e}"}
 
@@ -249,6 +260,7 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
         "gen_tps": timings.get("predicted_per_second"),
         "draft_n": draft_n or None,
         "draft_acc": round(draft_ok / draft_n, 4) if draft_n else None,
+        "response_text": "".join(answer),
     })
     return out
 
@@ -432,7 +444,8 @@ def _run(run_id: int, backend: str, base_url: str, aliases: list[str],
                         draft_n=m.get("draft_n"), draft_acc=m.get("draft_acc"),
                         peak_vram_json=json.dumps(_peak_vram(backend)),
                         contended=1 if _other_traffic(backend, alias_set, t_req) else 0,
-                        err=m.get("err") or "")
+                        err=m.get("err") or "",
+                        response_text=m.get("response_text") or "")
                     with _LOCK:
                         _STATE.done += 1
                     if m.get("err"):

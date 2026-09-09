@@ -124,7 +124,14 @@ def init() -> None:
                 draft_acc   REAL,
                 peak_vram_json TEXT NOT NULL DEFAULT '[]',
                 contended   INTEGER NOT NULL DEFAULT 0,
-                err         TEXT NOT NULL DEFAULT ''
+                err         TEXT NOT NULL DEFAULT '',
+                -- The generated text itself. Timings alone cannot answer "is this model any
+                -- good at this", and a run that keeps only timings destroys the one artifact
+                -- that could ever be graded. Keeping it makes scoring an OFFLINE pass over
+                -- stored rows: a rubric can change and re-score history without spending GPU
+                -- time again. Reasoning is deliberately not kept - the answer is what gets
+                -- graded, and thinking would multiply row size for text no rubric reads.
+                response_text TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS bench_result_variant ON bench_result(variant_id);
             -- Results from llama.cpp's own `llama bench`, which is the right tool for raw
@@ -161,6 +168,82 @@ def init() -> None:
                 body        TEXT NOT NULL,
                 created_at  REAL NOT NULL
             );
+
+            -- ------------------------------------------------ capability evals
+            -- Separate from bench_* deliberately. Those answer "what does my hardware do"
+            -- and go stale whenever a config changes; these answer "what is this model good
+            -- at" and go stale only when the model changes. Sharing tables would mean
+            -- re-running an eval every time a tensor-split moved, and would force a
+            -- throughput measurement to be reduced to a score, which bench_* exists not to
+            -- do.
+            --
+            -- Grading is a SECOND pass, on purpose. A run stores generations; a grader fills
+            -- the score columns afterwards. That split is what makes a rubric revisable: the
+            -- expensive half (GPU time) is paid once, and the cheap half (scoring) can be
+            -- redone over history for free.
+            CREATE TABLE IF NOT EXISTS eval_suite (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug    TEXT NOT NULL,                  -- humaneval-plus, aider-polyglot
+                -- Version is part of the identity rather than a mutable field. Revising a
+                -- problem set or a rubric has to produce a NEW suite, otherwise old scores
+                -- are silently compared against new criteria and the badge lies.
+                version TEXT NOT NULL DEFAULT '1',
+                kind    TEXT NOT NULL DEFAULT 'code',   -- code | writing
+                title   TEXT NOT NULL DEFAULT '',
+                UNIQUE(slug, version)
+            );
+            CREATE TABLE IF NOT EXISTS eval_case (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                suite_id    INTEGER NOT NULL,
+                case_key    TEXT NOT NULL,              -- HumanEval/0
+                prompt      TEXT NOT NULL,
+                -- Everything the grader needs and the model must never see: unit tests,
+                -- entry point, forbidden words, target length. Opaque to the runner by
+                -- design, so a new kind of grader needs no schema change.
+                grader_json TEXT NOT NULL DEFAULT '{}',
+                -- 'quick' marks a fixed subset. A full coding suite is hours per model here
+                -- (164 problems x ~1400 tokens is ~3.7 h at 17 tok/s), so a subset is what
+                -- makes the feature usable rather than a nicety.
+                tier        TEXT NOT NULL DEFAULT 'full',
+                ord         INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(suite_id, case_key)
+            );
+            CREATE INDEX IF NOT EXISTS eval_case_suite ON eval_case(suite_id, tier);
+            CREATE TABLE IF NOT EXISTS eval_run (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                suite_id    INTEGER NOT NULL,
+                backend     TEXT NOT NULL,
+                tier        TEXT NOT NULL DEFAULT 'full',
+                status      TEXT NOT NULL,              -- running|done|cancelled|error
+                started_at  REAL NOT NULL,
+                finished_at REAL,
+                max_tokens  INTEGER NOT NULL DEFAULT 3072,
+                note        TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS eval_result (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id        INTEGER NOT NULL,
+                case_id       INTEGER NOT NULL,
+                alias         TEXT NOT NULL,
+                -- Generation half: written while the run is happening.
+                response_text TEXT NOT NULL DEFAULT '',
+                gen_n         INTEGER,
+                gen_tps       REAL,
+                total_ms      REAL,
+                truncated     INTEGER NOT NULL DEFAULT 0,
+                err           TEXT NOT NULL DEFAULT '',
+                -- Grading half: written later, nullable until a grader has run. NULL score
+                -- and score 0.0 mean different things - not yet judged, versus judged and
+                -- wrong - and a badge that conflates them is worse than no badge.
+                graded_at     REAL,
+                grader        TEXT NOT NULL DEFAULT '',
+                passed        INTEGER,
+                score         REAL,
+                detail_json   TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(run_id, case_id, alias)
+            );
+            CREATE INDEX IF NOT EXISTS eval_result_run ON eval_result(run_id, alias);
+            CREATE INDEX IF NOT EXISTS eval_result_ungraded ON eval_result(run_id, graded_at);
             """
         )
     _add_missing_columns()
@@ -176,6 +259,7 @@ def _add_missing_columns() -> None:
         "bench_result": (
             ("ttft_answer_ms", "REAL"),
             ("truncated", "INTEGER NOT NULL DEFAULT 0"),
+            ("response_text", "TEXT NOT NULL DEFAULT ''"),
         ),
     }
     with _LOCK, _conn() as c:
@@ -477,8 +561,18 @@ def bench_set_load_ms(variant_id: int, load_ms: float | None) -> None:
 def bench_add_result(variant_id: int, **kw) -> None:
     cols = ("prompt_name", "rep", "cold", "ttft_ms", "ttft_answer_ms", "truncated",
             "total_ms", "prompt_n", "prompt_tps",
-            "gen_n", "gen_tps", "draft_n", "draft_acc", "peak_vram_json", "contended", "err")
-    vals = [int(variant_id)] + [kw.get(k) for k in cols]
+            "gen_n", "gen_tps", "draft_n", "draft_acc", "peak_vram_json", "contended", "err",
+            "response_text")
+    # Every NOT NULL column here that has a meaningful "nothing to say" value. A caller that
+    # omits one would otherwise abort the insert with a constraint error part-way through a
+    # long run, losing the whole row for the sake of a field with a perfectly good default.
+    # prompt_name and rep are deliberately absent: a result row that does not know which
+    # prompt or repetition it came from is not worth storing.
+    _empty = {"err": "", "response_text": "", "peak_vram_json": "[]",
+              "cold": 0, "contended": 0, "truncated": 0}
+    vals = [int(variant_id)] + [
+        _empty[k] if (kw.get(k) is None and k in _empty) else kw.get(k) for k in cols
+    ]
     with _LOCK, _conn() as c:
         c.execute("INSERT INTO bench_result(variant_id, " + ", ".join(cols) + ") "
                   "VALUES(" + ", ".join("?" * (len(cols) + 1)) + ")", vals)
@@ -596,3 +690,196 @@ def bench_sweeps(run_id: int) -> list[sqlite3.Row]:
         return list(c.execute(
             "SELECT * FROM bench_sweep WHERE run_id = ? ORDER BY alias, n_depth, id",
             (int(run_id),)).fetchall())
+
+
+# ---------------------------------------------------------------- capability evals
+#
+# Two-phase by design: a run writes generations, a grader writes scores over them later.
+# Every function here belongs to one of those halves, or is a read for the UI.
+
+
+def eval_suite_upsert(slug: str, version: str, kind: str, title: str = "") -> int:
+    """Get-or-create a suite. Returns its id.
+
+    Idempotent, so vendoring a problem set can be re-run on every boot without piling up
+    duplicates or needing a separate "have I seeded this yet" flag.
+    """
+    with _LOCK, _conn() as c:
+        c.execute("INSERT OR IGNORE INTO eval_suite(slug, version, kind, title) "
+                  "VALUES(?, ?, ?, ?)", (slug, version, kind, title))
+        row = c.execute("SELECT id FROM eval_suite WHERE slug = ? AND version = ?",
+                        (slug, version)).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def eval_suites() -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT s.*, (SELECT COUNT(*) FROM eval_case k WHERE k.suite_id = s.id) AS n_cases "
+            "FROM eval_suite s ORDER BY s.kind, s.slug, s.version").fetchall())
+
+
+def eval_case_upsert(suite_id: int, case_key: str, prompt: str,
+                     grader_json: str = "{}", tier: str = "full", ord_: int = 0) -> int:
+    """Insert or update one case. Returns its id."""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO eval_case(suite_id, case_key, prompt, grader_json, tier, ord) "
+            "VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(suite_id, case_key) DO UPDATE SET "
+            "  prompt = excluded.prompt, grader_json = excluded.grader_json, "
+            "  tier = excluded.tier, ord = excluded.ord",
+            (int(suite_id), case_key, prompt, grader_json, tier, int(ord_)))
+        row = c.execute("SELECT id FROM eval_case WHERE suite_id = ? AND case_key = ?",
+                        (int(suite_id), case_key)).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def eval_cases(suite_id: int, tier: str = "") -> list[sqlite3.Row]:
+    """Cases in a suite. tier='quick' returns only the subset; anything else returns all.
+
+    'quick' is a SUBSET of the suite, not a sibling tier, so asking for the full set must not
+    filter on tier at all. Filtering `tier = 'full'` would silently drop every case marked
+    quick and shrink the suite to whatever nobody flagged.
+    """
+    sql = "SELECT * FROM eval_case WHERE suite_id = ?"
+    args: list = [int(suite_id)]
+    if tier == "quick":
+        sql += " AND tier = 'quick'"
+    sql += " ORDER BY ord, id"
+    with _LOCK, _conn() as c:
+        return list(c.execute(sql, args).fetchall())
+
+
+def eval_create_run(suite_id: int, backend: str, tier: str, max_tokens: int,
+                    started_at: float) -> int:
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO eval_run(suite_id, backend, tier, status, started_at, max_tokens) "
+            "VALUES(?, ?, ?, 'running', ?, ?)",
+            (int(suite_id), backend, tier, started_at, int(max_tokens)))
+        return int(cur.lastrowid)
+
+
+def eval_finish_run(run_id: int, status: str, finished_at: float, note: str = "") -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE eval_run SET status = ?, finished_at = ?, note = ? WHERE id = ?",
+                  (status, finished_at, note, int(run_id)))
+
+
+def eval_add_result(run_id: int, case_id: int, alias: str, **kw) -> int:
+    """Store one generation. Replaces any previous row for the same (run, case, model).
+
+    REPLACE rather than IGNORE because a retried case produces new text, and a grade left
+    attached to text that no longer exists is worse than no grade. The score columns are not
+    carried over by the replace - they reset to NULL along with the row, which is correct:
+    new output has not been judged yet.
+    """
+    cols = ("response_text", "gen_n", "gen_tps", "total_ms", "truncated", "err")
+    _empty = {"response_text": "", "err": "", "truncated": 0}
+    vals = [int(run_id), int(case_id), alias] + [
+        _empty[k] if (kw.get(k) is None and k in _empty) else kw.get(k) for k in cols
+    ]
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT OR REPLACE INTO eval_result(run_id, case_id, alias, " + ", ".join(cols) +
+            ") VALUES(" + ", ".join("?" * (len(cols) + 3)) + ")", vals)
+        return int(cur.lastrowid)
+
+
+def eval_grade(result_id: int, grader: str, passed: int | None, score: float | None,
+               detail_json: str, graded_at: float) -> None:
+    """Write the grading half of a row. Called by the offline pass, never by the runner."""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "UPDATE eval_result SET graded_at = ?, grader = ?, passed = ?, score = ?, "
+            "detail_json = ? WHERE id = ?",
+            (graded_at, grader, passed, score, detail_json, int(result_id)))
+
+
+def eval_ungraded(run_id: int = 0, limit: int = 500) -> list[sqlite3.Row]:
+    """Rows awaiting a grade, with the case data a grader needs joined in.
+
+    Errored generations are skipped. There is no text to judge, and scoring them zero would
+    fold an infrastructure failure into a capability number.
+    """
+    sql = ("SELECT r.*, k.case_key, k.grader_json, s.slug, s.version, s.kind "
+           "FROM eval_result r "
+           "JOIN eval_case  k  ON k.id = r.case_id "
+           "JOIN eval_run   run ON run.id = r.run_id "
+           "JOIN eval_suite s  ON s.id = run.suite_id "
+           "WHERE r.graded_at IS NULL AND r.err = ''")
+    args: list = []
+    if run_id:
+        sql += " AND r.run_id = ?"
+        args.append(int(run_id))
+    sql += " ORDER BY r.id LIMIT ?"
+    args.append(int(limit))
+    with _LOCK, _conn() as c:
+        return list(c.execute(sql, args).fetchall())
+
+
+def eval_runs(limit: int = 25) -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT run.*, s.slug, s.version, s.kind, s.title, "
+            "  (SELECT COUNT(*) FROM eval_result r WHERE r.run_id = run.id) AS n_results, "
+            "  (SELECT COUNT(DISTINCT r.alias) FROM eval_result r WHERE r.run_id = run.id) "
+            "    AS n_models, "
+            "  (SELECT COUNT(*) FROM eval_result r WHERE r.run_id = run.id "
+            "     AND r.graded_at IS NOT NULL) AS n_graded "
+            "FROM eval_run run JOIN eval_suite s ON s.id = run.suite_id "
+            "ORDER BY run.id DESC LIMIT ?", (int(limit),)).fetchall())
+
+
+def eval_run(run_id: int) -> sqlite3.Row | None:
+    with _LOCK, _conn() as c:
+        return c.execute(
+            "SELECT run.*, s.slug, s.version, s.kind, s.title "
+            "FROM eval_run run JOIN eval_suite s ON s.id = run.suite_id "
+            "WHERE run.id = ?", (int(run_id),)).fetchone()
+
+
+def eval_results(run_id: int) -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT r.*, k.case_key, k.tier FROM eval_result r "
+            "JOIN eval_case k ON k.id = r.case_id "
+            "WHERE r.run_id = ? ORDER BY r.alias, k.ord, k.id", (int(run_id),)).fetchall())
+
+
+def eval_model_scores() -> list[sqlite3.Row]:
+    """Latest graded score per (model, suite). The row a badge renders from.
+
+    "Latest" is by run id, not by best score: a badge has to describe the model as it is now,
+    not on its best day.
+
+    The CTE is load-bearing. Grouping eval_result by (suite, alias) and taking MAX(run_id) in
+    the same SELECT looks equivalent and is not - the other aggregates would then span every
+    run the model ever did, so one bad early run would drag a good latest one down forever.
+    Pinning the run id first and aggregating only that run's rows is the whole difference.
+    """
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            """
+            WITH latest AS (
+                SELECT run.suite_id AS suite_id, r.alias AS alias, MAX(run.id) AS run_id
+                FROM eval_result r
+                JOIN eval_run run ON run.id = r.run_id
+                WHERE r.graded_at IS NOT NULL
+                GROUP BY run.suite_id, r.alias
+            )
+            SELECT s.slug, s.version, s.kind, s.title, l.alias, l.run_id,
+                   run.tier                                       AS tier,
+                   COUNT(*)                                       AS n_cases,
+                   SUM(CASE WHEN r.passed = 1 THEN 1 ELSE 0 END)  AS n_passed,
+                   AVG(r.score)                                   AS mean_score,
+                   MAX(r.graded_at)                               AS graded_at
+            FROM latest l
+            JOIN eval_result r  ON r.run_id = l.run_id AND r.alias = l.alias
+            JOIN eval_run  run  ON run.id = l.run_id
+            JOIN eval_suite s   ON s.id = run.suite_id
+            WHERE r.graded_at IS NOT NULL
+            GROUP BY l.run_id, l.alias
+            ORDER BY s.slug, l.alias
+            """).fetchall())
