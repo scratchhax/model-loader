@@ -688,6 +688,18 @@
           {% if r.err %}
           <tr><td colspan="9" class="pb-1 text-[11px] font-mono text-rose-600 dark:text-rose-400">{{ r.err }}</td></tr>
           {% endif %}
+          {# The response itself. Collapsed, because this table is about speed - but a run
+             whose output you cannot read is one you have to take on trust, and this is the
+             exact text every capability score will be computed from. Rows recorded before
+             the column existed have none, and simply show nothing. #}
+          {% if r.response_text %}
+          <tr><td colspan="9" class="pb-1.5">
+            <details class="text-[11px]">
+              <summary class="cursor-pointer select-none text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">output &middot; {{ r.response_text | length }} chars</summary>
+              <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-2 font-mono leading-relaxed dark:bg-slate-800/60">{{ r.response_text }}</pre>
+            </details>
+          </td></tr>
+          {% endif %}
           {% endfor %}
         </tbody>
       </table>
