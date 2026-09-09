@@ -296,6 +296,18 @@
         Every stop is a real, achievable config — the slider snaps to computed points, it does not interpolate.
         While Custom is selected, Fill form uses this point.
       </p>
+      {# Without this the slider reads as broken on a fit model: you drag it, press Fill, and
+         nothing about placement changes. It is not ignoring you — placement is no longer ours
+         to write. #}
+      {% if 'fit' in rec.values %}
+      <p class="mt-2 text-[11px] rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-2 py-1.5">
+        On this model the slider writes <span class="font-mono">ctx-size</span> and nothing else.
+        It runs with <span class="font-mono">fit = on</span>, so llama.cpp picks the layer split
+        at load time, when it can see real free VRAM — the GPU and speed figures above are what
+        Autoconfig <em>would</em> have chosen, not what gets written. Pinning them here would
+        switch the fitter off.
+      </p>
+      {% endif %}
     </div>
 
     {# Fewer than three presets is normal, not a bug: the frontier only keeps offload points
@@ -642,12 +654,20 @@ function applyAutoconfig(mode) {
   if (c) {
     values = Object.assign({}, values);
     values['ctx-size'] = String(c.total_ctx);
-    // clear any offload key the base recommendation set, then apply this point's
-    delete values['cpu-moe']; delete values['n-cpu-moe'];
-    if (c.kind === 'ngl')            { values['ngl'] = String(c.ngl); }
-    else if (c.kind === 'n-cpu-moe') { values['n-cpu-moe'] = String(c.n_cpu_moe); values['ngl'] = '999'; }
-    else if (c.kind === 'cpu-moe')   { values['cpu-moe'] = 'true'; values['ngl'] = '999'; }
-    else                             { values['ngl'] = '999'; }
+    // Placement keys are ours to write ONLY when the recommendation did not defer to
+    // llama.cpp's fitter. `--fit` adjusts arguments that are UNSET, so setting ngl here
+    // disables it — and every branch below sets ngl. Before this guard, dragging the slider
+    // on a MoE model produced `fit=on` + `ngl=999` + `n-cpu-moe=N`, which is exactly the
+    // pinned config that OOMed Flash-Next. The displaced-clearing loop below could not undo
+    // it either, because it deliberately skips keys the slider re-set.
+    if (!('fit' in values)) {
+      // clear any offload key the base recommendation set, then apply this point's
+      delete values['cpu-moe']; delete values['n-cpu-moe'];
+      if (c.kind === 'ngl')            { values['ngl'] = String(c.ngl); }
+      else if (c.kind === 'n-cpu-moe') { values['n-cpu-moe'] = String(c.n_cpu_moe); values['ngl'] = '999'; }
+      else if (c.kind === 'cpu-moe')   { values['cpu-moe'] = 'true'; values['ngl'] = '999'; }
+      else                             { values['ngl'] = '999'; }
+    }
   }
   const setField = (k, v) => {
     const sel = 'input[name="fld_' + CSS.escape(k) + '"], select[name="fld_' + CSS.escape(k) + '"], textarea[name="fld_' + CSS.escape(k) + '"]';
