@@ -34,23 +34,52 @@ This is the part most worth understanding, because getting it wrong produces an 
 
 Per-card capacities come from the live probe. When they are unavailable — a Vulkan backend with no SMI tool, for instance — it falls back to dividing the pool evenly, which is correct only for identical cards.
 
-## Balancing a multi-GPU split by bytes
+## Placement is llama.cpp's job, not ours
 
-`split-mode = layer` divides layers **by count**, weighted by `--tensor-split`. That is right for a dense model, where every layer costs the same. It is badly wrong for a MoE under `--n-cpu-moe N`:
+Autoconfig used to compute MoE placement itself: an explicit `n-cpu-moe`, plus a `tensor-split`
+that equalised **bytes** rather than layer count. The reasoning was sound — `split-mode = layer`
+divides layers by count, and a MoE under `--n-cpu-moe N` has two wildly different kinds of layer
+(attention-only below the threshold, full experts above it), so an even split hands one card
+nearly all the expensive ones.
 
-- layers `0 .. N-1` keep only attention on the GPU — cheap
-- layers `N .. L-1` carry full experts — roughly an order of magnitude more
+The trouble is that on a model which massively overflows VRAM, that estimate has to be exactly
+right or nothing loads at all. It was not:
 
-An even split hands one card nearly all the expensive layers. Measured on a 40-layer, 256-expert 35B at `n-cpu-moe=24`: llama.cpp tried to allocate **15.0 GiB on device 1 of an 11.9 GiB card** while device 0 still had ~9 GiB free.
+- **Compute buffers were never in the budget.** Measured at **3.6 GiB on one card**, against an
+  assumed 1–2 GB.
+- **They scale with context**, which an `8 * ubatch * layers * hidden` rule does not model at all:
+  the same card wanted **672 MiB at 32K and 3608 MiB at 256K**.
+- Our `tensor-split 40,8` against llama.cpp's own `20,29` — near inverted. The OOM landed on the
+  card we had loaded 5:1.
 
-Autoconfig computes an explicit `tensor-split` that equalises **bytes**, not layer count:
+So Autoconfig now emits `fit = on` for the MoE-offload path and leaves `ngl`, `tensor-split`,
+`cpu-moe` and `n-cpu-moe` **unset**. `ctx-size` stays pinned, so the fitter works *around* the
+context you asked for instead of silently shrinking it.
 
-- each layer is costed as attention + its share of KV, plus experts if it is above the `n-cpu-moe` threshold
-- the projector and compute buffer are charged to device 0, since they are not layer-split
-- the partition minimises the heaviest card **relative to its own capacity**, so a 24 GB card beside a 12 GB one receives proportionally more rather than an equal share
-- no `tensor-split` is emitted at all for dense models or single-GPU backends, where an even split is already correct
+**`--fit` only adjusts arguments that are UNSET.** Pinning `ngl` is precisely what disabled it —
+the log reads `n_gpu_layers already set by user to 999, abort`. That is why the fit path clears
+those keys rather than leaving them in place.
 
-Balancing that same model by bytes loaded it at 9.7 / 10.8 GiB across the two cards with the full 256K context.
+Measured on 2× RTX 5070 (23.9 GiB pooled), with the `cache-ram` budget below applied at the same
+time:
+
+| model | before | after |
+|---|---|---|
+| Qwen3.8-Flash-Next (177B `qwen4exp`, 83.8 GiB weights) | autoconfig **OOMed** | ~19.5 tok/s at the full 262144 ctx |
+| gemma-4-26B-A4B | 68.9 gen / 65.2 prompt | **105.9 gen / 282.4 prompt** |
+
+Deferring is *faster*, not merely safer: our hand-computed split had left 4 GiB of VRAM unused,
+and gemma's `n-cpu-moe = 6` was offloading experts that did not need offloading.
+
+Dense models are unaffected and keep `ngl = 999`.
+
+This is deliberately not architecture-specific. Qwen4 proper will arrive with a layout nobody
+here has seen, and llama.cpp will know how to size it before we do.
+
+**One failure mode to know about:** `--fit` fails *slow*, not loud. If something else is holding
+VRAM it silently puts more on the CPU rather than erroring. That is fine under the router, which
+evicts first at `--models-max 1`, but a manual run straight after killing another server will
+mis-fit unless the VRAM has actually been released.
 
 ## KV cache math
 
@@ -107,7 +136,7 @@ Values above the model's native context (GGUF `context_length`) are capped at `2
 
 **Dense models** buy context by moving whole layers off the GPU with `ngl`. Those layers live in system RAM and every token traverses them on the CPU, so the speed cost is steep — this is what `_CPU_LAYER_PENALTY` models.
 
-**MoE models** offload expert weights instead, with `--n-cpu-moe N` (first N layers' experts on CPU) or `--cpu-moe` (all of them). This is far cheaper per byte than dense offload, because only the active experts are read per token.
+**MoE models** offload expert weights instead, which is far cheaper per byte than dense offload because only the active experts are read per token. Autoconfig no longer chooses the split itself — it emits `fit = on` and hands placement to llama.cpp. See [Placement is llama.cpp's job](#placement-is-llamacpps-job-not-ours).
 
 The Config page offers four presets, always:
 
@@ -119,6 +148,36 @@ The Config page offers four presets, always:
 When a model fits entirely on the GPU at full context, the presets collapse to that single answer rather than inventing tradeoffs that don't exist. The KV cache always stays on the GPU.
 
 **The speed percentages are an ordering hint, not a benchmark.** They come from `_CPU_LAYER_PENALTY`, calibrated on one dense model. They will reliably tell you Fast beats Long context; they will not tell you your tokens per second, and for MoE models they over-estimate the cost of offload. Benchmark before trusting a number.
+
+## The prompt cache budget (`cache-ram`)
+
+`llama-server` defaults `--cache-ram` to **8192 MiB**, sized for small contexts. It is
+load-bearing. Measured on gemma-4-26B-A4B, re-asking a conversation after another model had
+displaced it:
+
+| `cache-ram` | prompt tokens re-evaluated | prompt ms | served from cache |
+|---|---|---|---|
+| 8192 | **5** | 111 | 1179 |
+| 64 | 1177 | 283 | 7 |
+| 0 | 1177 | 285 | 7 |
+
+Undersize it and a 3.7× time-to-first-token win disappears. It matters most for OpenWebUI, which
+resends the whole conversation every turn.
+
+Autoconfig sizes it from what one conversation actually costs:
+
+```
+clamp(4 × kv_cache_bytes(arch, ctx),  lower = 8192 MiB,  upper = host_ram − cpu_weights − 8 GiB)
+```
+
+Deriving it from `kv_cache_bytes()` rather than parameter count is what makes it right for
+**`qwen4exp`**, where only 12 of 48 layers carry a KV cache that grows with context and the rest
+hold a fixed-size recurrent state. Per conversation at 32K: Flash-Next **0.52 GiB**, gemma-4-26B
+1.45, Qwen3.8-27B 1.25. A parameter-count rule would size the 177B model roughly 3× too
+generously.
+
+The upper clamp subtracts host-resident weights, so an offloaded MoE cannot evict its own mmapped
+experts to make room for a prompt cache.
 
 ## Multimodal projectors
 
@@ -155,11 +214,37 @@ Two further measurements worth recording:
 - `_CPU_LAYER_PENALTY = 20.0` verified on the same model: `ngl=999` gave 34.2 tok/s, `ngl=56` gave 9.7 tok/s. Predicted 28% of full speed, measured 28.4%.
 - `-ub 2048` was tried and reverted. It cost **4.7 GB**, not the few hundred megabytes expected, and OOM'd a configuration that otherwise fit.
 
-## What Autoconfig does not touch
+## Autoconfig owns a declared domain
 
-Autoconfig fills the fields it has an opinion about and leaves everything else exactly as written — custom samplers, exotic flags, your `n-threads`, your `chat-template`.
+`AUTOCONFIG_DOMAIN` is the set of keys Autoconfig has an opinion about. For each one it either
+sets a value or wants the key **gone**, and that second half is `displaced = domain − values`.
+**Fill clears the displaced keys**, which makes applying Autoconfig destructive *within its
+domain* and inert everywhere outside it.
 
-The panel is a **suggestion**. It pre-fills the form; nothing reaches `models.ini` until you click Save, and a banner tells you when what you are previewing differs from what is currently running.
+That second half used to be hand-maintained, and held only `{cpu-moe, n-cpu-moe}`. Fill wrote the
+keys it had values for and touched nothing else, so a stale `ngl = 999` and `tensor-split = 17,13`
+survived, Save wrote them straight back, and the panel cheerfully reported `n-cpu-moe → unset`
+while nothing changed on disk. The symptom was "I hit Fill form, I hit Save, no changes are being
+made".
+
+`model` is the one carve-out (`_NEVER_CLEAR`): a section with no model file is not a model.
+
+A self-check, `_domain_gaps()`, surfaces any key Autoconfig assigns but has not declared, as a
+quirk on the panel. **It fired on its first run**, naming three keys a by-eye enumeration had
+missed — `spec-draft-n-max`, `spec-draft-n-min`, `spec-draft-p-min` — because they are written
+from a spec profile's `knobs` dict rather than a literal assignment. They are now folded in by
+reference to `SPEC_PROFILE_KEYS` so they cannot drift again.
+
+**Everything outside the domain is left exactly as written**: custom samplers, exotic flags, your
+`n-threads`, your `chat-template`, plus `lora`, `control-vector*`, `override-kv`,
+`override-tensor`, `tags` and `alias`. Wiping the whole section on apply was considered and
+rejected for exactly that reason — Autoconfig does not model those, so it would delete them
+silently.
+
+The panel is still a **suggestion**. It pre-fills the form; nothing reaches `models.ini` until you
+click Save, and a banner tells you when what you are previewing differs from what is currently
+running. But read the diff before saving: within the domain, Fill will clear a hand-tuned value it
+does not want.
 
 ## Overriding it
 

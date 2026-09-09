@@ -8,7 +8,7 @@
 - **Alpine.js** — small client-side interactions (tab switches, modals, clipboard).
 - **Tailwind CSS via CDN** — no build step. `theme.css` is a thin extension for one-off colors.
 - **docker SDK for Python** — container discovery, exec, stats.
-- **sqlite** — app-level state (HF token, prompts, download history, avatar cache).
+- **sqlite** — app-level state (HF token, prompts, download history, avatar cache, benchmark results including each response's text, and your per-model capability badges).
 
 Everything ships as one Docker image. Deps in `requirements.txt` are pinned. Python 3.12 slim base.
 
@@ -24,7 +24,7 @@ app/
   gguf_meta.py        Hand-rolled GGUF v3 metadata reader (no numpy).
   ini.py              models.ini schema (98 fields, 10 tiers) + parser + writer.
   downloader.py       Parallel-range download engine with sqlite-backed job history.
-  db.py               Sqlite prefs (schema in module docstring).
+  db.py               Sqlite prefs, benchmark results, badges (schema inline in init()).
   migrate_layout.py   One-shot: flat GGUF layout -> per-model-subdir + absolute paths.
   config.py           pydantic-settings for env vars.
   utils.py            Small helpers (size formatting, stem parsing, etc.).
@@ -100,7 +100,9 @@ See "On OpenWebUI reconcile" above. Writing directly to `webui.db` is the only w
 
 ### Autoconfig is a suggestion, not an action
 
-The Config page shows Autoconfig's recommendation in a panel, but doesn't apply it — you manually save the form. This means you can pull up Autoconfig for reference without risking overwriting hand-tuned values.
+The Config page shows Autoconfig's recommendation in a panel, but doesn't apply it — you manually save the form, so you can pull it up for reference without anything reaching `models.ini`.
+
+Once you do press Fill, though, it is **destructive within its declared domain**: `AUTOCONFIG_DOMAIN` lists every key Autoconfig has an opinion about, and Fill clears the ones it wants unset as well as writing the ones it has values for. That is deliberate — the alternative left stale placement keys behind that Save then wrote straight back — but it means a hand-tuned value inside the domain will be cleared. Keys outside the domain are never touched. See `docs/AUTOCONFIG.md`.
 
 ## What's intentionally not here
 
