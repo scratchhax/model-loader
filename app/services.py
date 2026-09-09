@@ -1586,7 +1586,6 @@ def projector_modalities(mmproj_rel_or_abs: str) -> frozenset:
     The projector declares itself: a vision encoder carries clip.vision.* keys, an audio
     encoder clip.audio.*. Cached on (path, size, mtime) since this reads a file header.
     """
-    from pathlib import Path as _Path
     raw_path = (mmproj_rel_or_abs or "").strip()
     if not raw_path:
         return frozenset()

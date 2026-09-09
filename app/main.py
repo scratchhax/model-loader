@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
@@ -931,8 +931,7 @@ def _gguf_hints_for(name: str) -> tuple[dict[str, str], list[str]]:
         except OSError:
             pass
         # Distinguish real sharding (multi-part files) from "single file in a subdir"
-        from .utils import shard_key as _sk
-        _, part_idx, part_total = _sk(Path(model_rel).name)
+        _, part_idx, part_total = shard_key(Path(model_rel).name)
         if part_idx is not None and part_total and part_total > 1:
             hints.insert(0, f"Sharded model ({part_total} parts) → `model = {model_rel}` pre-filled to the first shard; llama-server auto-loads the rest.")
         else:
@@ -1244,7 +1243,7 @@ async def config_section_rename(request: Request, name: str) -> Response:
         return Response(status_code=200,
                         headers={"HX-Redirect": f"/config?err=section+already+exists:+{new}"})
     if not ini.rename_section(name, new):
-        return Response(status_code=200, headers={"HX-Redirect": f"/config?err=rename+failed"})
+        return Response(status_code=200, headers={"HX-Redirect": "/config?err=rename+failed"})
 
     # Reconcile OpenWebUI's per-connection whitelists in ONE pass (each write restarts
     # open-webui, so doing this as two passes would cost two restarts).

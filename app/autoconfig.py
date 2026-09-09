@@ -328,10 +328,6 @@ class BackendPlan:
     max_ctx: int                             # largest ctx that fits with reserve
     fits_at_all: bool
 
-    @property
-    def native_fits(self) -> bool:
-        return any(r.fits and r.ctx == max(x.ctx for x in self.rows) for r in self.rows) if self.rows else False
-
 
 @dataclass
 class PresetOption:
@@ -892,10 +888,6 @@ def _presets_from_frontier(frontier: list[tuple[int, int, float, float]], backen
     """Pick Fast / Balanced / Long-ctx from the frontier."""
     if not frontier:
         return []
-    # normalize
-    max_ctx = max(f[1] for f in frontier)
-    min_ncm = min(f[0] for f in frontier)
-    max_ncm = max(f[0] for f in frontier)
     fast_min_ctx = 8192
 
     def _speed_score(ncm: int) -> float:
@@ -981,7 +973,6 @@ def _find_mtp(models_dir: "Path | None", section_name: str, subdir: str = "") ->
     """
     if models_dir is None:
         return ""
-    from . import ini
 
     def _pick(folder: "Path", prefix: str) -> str:
         cands = []

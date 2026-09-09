@@ -6,7 +6,6 @@ top-level original is removed.
 """
 from __future__ import annotations
 
-import io
 import shutil
 from pathlib import Path
 
