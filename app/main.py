@@ -41,11 +41,6 @@ def _startup() -> None:
     hw.start_sampler()
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"ok": True}
-
-
 @app.get("/palette.json")
 def palette() -> dict:
     """Everything Cmd+K can jump to or trigger."""
