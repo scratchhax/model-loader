@@ -60,16 +60,31 @@ context you asked for instead of silently shrinking it.
 the log reads `n_gpu_layers already set by user to 999, abort`. That is why the fit path clears
 those keys rather than leaving them in place.
 
-Measured on 2× RTX 5070 (23.9 GiB pooled), with the `cache-ram` budget below applied at the same
-time:
+This applies to the **expert-offload path only** — `off_kind in ("cpu-moe", "n-cpu-moe")`. A model
+that fits entirely on the GPU still gets `ngl = 999`, and that is deliberate: `ngl = 999` has
+nothing to estimate, while `--fit` has to decide and is measurably conservative (it left ~3.4 GiB
+of VRAM unclaimed on Flash-Next). On a model that would have fit anyway, that conservatism can
+only cost layers.
 
-| model | before | after |
-|---|---|---|
-| Qwen3.8-Flash-Next (177B `qwen4exp`, 83.8 GiB weights) | autoconfig **OOMed** | ~19.5 tok/s at the full 262144 ctx |
-| gemma-4-26B-A4B | 68.9 gen / 65.2 prompt | **105.9 gen / 282.4 prompt** |
+Measured on 2× RTX 5070 (23.9 GiB pooled):
 
-Deferring is *faster*, not merely safer: our hand-computed split had left 4 GiB of VRAM unused,
-and gemma's `n-cpu-moe = 6` was offloading experts that did not need offloading.
+| model | config | gen tok/s | prompt tok/s |
+|---|---|---|---|
+| Qwen3.8-Flash-Next (177B `qwen4exp`, 83.8 GiB weights) | our pinned split | **OOM** | — |
+| | `fit = on` | ~19.5 at the full 262144 ctx | 23.6 |
+| gemma-4-26B-A4B (fits entirely) | pinned `n-cpu-moe=6`, `ts=17,13` | 68.9 | 65.2 |
+| | `fit = on` | 84.5 | 203.2 |
+| | **`ngl = 999`** | **105.9** | **282.4** |
+
+Read those two models as separate lessons. For **Flash-Next**, deferring is the difference between
+running and not running at all. For **gemma**, which was never overflowing, the win came from
+*removing* a bad hand-tuned split and going back to `ngl = 999` — `fit` was 20% slower than simply
+putting everything on the GPU. Deferring is right when placement is genuinely hard, not as a
+default.
+
+(gemma's final figure also had the `cache-ram` budget below applied, so the 84.5 → 105.9 step is
+not a fully isolated comparison. `cache-ram` is a prompt-cache budget and should not move
+steady-state generation much, but it was not A/B'd on its own.)
 
 Dense models are unaffected and keep `ngl = 999`.
 
