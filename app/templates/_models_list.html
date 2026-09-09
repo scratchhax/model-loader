@@ -54,8 +54,20 @@
             <div class="min-w-0">
               <a href="/model/{{ g.route_key }}"
                  class="font-mono truncate block hover:underline">{{ g.display_name }}</a>
-              {% if owner or g.is_sharded or g.subdir %}
+              {% set _shape = (shapes or {}).get(g.display_name) %}
+              {% if owner or g.is_sharded or g.subdir or _shape %}
               <div class="text-xs text-slate-500 dark:text-slate-400 mt-0.5 truncate flex flex-wrap items-center gap-1">
+                {# MoE vs dense, because it decides what offloading costs. The tooltip carries
+                   the consequence rather than the trivia: on a dense model every weight is read
+                   every token, so --cpu-moe does nothing and any offloaded layer is paid on
+                   every token. #}
+                {% if _shape and _shape.is_moe %}
+                <span class="rounded bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300 px-1.5 py-0.5 font-mono"
+                      title="Mixture of Experts ({{ _shape.arch }}): {{ _shape.expert_count }} experts, {{ _shape.expert_used }} routed per token. Only the routed experts are read each token, so spilling experts to system RAM with --cpu-moe / --n-cpu-moe costs far less than offloading layers of a dense model.">{{ _shape.label }}</span>
+                {% elif _shape %}
+                <span class="rounded bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 px-1.5 py-0.5 font-mono"
+                      title="Dense ({{ _shape.arch }}): every weight is read for every token, so any layer offloaded to system RAM is paid on every token. --cpu-moe and --n-cpu-moe do nothing on this model.">dense</span>
+                {% endif %}
                 {% if owner %}<span>{{ owner }}</span>{% endif %}
                 {% if g.subdir %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono">📁 {{ g.subdir }}/</span>{% endif %}
                 {% if g.is_sharded %}<span>· {{ g.parts | length }} shards</span>{% endif %}

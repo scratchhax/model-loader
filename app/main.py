@@ -272,7 +272,24 @@ async def models_page(request: Request) -> HTMLResponse:
         "update_status": _update_status_map(snap),
         "owui": _owui_visibility(),
         "badges": _badges_for_files(snap),
+        "shapes": _shapes_for_files(snap),
     })
+
+
+def _shapes_for_files(snap) -> dict:
+    """{display_name: ModelShape} for the models list.
+
+    Companions are skipped: an mmproj declares itself as `clip`, which would render a
+    "dense" chip on a projector that has no layers to offload in the first place.
+    """
+    out: dict = {}
+    for g in snap.ggufs:
+        if g.is_companion or not g.parts:
+            continue
+        shape = services.model_shape(g.parts[0])
+        if shape.known:
+            out[g.display_name] = shape
+    return out
 
 
 def _badges_for_files(snap) -> dict:

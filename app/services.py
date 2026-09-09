@@ -19,6 +19,72 @@ from .utils import human_bytes, shard_key
 
 # ---------- models directory ----------
 
+
+@dataclass(frozen=True)
+class ModelShape:
+    """MoE or dense, read from the GGUF header.
+
+    Worth surfacing because it decides what offloading costs, and the two are not close. In a
+    DENSE model every weight is read for every token, so a layer moved to system RAM is paid on
+    every token. In an MoE only the routed experts are read - 8 of 128, or 10 of 512 - so most
+    of what sits in RAM is untouched on any given token. Measured here: Qwen3.8-Flash-Next keeps
+    ~60 GB of experts in DDR4-2667 and still generates at 17 tok/s; a dense model with that much
+    on the same memory would be under 1.
+
+    It also says whether --cpu-moe / --n-cpu-moe will do anything at all. On a dense model they
+    are silently inert.
+    """
+    arch: str = ""
+    expert_count: int = 0
+    expert_used: int = 0
+
+    @property
+    def known(self) -> bool:
+        return bool(self.arch)
+
+    @property
+    def is_moe(self) -> bool:
+        return self.expert_count > 0
+
+    @property
+    def label(self) -> str:
+        if not self.known:
+            return ""
+        if not self.is_moe:
+            return "dense"
+        return f"MoE {self.expert_count}x{self.expert_used}" if self.expert_used else \
+               f"MoE {self.expert_count}"
+
+
+def model_shape(path: Path) -> ModelShape:
+    """Read architecture + expert counts from a GGUF header.
+
+    gguf_meta.read_raw already caches on (path, mtime, size) and only reads the head of the
+    file, so calling this per row on a page render is cheap after the first hit.
+    """
+    from . import gguf_meta
+    try:
+        kv = gguf_meta.read_raw(path)
+    except Exception:  # noqa: BLE001 - an unreadable header is "unknown", never an error page
+        return ModelShape()
+    if isinstance(kv, dict) and isinstance(kv.get("kv"), dict):
+        kv = kv["kv"]
+    if not isinstance(kv, dict):
+        return ModelShape()
+    arch = str(kv.get("general.architecture") or "")
+    if not arch:
+        return ModelShape()
+
+    def _int(suffix: str) -> int:
+        v = kv.get(f"{arch}.{suffix}")
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return ModelShape(arch=arch, expert_count=_int("expert_count"),
+                      expert_used=_int("expert_used_count"))
+
 @dataclass
 class GgufEntry:
     display_name: str        # shown to user (base name, without shard suffix if grouped)
