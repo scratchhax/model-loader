@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 from .config import settings
@@ -169,81 +170,32 @@ def init() -> None:
                 created_at  REAL NOT NULL
             );
 
-            -- ------------------------------------------------ capability evals
-            -- Separate from bench_* deliberately. Those answer "what does my hardware do"
-            -- and go stale whenever a config changes; these answer "what is this model good
-            -- at" and go stale only when the model changes. Sharing tables would mean
-            -- re-running an eval every time a tensor-split moved, and would force a
-            -- throughput measurement to be reduced to a score, which bench_* exists not to
-            -- do.
+            -- What a model is good at, in your judgement. Deliberately manual: the public
+            -- coding benchmarks are contaminated (their problems sit in nearly every model's
+            -- training data, so scores compress into a band that barely discriminates), and
+            -- creative writing has no execution oracle at all - an automated score there is
+            -- an LLM judging an LLM. Reading four responses and rating them yourself is both
+            -- cheaper and better evidence for how these models will do on YOUR prompts.
             --
-            -- Grading is a SECOND pass, on purpose. A run stores generations; a grader fills
-            -- the score columns afterwards. That split is what makes a rubric revisable: the
-            -- expensive half (GPU time) is paid once, and the cheap half (scoring) can be
-            -- redone over history for free.
-            CREATE TABLE IF NOT EXISTS eval_suite (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                slug    TEXT NOT NULL,                  -- humaneval-plus, aider-polyglot
-                -- Version is part of the identity rather than a mutable field. Revising a
-                -- problem set or a rubric has to produce a NEW suite, otherwise old scores
-                -- are silently compared against new criteria and the badge lies.
-                version TEXT NOT NULL DEFAULT '1',
-                kind    TEXT NOT NULL DEFAULT 'code',   -- code | writing
-                title   TEXT NOT NULL DEFAULT '',
-                UNIQUE(slug, version)
+            -- run_id records which benchmark prompted the rating, so a badge can be traced
+            -- back to the output it was formed from rather than being an opinion from
+            -- nowhere. It is nullable and ON DELETE is not enforced: a badge outlives the
+            -- run that inspired it, and losing the run should not silently erase the verdict.
+            CREATE TABLE IF NOT EXISTS model_badge (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                alias      TEXT NOT NULL,
+                category   TEXT NOT NULL,
+                rating     INTEGER NOT NULL,
+                note       TEXT NOT NULL DEFAULT '',
+                run_id     INTEGER,
+                created_at REAL NOT NULL,
+                -- One rating per category per model. Re-rating updates in place, so the
+                -- badge always reflects your latest opinion instead of accumulating a
+                -- history nothing reads.
+                UNIQUE(alias, category)
             );
-            CREATE TABLE IF NOT EXISTS eval_case (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                suite_id    INTEGER NOT NULL,
-                case_key    TEXT NOT NULL,              -- HumanEval/0
-                prompt      TEXT NOT NULL,
-                -- Everything the grader needs and the model must never see: unit tests,
-                -- entry point, forbidden words, target length. Opaque to the runner by
-                -- design, so a new kind of grader needs no schema change.
-                grader_json TEXT NOT NULL DEFAULT '{}',
-                -- 'quick' marks a fixed subset. A full coding suite is hours per model here
-                -- (164 problems x ~1400 tokens is ~3.7 h at 17 tok/s), so a subset is what
-                -- makes the feature usable rather than a nicety.
-                tier        TEXT NOT NULL DEFAULT 'full',
-                ord         INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(suite_id, case_key)
-            );
-            CREATE INDEX IF NOT EXISTS eval_case_suite ON eval_case(suite_id, tier);
-            CREATE TABLE IF NOT EXISTS eval_run (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                suite_id    INTEGER NOT NULL,
-                backend     TEXT NOT NULL,
-                tier        TEXT NOT NULL DEFAULT 'full',
-                status      TEXT NOT NULL,              -- running|done|cancelled|error
-                started_at  REAL NOT NULL,
-                finished_at REAL,
-                max_tokens  INTEGER NOT NULL DEFAULT 3072,
-                note        TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS eval_result (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id        INTEGER NOT NULL,
-                case_id       INTEGER NOT NULL,
-                alias         TEXT NOT NULL,
-                -- Generation half: written while the run is happening.
-                response_text TEXT NOT NULL DEFAULT '',
-                gen_n         INTEGER,
-                gen_tps       REAL,
-                total_ms      REAL,
-                truncated     INTEGER NOT NULL DEFAULT 0,
-                err           TEXT NOT NULL DEFAULT '',
-                -- Grading half: written later, nullable until a grader has run. NULL score
-                -- and score 0.0 mean different things - not yet judged, versus judged and
-                -- wrong - and a badge that conflates them is worse than no badge.
-                graded_at     REAL,
-                grader        TEXT NOT NULL DEFAULT '',
-                passed        INTEGER,
-                score         REAL,
-                detail_json   TEXT NOT NULL DEFAULT '{}',
-                UNIQUE(run_id, case_id, alias)
-            );
-            CREATE INDEX IF NOT EXISTS eval_result_run ON eval_result(run_id, alias);
-            CREATE INDEX IF NOT EXISTS eval_result_ungraded ON eval_result(run_id, graded_at);
+            CREATE INDEX IF NOT EXISTS model_badge_alias ON model_badge(alias);
+
             """
         )
     _add_missing_columns()
@@ -692,194 +644,71 @@ def bench_sweeps(run_id: int) -> list[sqlite3.Row]:
             (int(run_id),)).fetchall())
 
 
-# ---------------------------------------------------------------- capability evals
+# ---------------------------------------------------------------- badges
 #
-# Two-phase by design: a run writes generations, a grader writes scores over them later.
-# Every function here belongs to one of those halves, or is a read for the UI.
+# A fixed vocabulary, not free-form tags. The whole point of a badge is answering "which of
+# these is best at X" at a glance, and two models tagged "good at code" and "solid coder"
+# cannot be compared or sorted. Adding a category here is a one-line change; letting every
+# badge invent its own wording is not reversible once there is data.
+
+BADGE_CATEGORIES = (
+    ("coding", "Coding"),
+    ("writing", "Creative writing"),
+    ("reasoning", "Reasoning"),
+    ("tools", "Tool use"),
+    ("vision", "Vision"),
+)
+BADGE_KEYS = frozenset(k for k, _ in BADGE_CATEGORIES)
+BADGE_LABELS = dict(BADGE_CATEGORIES)
 
 
-def eval_suite_upsert(slug: str, version: str, kind: str, title: str = "") -> int:
-    """Get-or-create a suite. Returns its id.
+def badge_set(alias: str, category: str, rating: int, note: str = "",
+              run_id: int | None = None) -> tuple[bool, str]:
+    """Assign or update one badge. Returns (ok, error).
 
-    Idempotent, so vendoring a problem set can be re-run on every boot without piling up
-    duplicates or needing a separate "have I seeded this yet" flag.
+    Validated here rather than only in the form, because the category is a closed set and a
+    typo would otherwise create a badge that renders as a blank chip and can never be matched
+    by anything looking for a known category.
     """
-    with _LOCK, _conn() as c:
-        c.execute("INSERT OR IGNORE INTO eval_suite(slug, version, kind, title) "
-                  "VALUES(?, ?, ?, ?)", (slug, version, kind, title))
-        row = c.execute("SELECT id FROM eval_suite WHERE slug = ? AND version = ?",
-                        (slug, version)).fetchone()
-        return int(row["id"]) if row else 0
-
-
-def eval_suites() -> list[sqlite3.Row]:
-    with _LOCK, _conn() as c:
-        return list(c.execute(
-            "SELECT s.*, (SELECT COUNT(*) FROM eval_case k WHERE k.suite_id = s.id) AS n_cases "
-            "FROM eval_suite s ORDER BY s.kind, s.slug, s.version").fetchall())
-
-
-def eval_case_upsert(suite_id: int, case_key: str, prompt: str,
-                     grader_json: str = "{}", tier: str = "full", ord_: int = 0) -> int:
-    """Insert or update one case. Returns its id."""
+    alias = (alias or "").strip()
+    if not alias:
+        return False, "no model given"
+    if category not in BADGE_KEYS:
+        return False, f"unknown category {category!r}"
+    try:
+        rating = int(rating)
+    except (TypeError, ValueError):
+        return False, "rating must be a number"
+    if not 1 <= rating <= 5:
+        return False, "rating must be 1-5"
     with _LOCK, _conn() as c:
         c.execute(
-            "INSERT INTO eval_case(suite_id, case_key, prompt, grader_json, tier, ord) "
+            "INSERT INTO model_badge(alias, category, rating, note, run_id, created_at) "
             "VALUES(?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(suite_id, case_key) DO UPDATE SET "
-            "  prompt = excluded.prompt, grader_json = excluded.grader_json, "
-            "  tier = excluded.tier, ord = excluded.ord",
-            (int(suite_id), case_key, prompt, grader_json, tier, int(ord_)))
-        row = c.execute("SELECT id FROM eval_case WHERE suite_id = ? AND case_key = ?",
-                        (int(suite_id), case_key)).fetchone()
-        return int(row["id"]) if row else 0
+            "ON CONFLICT(alias, category) DO UPDATE SET "
+            "  rating = excluded.rating, note = excluded.note, "
+            "  run_id = excluded.run_id, created_at = excluded.created_at",
+            (alias, category, rating, (note or "").strip()[:500],
+             int(run_id) if run_id else None, time.time()))
+    return True, ""
 
 
-def eval_cases(suite_id: int, tier: str = "") -> list[sqlite3.Row]:
-    """Cases in a suite. tier='quick' returns only the subset; anything else returns all.
-
-    'quick' is a SUBSET of the suite, not a sibling tier, so asking for the full set must not
-    filter on tier at all. Filtering `tier = 'full'` would silently drop every case marked
-    quick and shrink the suite to whatever nobody flagged.
-    """
-    sql = "SELECT * FROM eval_case WHERE suite_id = ?"
-    args: list = [int(suite_id)]
-    if tier == "quick":
-        sql += " AND tier = 'quick'"
-    sql += " ORDER BY ord, id"
+def badge_clear(alias: str, category: str) -> None:
     with _LOCK, _conn() as c:
-        return list(c.execute(sql, args).fetchall())
+        c.execute("DELETE FROM model_badge WHERE alias = ? AND category = ?", (alias, category))
 
 
-def eval_create_run(suite_id: int, backend: str, tier: str, max_tokens: int,
-                    started_at: float) -> int:
+def badges_for(alias: str) -> list[sqlite3.Row]:
     with _LOCK, _conn() as c:
-        cur = c.execute(
-            "INSERT INTO eval_run(suite_id, backend, tier, status, started_at, max_tokens) "
-            "VALUES(?, ?, ?, 'running', ?, ?)",
-            (int(suite_id), backend, tier, started_at, int(max_tokens)))
-        return int(cur.lastrowid)
+        return list(c.execute("SELECT * FROM model_badge WHERE alias = ? ORDER BY category",
+                              (alias,)).fetchall())
 
 
-def eval_finish_run(run_id: int, status: str, finished_at: float, note: str = "") -> None:
+def badges_by_alias() -> dict[str, list[sqlite3.Row]]:
+    """Every badge, grouped by model. One query, because the models list needs all of them
+    and asking per row would issue a query per model on every page render."""
+    out: dict[str, list[sqlite3.Row]] = {}
     with _LOCK, _conn() as c:
-        c.execute("UPDATE eval_run SET status = ?, finished_at = ?, note = ? WHERE id = ?",
-                  (status, finished_at, note, int(run_id)))
-
-
-def eval_add_result(run_id: int, case_id: int, alias: str, **kw) -> int:
-    """Store one generation. Replaces any previous row for the same (run, case, model).
-
-    REPLACE rather than IGNORE because a retried case produces new text, and a grade left
-    attached to text that no longer exists is worse than no grade. The score columns are not
-    carried over by the replace - they reset to NULL along with the row, which is correct:
-    new output has not been judged yet.
-    """
-    cols = ("response_text", "gen_n", "gen_tps", "total_ms", "truncated", "err")
-    _empty = {"response_text": "", "err": "", "truncated": 0}
-    vals = [int(run_id), int(case_id), alias] + [
-        _empty[k] if (kw.get(k) is None and k in _empty) else kw.get(k) for k in cols
-    ]
-    with _LOCK, _conn() as c:
-        cur = c.execute(
-            "INSERT OR REPLACE INTO eval_result(run_id, case_id, alias, " + ", ".join(cols) +
-            ") VALUES(" + ", ".join("?" * (len(cols) + 3)) + ")", vals)
-        return int(cur.lastrowid)
-
-
-def eval_grade(result_id: int, grader: str, passed: int | None, score: float | None,
-               detail_json: str, graded_at: float) -> None:
-    """Write the grading half of a row. Called by the offline pass, never by the runner."""
-    with _LOCK, _conn() as c:
-        c.execute(
-            "UPDATE eval_result SET graded_at = ?, grader = ?, passed = ?, score = ?, "
-            "detail_json = ? WHERE id = ?",
-            (graded_at, grader, passed, score, detail_json, int(result_id)))
-
-
-def eval_ungraded(run_id: int = 0, limit: int = 500) -> list[sqlite3.Row]:
-    """Rows awaiting a grade, with the case data a grader needs joined in.
-
-    Errored generations are skipped. There is no text to judge, and scoring them zero would
-    fold an infrastructure failure into a capability number.
-    """
-    sql = ("SELECT r.*, k.case_key, k.grader_json, s.slug, s.version, s.kind "
-           "FROM eval_result r "
-           "JOIN eval_case  k  ON k.id = r.case_id "
-           "JOIN eval_run   run ON run.id = r.run_id "
-           "JOIN eval_suite s  ON s.id = run.suite_id "
-           "WHERE r.graded_at IS NULL AND r.err = ''")
-    args: list = []
-    if run_id:
-        sql += " AND r.run_id = ?"
-        args.append(int(run_id))
-    sql += " ORDER BY r.id LIMIT ?"
-    args.append(int(limit))
-    with _LOCK, _conn() as c:
-        return list(c.execute(sql, args).fetchall())
-
-
-def eval_runs(limit: int = 25) -> list[sqlite3.Row]:
-    with _LOCK, _conn() as c:
-        return list(c.execute(
-            "SELECT run.*, s.slug, s.version, s.kind, s.title, "
-            "  (SELECT COUNT(*) FROM eval_result r WHERE r.run_id = run.id) AS n_results, "
-            "  (SELECT COUNT(DISTINCT r.alias) FROM eval_result r WHERE r.run_id = run.id) "
-            "    AS n_models, "
-            "  (SELECT COUNT(*) FROM eval_result r WHERE r.run_id = run.id "
-            "     AND r.graded_at IS NOT NULL) AS n_graded "
-            "FROM eval_run run JOIN eval_suite s ON s.id = run.suite_id "
-            "ORDER BY run.id DESC LIMIT ?", (int(limit),)).fetchall())
-
-
-def eval_run(run_id: int) -> sqlite3.Row | None:
-    with _LOCK, _conn() as c:
-        return c.execute(
-            "SELECT run.*, s.slug, s.version, s.kind, s.title "
-            "FROM eval_run run JOIN eval_suite s ON s.id = run.suite_id "
-            "WHERE run.id = ?", (int(run_id),)).fetchone()
-
-
-def eval_results(run_id: int) -> list[sqlite3.Row]:
-    with _LOCK, _conn() as c:
-        return list(c.execute(
-            "SELECT r.*, k.case_key, k.tier FROM eval_result r "
-            "JOIN eval_case k ON k.id = r.case_id "
-            "WHERE r.run_id = ? ORDER BY r.alias, k.ord, k.id", (int(run_id),)).fetchall())
-
-
-def eval_model_scores() -> list[sqlite3.Row]:
-    """Latest graded score per (model, suite). The row a badge renders from.
-
-    "Latest" is by run id, not by best score: a badge has to describe the model as it is now,
-    not on its best day.
-
-    The CTE is load-bearing. Grouping eval_result by (suite, alias) and taking MAX(run_id) in
-    the same SELECT looks equivalent and is not - the other aggregates would then span every
-    run the model ever did, so one bad early run would drag a good latest one down forever.
-    Pinning the run id first and aggregating only that run's rows is the whole difference.
-    """
-    with _LOCK, _conn() as c:
-        return list(c.execute(
-            """
-            WITH latest AS (
-                SELECT run.suite_id AS suite_id, r.alias AS alias, MAX(run.id) AS run_id
-                FROM eval_result r
-                JOIN eval_run run ON run.id = r.run_id
-                WHERE r.graded_at IS NOT NULL
-                GROUP BY run.suite_id, r.alias
-            )
-            SELECT s.slug, s.version, s.kind, s.title, l.alias, l.run_id,
-                   run.tier                                       AS tier,
-                   COUNT(*)                                       AS n_cases,
-                   SUM(CASE WHEN r.passed = 1 THEN 1 ELSE 0 END)  AS n_passed,
-                   AVG(r.score)                                   AS mean_score,
-                   MAX(r.graded_at)                               AS graded_at
-            FROM latest l
-            JOIN eval_result r  ON r.run_id = l.run_id AND r.alias = l.alias
-            JOIN eval_run  run  ON run.id = l.run_id
-            JOIN eval_suite s   ON s.id = run.suite_id
-            WHERE r.graded_at IS NOT NULL
-            GROUP BY l.run_id, l.alias
-            ORDER BY s.slug, l.alias
-            """).fetchall())
+        for r in c.execute("SELECT * FROM model_badge ORDER BY alias, category"):
+            out.setdefault(r["alias"], []).append(r)
+    return out

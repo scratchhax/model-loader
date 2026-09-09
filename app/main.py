@@ -17,6 +17,21 @@ from .utils import human_bytes, shard_key
 app = FastAPI(title="Model Loader")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.globals["hue"] = lambda s: sum(ord(c) for c in (s or "")) % 360
+templates.env.globals["badge_categories"] = db.BADGE_CATEGORIES
+templates.env.globals["badge_labels"] = db.BADGE_LABELS
+
+
+def _fmt_ts(v) -> str:
+    """Epoch seconds -> local "2026-09-09 01:23". Empty for anything unparseable, so a
+    missing timestamp renders as nothing rather than as 1970."""
+    from datetime import datetime
+    try:
+        return datetime.fromtimestamp(float(v)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+templates.env.filters["ts"] = _fmt_ts
 
 
 @app.on_event("startup")
@@ -261,7 +276,30 @@ async def models_page(request: Request) -> HTMLResponse:
         "file_to_owner": file_to_owner, "avatars": avatars,
         "update_status": _update_status_map(snap),
         "owui": _owui_visibility(),
+        "badges": _badges_for_files(snap),
     })
+
+
+def _badges_for_files(snap) -> dict:
+    """{display_name: [badge rows]} for the models list.
+
+    Badges are keyed by models.ini alias while the list is keyed by file, and one file can
+    carry several aliases, so the join happens here rather than in the template. Duplicates
+    are collapsed per category keeping the newest - a model served under two names would
+    otherwise render "Coding 4/5" twice with no way to tell which one you meant.
+    """
+    by_alias = db.badges_by_alias()
+    out: dict = {}
+    for g in snap.ggufs:
+        best: dict = {}
+        for a in (g.aliases or []):
+            for b in by_alias.get(a, []):
+                cur = best.get(b["category"])
+                if cur is None or (b["created_at"] or 0) > (cur["created_at"] or 0):
+                    best[b["category"]] = b
+        if best:
+            out[g.display_name] = [best[k] for k, _ in db.BADGE_CATEGORIES if k in best]
+    return out
 
 
 @app.get("/model/{filename:path}", response_class=HTMLResponse)
@@ -1569,6 +1607,32 @@ def benchmark_cancel(request: Request) -> HTMLResponse:
     })
 
 
+@app.post("/badge", response_class=HTMLResponse)
+def badge_assign(request: Request,
+                 alias: str = Form(...),
+                 category: str = Form(...),
+                 rating: int = Form(...),
+                 note: str = Form(""),
+                 run_id: int = Form(0)) -> HTMLResponse:
+    ok, err = db.badge_set(alias, category, rating, note, run_id or None)
+    return templates.TemplateResponse("_badges.html", {
+        "request": request, "alias": alias, "badges": db.badges_for(alias),
+        "run_id": run_id, "badge_err": "" if ok else err,
+    })
+
+
+@app.post("/badge/clear", response_class=HTMLResponse)
+def badge_remove(request: Request,
+                 alias: str = Form(...),
+                 category: str = Form(...),
+                 run_id: int = Form(0)) -> HTMLResponse:
+    db.badge_clear(alias, category)
+    return templates.TemplateResponse("_badges.html", {
+        "request": request, "alias": alias, "badges": db.badges_for(alias),
+        "run_id": run_id, "badge_err": "",
+    })
+
+
 @app.get("/benchmark/banner", response_class=HTMLResponse)
 def benchmark_banner(request: Request) -> HTMLResponse:
     """Site-wide "a benchmark is running" strip. Polled from every page, so it stays cheap:
@@ -1675,11 +1739,13 @@ def benchmark_run(request: Request, run_id: int) -> HTMLResponse:
     ctx = _bench_ctx(request)
     results = db.bench_results(run_id)
     sweeps = db.bench_sweeps(run_id)
+    variants = db.bench_variants(run_id)
     ctx.update({
         "run": db.bench_run(run_id),
-        "variants": db.bench_variants(run_id),
+        "variants": variants,
         "results": results,
         "sweeps": sweeps,
         "charts_json": _json.dumps(_bench_charts(run_id, results, sweeps)),
+        "badges": {v["alias"]: db.badges_for(v["alias"]) for v in variants},
     })
     return templates.TemplateResponse("benchmark.html", ctx)

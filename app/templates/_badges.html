@@ -1,0 +1,41 @@
+{# partial: what you reckon one model is good at, plus the control to say so.
+
+   Swapped in place after every change, so the chips always show what is stored rather than
+   what was typed. Rendered on a benchmark run detail because that is where you have just
+   read the model's actual output - rating it anywhere else would be rating a memory. #}
+<div class="badge-box mt-1.5 flex flex-wrap items-center gap-1.5">
+
+  {% for b in badges %}
+  <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5
+    {% if b.rating >= 4 %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+    {% elif b.rating == 3 %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
+    {% else %}bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300{% endif %}"
+    title="{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5 &mdash; set {{ b.created_at | ts }}{% if b.run_id %} from run #{{ b.run_id }}{% endif %}{% if b.note %} &middot; {{ b.note }}{% endif %}">
+    {{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5
+    <button type="button" class="opacity-50 hover:opacity-100 leading-none"
+            aria-label="remove {{ badge_labels.get(b.category, b.category) }} badge"
+            hx-post="/badge/clear" hx-target="closest .badge-box" hx-swap="outerHTML"
+            hx-vals='{"alias": {{ alias | tojson }}, "category": {{ b.category | tojson }}, "run_id": {{ run_id or 0 }}}'>&times;</button>
+  </span>
+  {% endfor %}
+
+  <form hx-post="/badge" hx-target="closest .badge-box" hx-swap="outerHTML"
+        class="flex flex-wrap items-center gap-1">
+    <input type="hidden" name="alias" value="{{ alias }}">
+    <input type="hidden" name="run_id" value="{{ run_id or 0 }}">
+    <select name="category" aria-label="category"
+            class="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-950">
+      {% for key, label in badge_categories %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+    </select>
+    <select name="rating" aria-label="rating"
+            class="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] tabular-nums dark:border-slate-700 dark:bg-slate-950">
+      {% for n in [5, 4, 3, 2, 1] %}<option value="{{ n }}"{% if n == 3 %} selected{% endif %}>{{ n }}/5</option>{% endfor %}
+    </select>
+    <input type="text" name="note" maxlength="500" placeholder="why (optional)"
+           class="w-40 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-950">
+    <button type="submit"
+            class="rounded border border-slate-300 px-2 py-0.5 text-[11px] hover:border-slate-500 dark:border-slate-700 dark:hover:border-slate-500">rate</button>
+  </form>
+
+  {% if badge_err %}<span class="text-[11px] text-rose-600 dark:text-rose-400">{{ badge_err }}</span>{% endif %}
+</div>

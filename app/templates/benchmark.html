@@ -713,11 +713,18 @@
 
     <div class="mt-3 grid gap-2 md:grid-cols-2">
       {% for v in variants %}
-      <div class="text-[11px] rounded-md bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1.5">
-        <span class="font-mono">{{ v.alias }}</span>
-        &mdash; load time
-        {% if v.load_ms %}<span class="font-semibold">{{ '%.1f' | format(v.load_ms / 1000) }} s</span>
-        {% else %}<span class="text-slate-500">not measured (already resident)</span>{% endif %}
+      <div class="text-[11px] rounded-md bg-slate-50 dark:bg-slate-800/60 px-2.5 py-2">
+        <div>
+          <span class="font-mono">{{ v.alias }}</span>
+          &mdash; load time
+          {% if v.load_ms %}<span class="font-semibold">{{ '%.1f' | format(v.load_ms / 1000) }} s</span>
+          {% else %}<span class="text-slate-500">not measured (already resident)</span>{% endif %}
+        </div>
+        {# Rate it here, having just read its output above, rather than from the models page
+           where you would be rating a memory. #}
+        {% with alias = v.alias, badges = (badges or {}).get(v.alias, []), run_id = run.id %}
+          {% include "_badges.html" %}
+        {% endwith %}
       </div>
       {% endfor %}
     </div>

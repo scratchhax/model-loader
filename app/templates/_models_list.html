@@ -74,6 +74,7 @@
           {% set _loaded = (loaded_map or {}).get(g.model_id) or [] %}
           {% set _us = (update_status or {}).get(g.display_name) %}
           {% set _renamed = g.aliases | reject('equalto', g.stem) | list %}
+          {% set _badges = (badges or {}).get(g.display_name) or [] %}
           <div class="flex flex-col gap-1.5 text-xs">
 
             {# 1 — configured, and under what id #}
@@ -171,6 +172,27 @@
                 {% endfor %}
               {% else %}
                 <span class="text-[10px] text-slate-400 dark:text-slate-600">not loaded</span>
+              {% endif %}
+            </div>
+
+            {# 5 - what it is GOOD at, in your judgement. Set from a benchmark run detail,
+               where the model's actual output is on screen to judge. Rendered even when
+               empty, and labelled "not rated", because a row that simply vanishes makes
+               "never judged" and "judged and poor" look identical. #}
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">good at</span>
+              {% if _badges %}
+                {% for b in _badges %}
+                  <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px]
+                    {% if b.rating >= 4 %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+                    {% elif b.rating == 3 %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
+                    {% else %}bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300{% endif %}"
+                    title="{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5 - your rating, set {{ b.created_at | ts }}{% if b.run_id %} from benchmark run #{{ b.run_id }}{% endif %}{% if b.note %} - {{ b.note }}{% endif %}">
+                    {{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5
+                  </span>
+                {% endfor %}
+              {% else %}
+                <span class="text-[10px] text-slate-400 dark:text-slate-600">not rated</span>
               {% endif %}
             </div>
 
