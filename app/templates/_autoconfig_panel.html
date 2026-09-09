@@ -238,6 +238,15 @@
         </div>
         <div class="mt-1.5 grid grid-cols-2 gap-x-2 text-[11px] font-mono text-slate-600 dark:text-slate-300 tabular-nums">
           <div><span class="text-slate-400">ctx</span> {{ format_ctx(p.ctx) }}</div>
+          {# On the fit path the only figure here that reaches models.ini is ctx. KV is shown
+             because it follows from context and architecture rather than from placement, and
+             the cache always stays on the GPU. Layer counts and the speed estimate are NOT
+             shown: they describe a split llama.cpp will decide for itself at load time, and
+             we measured it choosing 20,29 where we would have written 40,8. #}
+          {% if 'fit' in rec.values %}
+          <div class="text-right"><span class="text-slate-400">KV</span> {{ '%.1f' % p.kv_gb }} GB</div>
+          <div class="col-span-2 mt-0.5 text-slate-400">placement chosen by llama.cpp</div>
+          {% else %}
           <div class="text-right"><span class="text-slate-400">GPU</span> {{ p.gpu_layers }}/{{ p.total_layers }}L</div>
           <div>
             {% if p.offload_kind == 'cpu-moe' %}<span class="text-slate-400">cpu-moe</span> true
@@ -246,6 +255,7 @@
             {% else %}<span class="text-slate-400">no offload</span>{% endif %}
           </div>
           <div class="text-right"><span class="text-slate-400">~</span>{{ '%.0f' % (p.speed_score * 100) }}% speed</div>
+          {% endif %}
         </div>
       </button>
       {% endfor %}
@@ -263,11 +273,17 @@
         </div>
         <div class="mt-1.5 grid grid-cols-2 gap-x-2 text-[11px] font-mono text-slate-600 dark:text-slate-300 tabular-nums">
           <div><span class="text-slate-400">ctx</span> <span x-text="on ? fmt(cur.ctx) : '—'"></span></div>
+          {% if 'fit' in rec.values %}
+          <div class="text-right"><span class="text-slate-400">KV</span>
+            <span x-text="on ? (cur.kv_gb + ' GB') : '\u2014'"></span></div>
+          <div class="col-span-2 mt-0.5 text-slate-400">placement chosen by llama.cpp</div>
+          {% else %}
           <div class="text-right"><span class="text-slate-400">GPU</span>
-            <span x-text="on ? (cur.gpu_layers + '/' + cur.total_layers + 'L') : '—'"></span></div>
-          <div><span class="text-slate-400" x-text="knobLabel()"></span> <span x-text="on ? knobValue() : '—'"></span></div>
+            <span x-text="on ? (cur.gpu_layers + '/' + cur.total_layers + 'L') : '\u2014'"></span></div>
+          <div><span class="text-slate-400" x-text="knobLabel()"></span> <span x-text="on ? knobValue() : '\u2014'"></span></div>
           <div class="text-right"><span class="text-slate-400">~</span><span
-                x-text="on ? Math.round(cur.speed*100)+'% speed' : '—'"></span></div>
+                x-text="on ? Math.round(cur.speed*100)+'% speed' : '\u2014'"></span></div>
+          {% endif %}
         </div>
       </button>
       {% endif %}
@@ -287,8 +303,12 @@
           <div class="text-slate-400">ctx / session</div><div x-text="fmt(cur.ctx)"></div></div>
         <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
           <div class="text-slate-400">ctx-size written</div><div x-text="cur.total_ctx.toLocaleString()"></div></div>
+        {# "weights on GPU" is a property of the split, so it is only meaningful when we are
+           the ones choosing the split. #}
+        {% if 'fit' not in rec.values %}
         <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
           <div class="text-slate-400">weights on GPU</div><div x-text="cur.gpu_gb + ' GB'"></div></div>
+        {% endif %}
         <div class="rounded bg-slate-50 dark:bg-slate-950/40 px-2 py-1">
           <div class="text-slate-400">KV cache</div><div x-text="cur.kv_gb + ' GB'"></div></div>
       </div>
@@ -409,9 +429,10 @@
                   {% elif tone == 'yellow' %}text-yellow-600 dark:text-yellow-400
                   {% elif tone == 'orange' %}text-orange-600 dark:text-orange-400
                   {% else %}text-red-600 dark:text-red-400{% endif %}"
-                  title="{{ title }}{% if row.fits %} · {{ pct }}% of the model on GPU{% endif %}{% if row.offload_kind %} · via {{ row.offload_kind }}{% if row.n_cpu_moe %}={{ row.n_cpu_moe }}{% endif %}{% endif %}">
+                  title="{{ title }}{% if row.fits %} · {{ pct }}% of the model on GPU{% endif %}{% if row.offload_kind and 'fit' not in rec.values %} · via {{ row.offload_kind }}{% if row.n_cpu_moe %}={{ row.n_cpu_moe }}{% endif %}{% endif %}">
                 <div>{% if row.fits %}✓{% else %}✗{% endif %} {{ '%.1f' % row.total_gb }}</div>
-                {% if row.offload_kind %}
+                {# suppressed on the fit path: the offload figure is ours, the split is not #}
+                {% if row.offload_kind and 'fit' not in rec.values %}
                   <div class="text-[9px] leading-tight text-slate-500 dark:text-slate-400 font-sans no-underline">
                     {% if row.offload_kind == 'cpu-moe' %}cpu-moe
                     {% elif row.offload_kind == 'n-cpu-moe' %}ncm={{ row.n_cpu_moe }}
