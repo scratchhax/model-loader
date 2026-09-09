@@ -84,7 +84,13 @@
       </div>
       <div>
         <label class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Max tokens</label>
-        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="{{ max_tokens_ceiling }}" step="128" value="{{ max_tokens_default }}"
+        {# step is 1 deliberately. HTML anchors a step ladder at `min`, not at zero, so
+           min="16" step="128" made the valid values 16+128k - which excludes 3072, the
+           default this very input renders. The browser then blocked submission with "the
+           two nearest valid values are 2960 and 3088" and the form could not submit its
+           own default. A coarser step only shrinks that trap (step=16 still rejects 3000);
+           removing it kills the class. The server clamps to [16, ceiling] regardless. #}
+        <input type="number" name="max_tokens" x-model.number="maxTokens" min="16" max="{{ max_tokens_ceiling }}" step="1" value="{{ max_tokens_default }}"
                class="mt-1 block w-28 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-sm tabular-nums">
         <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same cap for every model, or the numbers aren't comparable.<br>
           Thinking models spend hundreds of tokens reasoning first &mdash; measured here, the hardest prompt
