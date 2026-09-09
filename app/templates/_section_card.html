@@ -1,5 +1,6 @@
 {# expects: s (SectionView) #}
-<div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+<div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4"
+     x-data="{ show: false }">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <div class="flex items-center gap-2">
@@ -25,19 +26,19 @@
       {% endif %}
     </div>
     {% from "_icons.html" import icon %}
-    <div class="flex items-center gap-2 shrink-0"
-         x-data="{ copied: false }">
+    <div class="flex items-center gap-2 shrink-0">
+      {# Show, not Copy. navigator.clipboard is undefined outside a secure context and this
+         app is served over plain HTTP on the LAN, so the old Copy button silently did
+         nothing at all - the promise it returned rejected into a handler that did not
+         exist. Revealing the text and selecting it works everywhere; Ctrl+C then does the
+         rest. The clipboard write is still attempted when the browser actually offers one,
+         so nothing is lost where it did work. #}
       <button type="button"
-              @click="navigator.clipboard.writeText($refs.cli.textContent).then(()=>{copied=true; setTimeout(()=>copied=false, 1200)})"
+              @click="show = !show; if (show) $nextTick(() =&gt; { const el = $refs.cli; const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); if (navigator.clipboard &amp;&amp; window.isSecureContext) { navigator.clipboard.writeText(el.innerText).catch(() =&gt; {}); } })"
               class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
-        <template x-if="!copied">
-          <span class="inline-flex items-center gap-1">{{ icon('copy', 12) }} Copy CLI</span>
-        </template>
-        <template x-if="copied">
-          <span class="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">{{ icon('check', 12) }} copied</span>
-        </template>
+        <span x-show="!show" class="inline-flex items-center gap-1">{{ icon('terminal', 12) }} Show CLI</span>
+        <span x-show="show" x-cloak class="inline-flex items-center gap-1">{{ icon('x', 12) }} Hide CLI</span>
       </button>
-      <span x-ref="cli" class="hidden">{{ s.cli }}</span>
       <button hx-get="/config/section/{{ s.name }}/edit" hx-target="#section-list" hx-swap="innerHTML"
               class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">{{ icon('pencil', 12) }} Edit</button>
       <button hx-post="/config/section/{{ s.name }}/delete" hx-target="#section-list" hx-swap="innerHTML"
@@ -45,4 +46,6 @@
               class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">{{ icon('trash-2', 12) }} Delete</button>
     </div>
   </div>
+  <pre x-show="show" x-cloak x-ref="cli"
+       class="mt-3 select-all overflow-x-auto rounded-lg bg-slate-950 p-3 font-mono text-[11px] leading-snug text-slate-100 whitespace-pre-wrap break-all dark:bg-black">{{ s.cli }}</pre>
 </div>

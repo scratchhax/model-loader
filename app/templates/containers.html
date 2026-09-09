@@ -226,7 +226,7 @@
 </div>
 
 <details class="mt-8 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
-         x-data="{ tab: 'cuda', copied: '' }">
+         x-data="{ tab: 'cuda', copied: '', word: 'copied' }">
   <summary class="cursor-pointer px-4 py-3 text-sm font-medium inline-flex items-center gap-2">
     {{ icon('plus', 14) }} Add another backend
   </summary>
@@ -255,10 +255,10 @@
     {% macro tmpl(key, body) %}
     <div x-show="tab === '{{ key }}'" class="relative">
       <button type="button"
-              @click="navigator.clipboard.writeText($refs.snip_{{ key }}.innerText).then(()=>{copied='{{ key }}'; setTimeout(()=>copied='',1500)})"
+              @click="const el = $refs.snip_{{ key }}; const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); if (navigator.clipboard &amp;&amp; window.isSecureContext) { word='copied'; navigator.clipboard.writeText(el.innerText).catch(() =&gt; {}); } else { word='selected'; } copied='{{ key }}'; setTimeout(()=&gt;copied='',1500)"
               class="absolute top-2 right-2 inline-flex items-center gap-1 rounded-md bg-white/90 dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 px-2 py-0.5 text-[10px]">
         <template x-if="copied !== '{{ key }}'"><span class="inline-flex items-center gap-1">{{ icon('copy', 11) }} copy</span></template>
-        <template x-if="copied === '{{ key }}'"><span class="inline-flex items-center gap-1 text-emerald-600">{{ icon('check', 11) }} copied</span></template>
+        <template x-if="copied === '{{ key }}'"><span class="inline-flex items-center gap-1 text-emerald-600">{{ icon('check', 11) }} <span x-text="word"></span></span></template>
       </button>
       <pre x-ref="snip_{{ key }}" class="rounded-lg bg-slate-950 text-slate-100 dark:bg-black text-[11px] leading-snug p-3 overflow-x-auto font-mono whitespace-pre">{{ body }}</pre>
     </div>
