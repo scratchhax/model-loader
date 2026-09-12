@@ -296,4 +296,6 @@ No frontend build step. No JS bundler. Everything ships from CDN or Jinja. Total
 
 ## License
 
-Personal use. No warranty. Don't expose to the public internet.
+MIT — see [LICENSE](LICENSE). Use it, fork it, ship it.
+
+Keeping it off the public internet is a **security** note, not a licence term: there is no auth and it mounts the Docker socket. See [Security posture](#security-posture).
