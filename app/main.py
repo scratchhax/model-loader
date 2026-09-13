@@ -1519,37 +1519,17 @@ def containers_logs(name: str, q: str = "", level: str = "") -> HTMLResponse:
     return HTMLResponse(safe or "(no output)")
 
 
-def _esc(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 @app.get("/containers/{name}/diagnose", response_class=HTMLResponse)
-def containers_diagnose(name: str) -> HTMLResponse:
-    """Parse a backend's recent log for a failed-load signature and propose a fix."""
+def containers_diagnose(request: Request, name: str) -> HTMLResponse:
+    """Parse a backend's recent log for a failed-load signature and propose a fix.
+
+    Rendered as a Jinja partial for consistency with every other fragment here — Jinja
+    autoescapes the log lines, so no hand-rolled escaping is needed.
+    """
     ok, findings, err = services.diagnose_container(name)
-    if not ok:
-        return HTMLResponse(
-            f'<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-xs">'
-            f'Couldn&#39;t read logs: {_esc(err)}</div>'
-        )
-    if not findings:
-        return HTMLResponse(
-            '<div class="rounded-md bg-slate-50 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 '
-            'text-slate-600 dark:text-slate-400 px-3 py-2 text-xs">'
-            'No recognised failure signature in the recent log. That doesn&#39;t mean it&#39;s healthy — '
-            'just that the cause isn&#39;t one we can name. Check the raw log below.</div>'
-        )
-    rows = []
-    for f in findings:
-        rows.append(
-            '<div class="rounded-md border border-red-200 dark:border-red-900/60 bg-red-50/50 dark:bg-red-950/30 px-3 py-2">'
-            f'<div class="font-mono text-[11px] text-red-700 dark:text-red-300 break-all">{_esc(f["error"])}</div>'
-            f'<div class="mt-1.5 text-xs text-slate-700 dark:text-slate-300">→ {_esc(f["hint"])}</div>'
-            '</div>'
-        )
-    plural = "" if len(findings) == 1 else "s"
-    body = f'<div class="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Possible cause{plural}:</div>'
-    return HTMLResponse(f'<div class="space-y-2">{body}{"".join(rows)}</div>')
+    return templates.TemplateResponse("_diagnose_result.html", {
+        "request": request, "ok": ok, "err": err, "findings": findings,
+    })
 
 
 # ---------- Prompt library ----------
