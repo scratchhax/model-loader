@@ -14,6 +14,7 @@
   <div class="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Possible cause{{ '' if findings | length == 1 else 's' }}:</div>
   {% for f in findings %}
   <div class="rounded-md border border-red-200 dark:border-red-900/60 bg-red-50/50 dark:bg-red-950/30 px-3 py-2">
+    {% if f.model %}<div class="mb-1 text-[11px] font-medium text-slate-700 dark:text-slate-300">{{ f.model }}</div>{% endif %}
     <div class="font-mono text-[11px] text-red-700 dark:text-red-300 break-all">{{ f.error }}</div>
     <div class="mt-1.5 text-xs text-slate-700 dark:text-slate-300">→ {{ f.hint }}</div>
   </div>

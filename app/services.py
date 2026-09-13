@@ -491,12 +491,27 @@ def browser_endpoints(browser_host: str) -> list[dict]:
     return out
 
 
-# Model status values that mean "this is fine" in a router deployment. A model in any of these
-# states is NOT a failure — crucially including unloaded (on-demand load) and loading. Anything
-# else in the error family is surfaced as a real failure; unknown-but-benign future values are
-# not flagged, so we never cry wolf on a healthy box.
-_LOAD_OK = frozenset({"loaded", "unloaded", "loading", "not_provided", "not-provided", "empty"})
-_LOAD_FAILED = frozenset({"error", "failed", "load_failed", "load-failed"})
+def _load_failure(status: dict) -> tuple[bool, int | None]:
+    """(failed, exit_code) for one model's /v1/models status object.
+
+    Measured on this llama.cpp build by loading a section whose model file does not exist:
+
+        before the attempt : {"value": "unloaded"}
+        after it failed    : {"value": "unloaded", "exit_code": 1, "failed": true}
+
+    There is no distinct error `value` and no message; the model returns to unloaded and gains a
+    flag, which persists. A model evicted normally reads plain {"value": "unloaded"} with neither
+    key, so the flag is specific to failure and an ordinary model swap never trips it. The check
+    this replaced looked for an error in `value`, which this router never sends, so the dashboard
+    alarm could not fire. A non-zero exit code alone is also treated as a failure, since a clean
+    stop leaves no exit code at all.
+    """
+    raw = status.get("exit_code")
+    try:
+        code = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        code = None
+    return (status.get("failed") is True or (code is not None and code != 0)), code
 
 
 async def _probe_loaded_model(
@@ -506,9 +521,9 @@ async def _probe_loaded_model(
 
     loaded_model  — comma list of ids whose status is 'loaded'.
     probe_error   — a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
-    load_failed   — the first model reporting a genuine error status, with its message; None
-                    otherwise. This is the only field the dashboard alarm keys off, because it
-                    is a real failure rather than the normal unloaded state.
+    load_failed   — the first model whose last load failed, as "name (exit N)"; None otherwise.
+                    The only field the dashboard alarm keys off: a real failure, not the normal
+                    unloaded state. See _load_failure for what the router actually reports.
     """
     if internal_port is None:
         return None, None, None
@@ -530,9 +545,10 @@ async def _probe_loaded_model(
                 val = str(status.get("value") or "").lower()
                 if val == "loaded":
                     loaded_ids.append(mid)
-                elif val in _LOAD_FAILED and failure is None:
-                    msg = str(status.get("message") or "").strip()
-                    failure = f"{mid}: {msg}" if msg else f"{mid} ({val})"
+                elif failure is None:
+                    failed, code = _load_failure(status)
+                    if failed:
+                        failure = f"{mid} (exit {code})" if code is not None else mid
             if failure is not None:
                 return ", ".join(i for i in loaded_ids if i) or None, None, failure
             if loaded_ids:
@@ -1662,7 +1678,7 @@ def diagnose_container(name: str) -> tuple[bool, list[dict], str]:
     ok, tail = container_logs(name, tail=1200, current_run_only=True)
     if not ok:
         return False, [], tail
-    findings = [{"error": f.error, "hint": f.hint} for f in diagnose.diagnose(tail)]
+    findings = [{"error": f.error, "hint": f.hint, "model": f.model} for f in diagnose.diagnose(tail)]
     return True, findings, ""
 
 

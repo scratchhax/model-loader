@@ -13,6 +13,13 @@ Two disciplines keep it honest against LIVE logs, not just synthetic ones:
   a successful load (or, failing that, the most recent load attempt) — so an error that a later
   successful load or served request superseded drops out.
 
+* **Attribution, for a router.** A router runs one child llama-server per model and forwards its
+  output with a `[port]` prefix, announcing the pairing when it spawns the child. So a failed load
+  is read from that instance's OWN lines, and only when its most recent run exited non-zero. The
+  model-agnostic recency window above cannot do this: another model serving a request after the
+  failure would hide it, while the dashboard still says that model failed; and a model that hit an
+  out-of-memory, retried and then loaded fine would be reported as broken.
+
 * **Fail-closed wording.** Every rule demands explicit failure language. A pattern that merely
   mentions `mmproj`, `truncat`, etc. in normal operation must never fire — healthy multimodal
   servers print `mmproj` on every startup, and every finished request prints `truncated = 0`.
@@ -34,11 +41,25 @@ from typing import Callable, Union
 class Finding:
     error: str      # the offending log line, trimmed of container/pid noise
     hint: str       # the concrete thing to try next
+    model: str = "" # the router instance it came from; "" for the server itself
 
 
 # Leading container log decoration: an RFC3339 timestamp (docker logs -t) then a "[pid]" token
 # and a llama.cpp "H H.MMM" uptime stamp. Stripped for display; matching ignores it anyway.
-_RE_DECOR = re.compile(r"^\d{4}-\d{2}-\d{2}T\S+\s+(?:\[\d+\]\s+)?")
+# Both parts are optional: Diagnose reads logs without docker timestamps, where a router child's
+# line begins directly with its "[port]".
+_RE_DECOR = re.compile(r"^(?:\d{4}-\d{2}-\d{2}T\S+\s+)?(?:\[\d+\]\s+)?")
+
+# Router mode. The router announces each child, then forwards the child's output with a "[port]"
+# prefix, then reports how it ended:
+#     load: spawning server instance with name=MODEL on port 52493
+#     [52493] ... E gguf_init_from_file: failed to open GGUF file '...'
+#     operator(): instance name=MODEL exited with status 1
+# A clean eviction exits with status 0.
+_RE_CHILD = re.compile(r"^(?:\d{4}-\d{2}-\d{2}T\S+\s+)?\[(\d+)\]\s")
+_RE_SPAWN = re.compile(r"spawning server instance with name=(\S+) on port (\d+)")
+_RE_EXIT = re.compile(r"instance name=(\S+) exited with status (-?\d+)")
+_RE_ERROR_LINE = re.compile(r"\sE\s")
 
 # A load completed / the server is serving. Recency scans only lines after the LAST of these: a
 # failure older than the most recent success is stale (the router recovered). Deliberately broad,
@@ -154,24 +175,102 @@ def _window(lines: list[str]) -> list[str]:
     return lines
 
 
-def diagnose(log_tail: str) -> list[Finding]:
-    """Map a llama-server log tail to recognised failure signatures + fixes.
-
-    Applies the recency window first, then for each rule reports only the most recent matching
-    line inside it (a retried load logs the same error repeatedly; the latest is the live one).
-    Findings come back ordered by specificity, not log position, so the most actionable line is
-    first. An empty list means no known signature matched *recently* — not "healthy", just
-    "unrecognised or superseded"; the caller must say so rather than imply success.
-    """
-    if not log_tail:
-        return []
-    lines = _window(log_tail.splitlines())
+def _match(lines: list[str], model: str = "") -> list[Finding]:
+    """Every rule that matches, most recent line per rule, ordered by specificity."""
     findings: list[tuple[int, Finding]] = []
     for idx, (pat, hint) in enumerate(_RULES):
         for line in reversed(lines):
             if pat.search(line):
                 text = hint(line) if callable(hint) else hint
-                findings.append((idx, Finding(error=_clean(line), hint=text)))
+                findings.append((idx, Finding(error=_clean(line), hint=text, model=model)))
                 break
     findings.sort(key=lambda t: t[0])
     return [f for _i, f in findings]
+
+
+@dataclass
+class _Instance:
+    name: str
+    port: str
+    lines: list[str]
+    status: int | None = None       # None = still running, or its end fell outside the tail
+
+
+def _split_router_log(lines: list[str]) -> tuple[list[_Instance], list[str]]:
+    """(child instances in spawn order, the router's own lines).
+
+    A port can be reused by a later instance, so a child line belongs to whichever instance most
+    recently claimed that port. Child lines whose spawn fell outside the tail belong to nobody and
+    are dropped - such an instance started long ago and is not the load that just failed.
+    """
+    owner: dict[str, _Instance] = {}
+    latest_by_name: dict[str, _Instance] = {}
+    instances: list[_Instance] = []
+    router: list[str] = []
+    for line in lines:
+        child = _RE_CHILD.match(line)
+        if child:
+            inst = owner.get(child.group(1))
+            if inst is not None:
+                inst.lines.append(line)
+            continue
+        router.append(line)
+        spawn = _RE_SPAWN.search(line)
+        if spawn:
+            inst = _Instance(name=spawn.group(1), port=spawn.group(2), lines=[])
+            owner[inst.port] = inst
+            latest_by_name[inst.name] = inst
+            instances.append(inst)
+            continue
+        ended = _RE_EXIT.search(line)
+        if ended:
+            inst = latest_by_name.get(ended.group(1))
+            if inst is not None and inst.status is None:
+                try:
+                    inst.status = int(ended.group(2))
+                except ValueError:
+                    pass
+    return instances, router
+
+
+def diagnose(log_tail: str) -> list[Finding]:
+    """Map a llama-server log tail to recognised failure signatures + fixes.
+
+    For a router log: each model whose MOST RECENT instance exited non-zero is diagnosed from that
+    instance's own lines, so a later successful load of the same model supersedes the failure and
+    nothing another model does can hide it. An instance that failed with no signature we know is
+    still reported, so the dashboard's "load failed" never leads to a blank. The router's own
+    lines are then checked across the whole run, which is where preset errors found at boot live;
+    the caller reads the current container run only, so those are current by construction.
+
+    For a plain llama-server (no instances in the tail): the recency window, as before.
+
+    Within a set of lines each rule reports its most recent match, ordered by specificity. An
+    empty list means nothing recognised - not "healthy"; the caller must say so.
+    """
+    if not log_tail:
+        return []
+    lines = log_tail.splitlines()
+    instances, router = _split_router_log(lines)
+    if not instances:
+        return _match(_window(lines))
+
+    latest: dict[str, _Instance] = {}
+    for inst in instances:
+        latest[inst.name] = inst
+
+    findings: list[Finding] = []
+    for inst in latest.values():
+        if inst.status in (None, 0):
+            continue
+        hits = _match(inst.lines, model=inst.name)
+        if not hits:
+            last_error = next((ln for ln in reversed(inst.lines) if _RE_ERROR_LINE.search(ln)), "")
+            hits = [Finding(
+                error=_clean(last_error) or f"instance exited with status {inst.status}",
+                hint=(f"{inst.name} exited with status {inst.status} while loading, but its log holds "
+                      "no failure this recognises. The lines just before its exit are the ones to read."),
+                model=inst.name)]
+        findings.extend(hits)
+    findings.extend(_match(router))
+    return findings
