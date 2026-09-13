@@ -1128,7 +1128,7 @@ def _predicted_vram_gb(section: str) -> float | None:
 
 @app.get("/config/section/{name}/autoconfig", response_class=HTMLResponse)
 async def config_autoconfig(request: Request, name: str, preset: str = "",
-                            sessions: int = 1, spec: str = "") -> HTMLResponse:
+                            sessions: int = 1, spec: str = "", vision: str = "") -> HTMLResponse:
     import json as _json
     sessions = max(1, min(int(sessions or 1), 8))
 
@@ -1200,7 +1200,33 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         section_name=name,
         model_subdir=model_subdir,
         spec_profile=spec,
+        vision=vision,
     )
+
+    # Vision costs context, and the panel should say how much rather than leave it to be found
+    # out. When a projector exists, size the other state as well with everything else held
+    # equal - same preset, sessions and spec profile - so both figures come from the same fit
+    # maths instead of one real number and one guess.
+    vision_cost = None
+    if rec.has_projector and not rec.error:
+        def _vision_state(r):
+            p = next((x for x in r.presets if x.key == r.active_preset), None)
+            return {"ctx": r.recommended_ctx,
+                    "gpu_layers": p.gpu_layers if p else 0,
+                    "total_layers": p.total_layers if p else 0}
+        try:
+            alt = autoconfig.analyze(
+                summary=summary, file_size=file_size, backends=backend_list,
+                model_rel=model_rel, current_section=current_section,
+                preset=rec.active_preset, n_sessions=sessions,
+                models_dir=settings.models_dir, section_name=name,
+                model_subdir=model_subdir, spec_profile=spec,
+                vision=("off" if rec.vision else "on"),
+            )
+            vision_cost = {("on" if rec.vision else "off"): _vision_state(rec),
+                           ("off" if rec.vision else "on"): _vision_state(alt)}
+        except Exception:  # noqa: BLE001 - the comparison is a nicety; it must not cost the panel
+            vision_cost = None
 
     # Prepare per-plan row map for the template + which ctx columns to show
     plan_row_map = {p.name: {r.ctx: r for r in p.rows} for p in rec.plans}
@@ -1229,6 +1255,10 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         "ctx_columns": ctx_columns,
         "plan_row_map": plan_row_map,
         "format_ctx": autoconfig.format_ctx,
+        "vision_cost": vision_cost,
+        # Carried on every link that re-renders this panel, so picking a preset or a session
+        # count does not silently flip vision back to the saved state.
+        "vision_q": ("on" if rec.vision else "off") if rec.has_projector else "",
         "tel": tel,
         "cfgh": cfgh,
         "values_json": _json.dumps(rec.values),

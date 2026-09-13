@@ -60,7 +60,9 @@ AUTOCONFIG_DOMAIN: frozenset[str] = frozenset({
     # speculative decoding
     "spec-type", "spec-draft-model", "spec-draft-ngl",
     # multimodal
-    "mmproj", "mmproj-offload", "image-max-tokens",
+    # mmproj-auto = off is how "vision off" survives the next run; without it in the domain,
+    # switching vision back on would leave it behind and the folder scan would stay disabled.
+    "mmproj", "mmproj-offload", "image-max-tokens", "mmproj-auto",
     # templating / reasoning
     "jinja", "chat-template-kwargs", "reasoning", "reasoning-format", "reasoning-preserve",
 })
@@ -77,6 +79,31 @@ def _domain_gaps(values: dict[str, str]) -> list[str]:
     is trying to read. Surfaced as a quirk so it gets noticed and fixed.
     """
     return sorted(set(values) - AUTOCONFIG_DOMAIN - _NEVER_CLEAR)
+
+
+_OFF_VALUES: frozenset[str] = frozenset({"off", "false", "0", "no"})
+
+
+def _vision_enabled(requested: str, section: dict[str, str] | None) -> bool:
+    """Whether a model's projector should be attached. Only consulted when one exists.
+
+    Vision used to be a side effect of a file sitting in the folder: an absent `mmproj =` fell
+    back to scanning for a projector, so there was no way to ask for a text-only config on a
+    model that shipped one. Fill would put the projector straight back, and the fit maths kept
+    reserving its VRAM - which on a 27B capped all-GPU context at 16K instead of ~115K.
+
+    An explicit pick from the panel (`on` / `off`) wins. Otherwise the saved section decides: a
+    projector named in `mmproj =` is an explicit yes, `mmproj-auto = off` with none named is an
+    explicit no. With neither, vision is on, so every existing section and every fresh download
+    behaves exactly as it did before this became a switch.
+    """
+    pick = (requested or "").strip().lower()
+    if pick in ("on", "off"):
+        return pick == "on"
+    sec = section or {}
+    if (sec.get("mmproj") or "").strip():
+        return True
+    return str(sec.get("mmproj-auto") or "").strip().lower() not in _OFF_VALUES
 
 
 # --- prompt cache (--cache-ram) sizing. See the block that consumes these for the measurements.
@@ -485,6 +512,10 @@ class Recommendation:
     active_spec_profile: str = ""                               # previewed profile ("custom" if hand-tuned)
     current_spec_profile: str = ""                              # what the SAVED section has
     spec_head_rel: str = ""                                     # matched draft head, "" if none
+    # Vision is a switch rather than a side effect of a projector sitting in the folder.
+    has_projector: bool = False     # a projector exists for this model, attached or not
+    vision: bool = False            # whether THIS recommendation attaches it
+    projector_rel: str = ""         # that projector, for display
     error: str = ""
 
 
@@ -1087,6 +1118,7 @@ def analyze(*,
             section_name: str = "",
             model_subdir: str = "",
             spec_profile: str = "",
+            vision: str = "",
             mmproj_gb_override: float | None = None) -> Recommendation:
     # Clamp n_sessions to a sensible range for a homelab. Above 8 the per-slot ctx
     # shrinks below usability for real chat, and llama-server continuous batching
@@ -1220,14 +1252,19 @@ def analyze(*,
     # projector sat in its directory, and (because so many offload points then tied at the
     # same clamped ctx) collapsed the MoE preset frontier to a single option.
     # Reserving the measured cost instead lets the normal fit math decide.
-    mmproj_rel = ""
+    mmproj_rel = ""        # the projector this recommendation ATTACHES; empty when vision is off
     mmproj_gb = 0.0
+    projector_rel = ""     # the projector that EXISTS for this model, attached or not
     if models_dir is not None and section_name:
         # Size against the projector that will ACTUALLY be loaded. If the preset already
-        # names one, that file wins — sizing against a different (possibly smaller) file
+        # names one, that file wins - sizing against a different (possibly smaller) file
         # in the same directory silently under-reserves and the model OOMs on device 0.
-        mmproj_rel = (current_section or {}).get("mmproj", "").strip() \
+        projector_rel = (current_section or {}).get("mmproj", "").strip() \
             or _find_mmproj(models_dir, section_name, model_subdir)
+        # Existing is not the same as wanted. A projector with vision switched off reserves
+        # nothing, so its VRAM goes back to the KV cache. See _vision_enabled.
+        if projector_rel and _vision_enabled(vision, current_section):
+            mmproj_rel = projector_rel
         if mmproj_rel:
             try:
                 _mp = Path(str(mmproj_rel).replace("/models", str(models_dir), 1))
@@ -1474,15 +1511,17 @@ def analyze(*,
     if summary.get("chat_template"):
         values["jinja"] = "true"
 
-    # Multimodal: look for an adjacent mmproj file the user hasn't already set
+    # Multimodal. `mmproj_rel` is already the projector this recommendation attaches - the saved
+    # one, else the one found beside the weights - and it is empty when vision is switched off.
     if section_name:
-        current_mmproj = (current_section or {}).get("mmproj", "").strip()
-        if current_mmproj:
-            # Respect user's existing choice — echo it so Fill preserves it
-            values["mmproj"] = current_mmproj
-        else:
-            if mmproj_rel:  # already resolved above, when sizing the VRAM reservation
-                values["mmproj"] = mmproj_rel
+        if mmproj_rel:
+            values["mmproj"] = mmproj_rel
+        elif projector_rel:
+            # A projector exists but vision is off. `mmproj-auto = off` is how that choice
+            # survives the next run: without it the folder scan finds the projector again and
+            # quietly turns vision back on. llama-server only consults it for -hf downloads, so
+            # for a local preset it changes nothing at runtime.
+            values["mmproj-auto"] = "off"
 
     # Speculative decoding, driven by the selected workload profile (see SpecProfile).
     #
@@ -1945,6 +1984,13 @@ def analyze(*,
                 f"multiplier for cross-card handoffs. Real cap will be a bit lower than pure sum-of-VRAMs."
             )
 
+    if projector_rel and not has_mmproj:
+        quirks.append(
+            f"Vision is off: the projector beside this model ({Path(projector_rel).name}) is not "
+            "attached, and no VRAM is reserved for it. Switch Vision on to accept images, at the "
+            "cost of that reservation on the main GPU."
+        )
+
     # Multimodal VRAM accounting
     if has_mmproj:
         quirks.append(
@@ -2068,6 +2114,9 @@ def analyze(*,
     return Recommendation(
         plans=plans,
         displaced=displaced,
+        has_projector=bool(projector_rel),
+        vision=bool(mmproj_rel) and bool(projector_rel),
+        projector_rel=projector_rel,
         recommended_backend=(recommended.name if recommended else ""),
         recommended_ctx=rec_ctx,
         recommended_total_ctx=rec_ctx * n_sessions if rec_ctx > 0 else 0,

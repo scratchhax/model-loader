@@ -173,7 +173,7 @@
          there is no reason to restrict this to powers of two. #}
       {% for n in range(1, 9) %}
       <button type="button"
-              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ rec.active_preset or 'balanced' }}&sessions={{ n }}&spec={{ rec.active_spec_profile }}"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ rec.active_preset or 'balanced' }}&sessions={{ n }}&spec={{ rec.active_spec_profile }}&vision={{ vision_q | default("") }}"
               hx-target="#autoconfig-slot"
               hx-swap="innerHTML"
               class="inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs font-mono tabular-nums transition
@@ -189,6 +189,43 @@
       Sets <span class="font-mono">-np</span> and enables continuous batching when &gt; 1.
     </p>
   </div>
+
+  {# Vision is a switch, not a side effect of a projector sitting beside the weights. The
+     projector and its encoder buffer are not layer-split - they land whole on the main GPU -
+     so switching vision off hands that VRAM back to context. Both figures come from the same
+     fit maths with everything else held equal, so the trade is visible before it is made. #}
+  {% if rec.has_projector %}
+  {% set vc = vision_cost or {} %}
+  <div class="mt-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">
+      Vision
+      <span class="text-slate-400 normal-case tracking-normal">— attach the projector so this model accepts images</span>
+    </div>
+    <div class="flex flex-wrap gap-1.5">
+      {% for state, label in (("on", "On"), ("off", "Off")) %}
+      {% set active = (state == "on") == rec.vision %}
+      {% set st = vc.get(state) %}
+      <button type="button"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ rec.active_preset or 'balanced' }}&sessions={{ rec.n_sessions }}&spec={{ rec.active_spec_profile }}&vision={{ state }}"
+              hx-target="#autoconfig-slot"
+              hx-swap="innerHTML"
+              class="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition
+                     {% if active %}bg-sky-100 dark:bg-sky-950/60 border-sky-400 dark:border-sky-700 ring-1 ring-sky-500 text-sky-800 dark:text-sky-200
+                     {% else %}bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-sky-400{% endif %}">
+        <span class="font-medium">{{ label }}</span>
+        {% if st %}
+        <span class="font-mono tabular-nums text-slate-500 dark:text-slate-400">ctx {{ format_ctx(st.ctx) }}{% if 'fit' not in rec.values and st.total_layers %} · {{ st.gpu_layers }}/{{ st.total_layers }}L on GPU{% endif %}</span>
+        {% endif %}
+      </button>
+      {% endfor %}
+    </div>
+    <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+      Projector <span class="font-mono">{{ rec.projector_rel.split('/')[-1] }}</span> loads whole onto the main GPU, so turning
+      vision off gives that VRAM back to context.
+      {% if not rec.vision %}Saved as <span class="font-mono">mmproj-auto = off</span>, so the next autoconfig run won&#39;t switch it back on.{% endif %}
+    </p>
+  </div>
+  {% endif %}
 
   {# Selecting a chip only re-renders this panel; nothing reaches models.ini until
      Fill form + Save. Without this banner a previewed preset is indistinguishable from
@@ -216,7 +253,7 @@
     <div class="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(11rem,1fr))]">
       {% for p in rec.presets %}
       <button type="button"
-              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ p.key }}&sessions={{ rec.n_sessions }}&spec={{ rec.active_spec_profile }}"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ p.key }}&sessions={{ rec.n_sessions }}&spec={{ rec.active_spec_profile }}&vision={{ vision_q | default("") }}"
               hx-target="#autoconfig-slot"
               hx-swap="innerHTML"
               class="text-left rounded-md border px-3 py-2 transition"
@@ -505,7 +542,7 @@
       {% set _blocked = sp.needs_head and not rec.spec_head_rel %}
       <button type="button"
               {% if not _blocked %}
-              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ rec.active_preset or 'balanced' }}&sessions={{ rec.n_sessions }}&spec={{ sp.key }}"
+              hx-get="/config/section/{{ section_name }}/autoconfig?preset={{ rec.active_preset or 'balanced' }}&sessions={{ rec.n_sessions }}&spec={{ sp.key }}&vision={{ vision_q | default("") }}"
               hx-target="#autoconfig-slot"
               hx-swap="innerHTML"
               {% else %}disabled{% endif %}
