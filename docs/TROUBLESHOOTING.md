@@ -74,6 +74,20 @@ Either the model has no `mmproj` (check its ini section), or you selected a diff
 
 Containers page → **Align capabilities** writes each model's vision flag into OpenWebUI from its ini section, so the upload control only appears where it can work. Models page shows the same per model.
 
+## Autoconfig caps context very low on a model with a vision projector
+
+The projector and its encoder buffer load whole onto the main GPU, and that reservation comes straight out of the KV cache. If you don't need images from this model, switch **Vision** off in the Autoconfig panel: both options show their context before you choose. On a 27B on 2× 12 GB cards that was 64K versus 152K. Flash-Next and other models that still need vision are unaffected.
+
+## "Load failed" on the dashboard
+
+A model's last load exited with an error — the router reports it as `{"value": "unloaded", "exit_code": N, "failed": true}`. Click **Diagnose** on that backend: it reads that model's own log lines from the container's current run and names the cause. It clears once that model loads successfully, or when the backend restarts.
+
+An idle backend with nothing loaded is normal under `--models-max 1` and never raises this.
+
+## Out-of-memory lines in the log, but the model loaded fine
+
+`compute buffer allocation failed, retrying without pipeline parallelism` means llama.cpp's first reservation didn't fit on one card, so it fell back to smaller buffers, which did. The model runs at its full configured context. On a single chat stream there was no measurable cost: a 27B at 155648 with the fallback matched 131072 without it (~1,915 tok/s prompt, 32 tok/s generation). Diagnose ignores these lines because the load succeeded.
+
 ## Autoconfig says "doesn't fit at any context" on a Vulkan backend
 
 The Vulkan image ships neither `nvidia-smi` nor `rocm-smi`, so VRAM can't be probed and the budget computes as zero. Declare it: `GPU_VRAM=<container>:<GB>` on the model-loader service, then restart it.

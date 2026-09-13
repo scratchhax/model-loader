@@ -196,7 +196,26 @@ experts to make room for a prompt cache.
 
 ## Multimodal projectors
 
-A model is multimodal if its section declares `mmproj`. The projector occupies roughly its file size in VRAM plus ~0.5 GB of encoder scratch, and — importantly — it is **pinned to the main GPU**, not layer-split, so it is charged to device 0 in the per-card check.
+A model has a projector if its section names one in `mmproj =`, or — when none is named — if one sits beside the weights. The projector occupies roughly its file size in VRAM plus ~0.5 GB of encoder scratch, and — importantly — it is **pinned to the main GPU**, not layer-split, so it is charged to device 0 in the per-card check.
+
+### Vision is a switch
+
+Having a projector is not the same as wanting one. Before this was a switch, an absent `mmproj =` always fell back to the folder scan, so there was no way to size a text-only config for a model that shipped a projector: Fill put it straight back and the fit maths kept reserving it.
+
+`_vision_enabled()` decides, in order:
+
+1. an explicit pick from the panel (`?vision=on` / `?vision=off`) wins;
+2. a projector named in `mmproj =` means **on**;
+3. `mmproj-auto = off` with no projector named means **off**;
+4. otherwise **on** — so existing sections and fresh downloads behave exactly as before.
+
+With vision off, nothing is reserved for the projector, `mmproj-auto = off` is written so the choice survives the next run, and Fill clears `mmproj`, `mmproj-offload`, `image-max-tokens` and the `ubatch-size` raise that only images needed. `mmproj-auto` is a real llama-server key that only matters for `-hf` downloads, so it is inert for a local preset. It sits in the domain, so switching vision back on clears it.
+
+When a projector exists, the panel sizes both states with everything else held equal and shows the context each one buys. Measured on Qwen3.8-27B-Uncensored-noMTP (2× RTX 5070): all 64 layers on GPU at **65536** with vision on, **155648** with it off.
+
+### Draft heads are reserved only when they load
+
+A speculative-decoding draft head is pinned to the main GPU exactly like a projector, so it is budgeted the same way (~1.15× its file size) — but only when the resolved speculation profile will actually load it. A head that merely sits in the folder of a section whose profile is Off costs nothing. Previously any head found beside the weights was charged regardless, which held that same model's text-only context at 90112 instead of 155648.
 
 A projector is not necessarily a *vision* projector: llama.cpp uses the same `--mmproj` slot for audio encoders. Autoconfig reads the projector's own metadata (`clip.vision.*` versus `clip.audio.*`) to tell them apart.
 
