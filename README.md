@@ -43,6 +43,9 @@ The speed figures are an **ordering hint, not a benchmark**. They come from a ca
 
 One card per section, with every option you have set shown as a chip, so the whole file is readable at a glance rather than by scrolling a text editor. **Copy CLI** renders the section as the equivalent `llama-server` command line, which is useful for reproducing a config outside Model Loader or pasting into a bug report.
 
+**Client config** renders the section as ready-to-paste snippets for an API client — a `curl`, an OpenAI Python client, `OPENAI_BASE_URL`/`OPENAI_API_KEY` env vars, and a raw request JSON — wired to the model id (the section name) and the backend's LAN-reachable address, so they work from any machine rather than only from inside the compose network. A `Bearer` header is included only when the backend actually runs llama-server with `--api-key`.
+
+
 `file present` confirms the section resolves to a GGUF on disk. That check follows the section's `model =` path rather than matching its name against a filename, so renaming a section to give a model a short API id does not break the link.
 
 ### Benchmarking
