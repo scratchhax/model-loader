@@ -54,6 +54,26 @@
     </details>
     {% endif %}
 
+    {% if b.found %}
+    {% set failed = b.status == 'running' and not b.loaded_model %}
+    {% from "_icons.html" import icon %}
+    <details class="mt-4" {% if failed %}open{% endif %}>
+      <summary class="cursor-pointer text-xs {% if failed %}text-red-600 dark:text-red-400 font-medium{% else %}text-slate-500 dark:text-slate-400{% endif %}">
+        {% if failed %}Load looks stuck — diagnose{% else %}Diagnose load failure{% endif %}
+      </summary>
+      <div class="mt-2">
+        <button hx-get="/containers/{{ b.name }}/diagnose"
+                hx-target="#diag-out-{{ b.name }}" hx-swap="innerHTML"
+                hx-indicator="#diag-ind-{{ b.name }}"
+                class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+          {{ icon('search', 12) }} Analyze recent log
+        </button>
+        <span id="diag-ind-{{ b.name }}" class="htmx-indicator text-xs text-slate-500 dark:text-slate-400">analyzing…</span>
+        <div id="diag-out-{{ b.name }}" class="mt-2"></div>
+      </div>
+    </details>
+    {% endif %}
+
     <details class="mt-4">
       <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">Show logs (last 200 lines)</summary>
       <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">

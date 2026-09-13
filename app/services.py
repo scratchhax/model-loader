@@ -13,6 +13,7 @@ import httpx
 from docker.errors import APIError, DockerException, NotFound
 
 from . import ini
+from . import diagnose
 from .config import settings
 from .utils import human_bytes, shard_key
 
@@ -1583,6 +1584,20 @@ def container_logs(name: str, tail: int = 200) -> tuple[bool, str]:
     except DockerException as e:
         return False, f"log fetch failed: {e}"
     return True, raw.decode("utf-8", errors="replace")
+
+
+def diagnose_container(name: str) -> tuple[bool, list[dict], str]:
+    """Recognised failure signatures from a backend's recent log, each with a suggested fix.
+
+    Reads a wider tail than the log panel's 200 lines: a failed load is often preceded by a lot
+    of chatter, and the decisive line can sit well above the most recent noise. Returns
+    (ok, findings, err); findings is empty-and-ok when the log simply holds no known signature.
+    """
+    ok, tail = container_logs(name, tail=1200)
+    if not ok:
+        return False, [], tail
+    findings = [{"error": f.error, "hint": f.hint} for f in diagnose.diagnose(tail)]
+    return True, findings, ""
 
 
 def openwebui_capability_state() -> dict[str, "bool | None"]:
