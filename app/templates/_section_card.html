@@ -1,6 +1,6 @@
 {# expects: s (SectionView) #}
 <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4"
-     x-data="{ show: false }">
+     x-data="{ show: false, client: false }">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <div class="flex items-center gap-2">
@@ -34,11 +34,19 @@
          rest. The clipboard write is still attempted when the browser actually offers one,
          so nothing is lost where it did work. #}
       <button type="button"
-              @click="show = !show; if (show) $nextTick(() =&gt; { const el = $refs.cli; const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); if (navigator.clipboard &amp;&amp; window.isSecureContext) { navigator.clipboard.writeText(el.innerText).catch(() =&gt; {}); } })"
+              @click="show = !show; if (show) $nextTick(() =&gt; { const el = $refs.cli; const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); if (navigator.clipboard &amp;&amp; window.isSecureContext) { navigator.clipboard.writeText(el.innerText).catch(() => {}); } })"
               class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
         <span x-show="!show" class="inline-flex items-center gap-1">{{ icon('terminal', 12) }} Show CLI</span>
         <span x-show="show" x-cloak class="inline-flex items-center gap-1">{{ icon('x', 12) }} Hide CLI</span>
       </button>
+      {% if s.client_snippets %}
+      <button type="button" @click="client = !client"
+              class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+        <span x-show="!client" class="inline-flex items-center gap-1">{{ icon('link', 12) }} Client config</span>
+        <span x-show="client" x-cloak class="inline-flex items-center gap-1">{{ icon('x', 12) }} Hide</span>
+      </button>
+      {% endif %}
+
       <button hx-get="/config/section/{{ s.name }}/edit" hx-target="#section-list" hx-swap="innerHTML"
               class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">{{ icon('pencil', 12) }} Edit</button>
       <button hx-post="/config/section/{{ s.name }}/delete" hx-target="#section-list" hx-swap="innerHTML"
@@ -48,4 +56,32 @@
   </div>
   <pre x-show="show" x-cloak x-ref="cli"
        class="mt-3 select-all overflow-x-auto rounded-lg bg-slate-950 p-3 font-mono text-[11px] leading-snug text-slate-100 whitespace-pre-wrap break-all dark:bg-black">{{ s.cli }}</pre>
+
+  {% if s.client_snippets %}
+  {# Client snippets are per-backend because each backend publishes its API on its own host port.
+     Model id is always the section name — that IS what llama-server serves under. These point at
+     the LAN-reachable address, so they work from any machine, unlike the CLI which is container-local. #}
+  <div x-show="client" x-cloak class="mt-3 space-y-4">
+    {% for ep in s.client_snippets %}
+    <div class="rounded-lg border border-slate-200 dark:border-slate-800 p-3">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="font-medium">{{ ep.name }}</span>
+        <span class="font-mono text-slate-500 dark:text-slate-400">{{ ep.base_url }}</span>
+        {% if ep.api_key %}
+        <span class="rounded bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 px-1.5 py-0.5">api-key set</span>
+        {% else %}
+        <span class="rounded bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 px-1.5 py-0.5">no auth</span>
+        {% endif %}
+      </div>
+      {% for label, body in [('curl', ep.curl), ('OpenAI client (Python)', ep.openai_py), ('env vars', ep.env), ('request JSON', ep.json)] %}
+      <div class="mt-2">
+        <div class="mb-1 text-[10px] uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ label }}</div>
+        <pre class="select-all overflow-x-auto rounded-lg bg-slate-950 p-2.5 font-mono text-[11px] leading-snug text-slate-100 whitespace-pre-wrap break-all dark:bg-black">{{ body }}</pre>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <p class="text-[11px] text-slate-500 dark:text-slate-400">Model id is <span class="font-mono">{{ s.name }}</span>. Click any block to select it, then Ctrl+C.</p>
+  </div>
+  {% endif %}
 </div>

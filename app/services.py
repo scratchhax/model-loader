@@ -427,6 +427,65 @@ def _extract_ports(attrs: dict) -> tuple[list[str], int | None]:
     return result, internal
 
 
+def _api_key_from_attrs(attrs: dict) -> str:
+    """The llama-server --api-key, if the container was started with one.
+
+    Compose `command:` lands in Config.Cmd, an image entrypoint in Config.Entrypoint; scan both
+    so a key set either way is found. Returns "" when the server runs open (the common LAN case).
+    """
+    cfg = attrs.get("Config") or {}
+    argv = [str(t) for t in (cfg.get("Entrypoint") or [])] + [str(t) for t in (cfg.get("Cmd") or [])]
+    for i, tok in enumerate(argv):
+        if tok == "--api-key" and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith("--api-key="):
+            return tok.split("=", 1)[1]
+    return ""
+
+
+def browser_endpoints(browser_host: str) -> list[dict]:
+    """Per-backend, browser-reachable /v1 base URL + api key, for client snippets.
+
+    Probing uses docker-internal http://<container>:<port>, which the browser cannot resolve.
+    Here we take the published host port that llama-server's API port is bound to and pair it
+    with the address the browser actually used to reach Model Loader, so a snippet works from
+    any machine on the LAN rather than only from inside the compose network.
+    """
+    client = _docker_client()
+    if client is None or not browser_host:
+        return []
+    out: list[dict] = []
+    for name in _effective_container_names():
+        try:
+            attrs = client.containers.get(name).attrs or {}
+        except (NotFound, DockerException):
+            continue
+        host_ports, internal = _extract_ports(attrs)
+        host_port = None
+        if internal is not None:
+            suffix = f"{internal}/"
+            for hp in host_ports:  # each is "8082->8080/tcp"
+                left, _, cont = hp.partition("->")
+                if cont.startswith(suffix) and left.isdigit():
+                    host_port = left
+                    break
+        if host_port is None:  # no binding matched the API port; fall back to first numeric
+            for hp in host_ports:
+                left, _, _ = hp.partition("->")
+                if left.isdigit():
+                    host_port = left
+                    break
+        if host_port is None:
+            continue
+        out.append({
+            "name": name,
+            "base_url": f"http://{browser_host}:{host_port}/v1",
+            "api_key": _api_key_from_attrs(attrs),
+        })
+    return out
+
+
+
 async def _probe_loaded_model(container_name: str, internal_port: int | None) -> tuple[str | None, str | None]:
     if internal_port is None:
         return None, None

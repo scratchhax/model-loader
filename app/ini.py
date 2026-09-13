@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import configparser
 import io
+import json
 import os
 import re
 import shlex
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import settings
 
@@ -361,6 +362,47 @@ def to_cli(name: str, items: list[tuple[str, str]]) -> str:
     return " ".join(parts)
 
 
+def to_client_config(name: str, base_url: str, api_key: str = "") -> dict[str, str]:
+    """Ready-to-paste client snippets for a section, wired to a browser-reachable endpoint.
+
+    The section name IS the id llama-server serves under (see sections_by_file), so the model
+    field is just the section name. base_url is the /v1 root the *browser* can reach — not the
+    docker-internal URL Model Loader uses to probe — so these snippets work from any machine on
+    the LAN rather than only from inside the compose network.
+    """
+    base = base_url.rstrip("/")
+    completions = f"{base}/chat/completions"
+    payload = json.dumps(
+        {"model": name, "messages": [{"role": "user", "content": "Hello"}]},
+        indent=2,
+    )
+
+    pieces = [f"curl {completions}"]
+    if api_key:
+        pieces.append(f'-H "Authorization: Bearer {api_key}"')
+    pieces.append('-H "Content-Type: application/json"')
+    pieces.append(f"-d '{payload}'")
+    curl = " \\\n  ".join(pieces)
+
+    # The OpenAI SDK refuses an empty api_key even when the server wants none, so emit a
+    # clearly-labelled placeholder rather than omitting it and leaving a confusing KeyError.
+    py_key = api_key or "not-needed"
+    openai_py = (
+        "from openai import OpenAI\n\n"
+        f'client = OpenAI(base_url="{base}", api_key="{py_key}")\n\n'
+        "resp = client.chat.completions.create(\n"
+        f'    model="{name}",\n'
+        '    messages=[{"role": "user", "content": "Hello"}],\n'
+        ")\n"
+        "print(resp.choices[0].message.content)"
+    )
+
+    env = f'export OPENAI_BASE_URL="{base}"\n'
+    env += f'export OPENAI_API_KEY="{py_key}"'
+
+    return {"curl": curl, "openai_py": openai_py, "env": env, "json": payload}
+
+
 @dataclass
 class SectionView:
     name: str
@@ -368,6 +410,7 @@ class SectionView:
     has_file: bool
     matched_file: str | None       # filename with .gguf if found
     cli: str = ""
+    client_snippets: list = field(default_factory=list)  # [{name, base_url, api_key, curl, openai_py, env, json}]
 
 
 def _is_companion(filename: str) -> bool:

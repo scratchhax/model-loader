@@ -837,9 +837,20 @@ def downloads_clear(request: Request) -> HTMLResponse:
 # ---------- models.ini ----------
 
 def _config_context(request: Request, flash: dict | None = None) -> dict:
+    sections = ini.list_sections()
+    # Client snippets need the address the browser used to reach us (not the docker-internal
+    # host the prober uses), so snippets work from any LAN machine. Compute endpoints once.
+    browser_host = request.url.hostname or ""
+    endpoints = services.browser_endpoints(browser_host)
+    for s in sections:
+        s.client_snippets = [
+            {"name": ep["name"], "base_url": ep["base_url"], "api_key": ep["api_key"],
+             **ini.to_client_config(s.name, ep["base_url"], ep["api_key"])}
+            for ep in endpoints
+        ]
     return {
         "request": request,
-        "sections": ini.list_sections(),
+        "sections": sections,
         "unregistered": ini.unregistered_gguf_stems(),
         "raw": ini.raw_text(),
         "backups": ini.list_backups(),
