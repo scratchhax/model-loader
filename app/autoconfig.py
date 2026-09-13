@@ -1281,16 +1281,48 @@ def analyze(*,
     # A draft head is small but it is real VRAM, resident for the whole session, and it is
     # pinned to the main GPU exactly like the projector. Budget it the same way, or the fit
     # maths approves a context that leaves no room for the head it is about to recommend.
-    mtp_rel = ""
-    mtp_gb = 0.0
+    # Only when it will actually LOAD, though. This used to charge any head found beside the
+    # weights, whether or not speculative decoding was on - so a section whose saved profile is
+    # Off, which never loads the head, still lost ~1.15x its size of main-GPU VRAM to it. On
+    # Qwen3.8-27B-Uncensored-noMTP that was a 1.56 GiB draft sitting in the folder, unused,
+    # holding text-only context at 90112 where the same maths gives more without it. Resolving
+    # the profile has to come first for that, so it now lives here rather than after sizing.
+    mtp_rel = ""           # the head that EXISTS beside these weights
     if models_dir is not None and section_name:
-        mtp_rel = (current_section or {}).get("spec-draft-model", "").strip()             or _find_mtp(models_dir, section_name, model_subdir)
-        if mtp_rel:
-            try:
-                _mt = Path(str(mtp_rel).replace("/models", str(models_dir), 1))
-                mtp_gb = _mt.stat().st_size / (1024 ** 3)
-            except OSError:
-                mtp_gb = 0.0
+        mtp_rel = (current_section or {}).get("spec-draft-model", "").strip() \
+            or _find_mtp(models_dir, section_name, model_subdir)
+
+    # Which profile applies is resolved in three steps, because the panel is a preview: an
+    # explicit pick from the UI wins, otherwise the saved section is read back, otherwise a
+    # brand-new section gets a conservative default.
+    _saved_spec = match_spec_profile(current_section)
+    _spec_key = (spec_profile or "").strip()
+    if _spec_key not in SPEC_PROFILE_BY_KEY and _spec_key != "custom":
+        # No explicit pick. Fall back to what is saved; a new section gets Balanced when a
+        # head was found beside the weights and Off when there is nothing to draft with.
+        _spec_key = _saved_spec or ("balanced" if mtp_rel else "off")
+    # A profile that needs a head but has none cannot run — llama-server would start and then
+    # fail to load the draft. Fall back rather than offering a configuration that cannot work.
+    _resolved_head = (current_section or {}).get("spec-draft-model", "").strip() or mtp_rel
+    _prof = SPEC_PROFILE_BY_KEY.get(_spec_key)
+    if _prof and _prof.needs_head and not _resolved_head:
+        _prof = SPEC_PROFILE_BY_KEY["off"]
+        _spec_key = "off"
+
+    # Whether the resolved profile will load a head at all. Custom is hand-tuned: it loads one
+    # exactly when the saved section turns speculation on and names a head.
+    if _spec_key == "custom":
+        _head_loads = bool((current_section or {}).get("spec-type", "").strip() and _resolved_head)
+    else:
+        _head_loads = bool(_prof and _prof.spec_type and _prof.needs_head and _resolved_head)
+
+    mtp_gb = 0.0
+    if _head_loads:
+        try:
+            _mt = Path(str(_resolved_head).replace("/models", str(models_dir), 1))
+            mtp_gb = _mt.stat().st_size / (1024 ** 3)
+        except (OSError, TypeError):
+            mtp_gb = 0.0
     has_mmproj = bool(mmproj_rel)
     # VRAM pinned to the MAIN GPU for multimodal: projector weights + encoder compute buffer.
     mmproj_vram_gb = (mmproj_gb * _MMPROJ_VRAM_MULT + _MMPROJ_COMPUTE_GB) if has_mmproj else 0.0
@@ -1540,22 +1572,6 @@ def analyze(*,
     # acceptance rate it is slower than not using it at all, and it interacts with continuous
     # batching unpredictably. Benchmark it.
     #
-    # Which profile applies is resolved in three steps, because the panel is a preview: an
-    # explicit pick from the UI wins, otherwise the saved section is read back, otherwise a
-    # brand-new section gets a conservative default.
-    _saved_spec = match_spec_profile(current_section)
-    _spec_key = (spec_profile or "").strip()
-    if _spec_key not in SPEC_PROFILE_BY_KEY and _spec_key != "custom":
-        # No explicit pick. Fall back to what is saved; a new section gets Balanced when a
-        # head was found beside the weights and Off when there is nothing to draft with.
-        _spec_key = _saved_spec or ("balanced" if mtp_rel else "off")
-    # A profile that needs a head but has none cannot run — llama-server would start and then
-    # fail to load the draft. Fall back rather than offering a configuration that cannot work.
-    _resolved_head = (current_section or {}).get("spec-draft-model", "").strip() or mtp_rel
-    _prof = SPEC_PROFILE_BY_KEY.get(_spec_key)
-    if _prof and _prof.needs_head and not _resolved_head:
-        _prof = SPEC_PROFILE_BY_KEY["off"]
-        _spec_key = "off"
 
     if section_name:
         if _spec_key == "custom":
