@@ -1519,6 +1519,19 @@ def containers_logs(name: str, q: str = "", level: str = "") -> HTMLResponse:
     return HTMLResponse(safe or "(no output)")
 
 
+@app.get("/containers/{name}/diagnose", response_class=HTMLResponse)
+def containers_diagnose(request: Request, name: str) -> HTMLResponse:
+    """Parse a backend's recent log for a failed-load signature and propose a fix.
+
+    Rendered as a Jinja partial for consistency with every other fragment here — Jinja
+    autoescapes the log lines, so no hand-rolled escaping is needed.
+    """
+    ok, findings, err = services.diagnose_container(name)
+    return templates.TemplateResponse("_diagnose_result.html", {
+        "request": request, "ok": ok, "err": err, "findings": findings,
+    })
+
+
 # ---------- Prompt library ----------
 
 @app.get("/prompts", response_class=HTMLResponse)

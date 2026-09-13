@@ -13,6 +13,8 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 - **Capability badges** — rate a model yourself, out of five, per category (coding, creative writing, reasoning, tool use, vision), from the benchmark run where you just read its output. The models list shows what each model is good at, or says `not rated`.
 - **Measured throughput, not just predicted** — llama-server already reports prompt speed, generation speed and speculative acceptance for every request it serves. Model Loader reads those back out of the container logs and shows the median in the Autoconfig panel, alongside a comparison of every configuration that model has actually run under.
 - **Per-backend hardware dashboard** — GPU util, VRAM used/total, temperature, power draw; container CPU% and RSS; log tail with grep filter; one-click restart.
+- **Inline load-failure diagnosis** — when a model isn't loaded, the backend card flags it and a **Diagnose** button reads llama-server's own log tail and maps the failure signature to a concrete fix (VRAM OOM → lower `ngl`/`ctx` or enable `--fit`; KV-cache overflow → quantize it; unresolved `model =` path; corrupt/incomplete GGUF; ctx past the trained length; mismatched `mmproj`; port in use). It only ever proposes what to check — and says so plainly when the cause isn't one it can name, rather than implying health.
+
 - **Auto-discovers llama containers** on your Docker socket (any `ghcr.io/ggml-org/llama.cpp:*` image). Add a new backend to your compose file, run `docker compose up -d`, it appears in the UI within 2 seconds.
 - **OpenWebUI integration** — detects backends OpenWebUI doesn't know about (or points at containers that no longer exist), and one-click reconciles by writing directly to OpenWebUI's `webui.db` (which is what its PersistentConfig actually reads). Also:
   - **Per-connection and per-model visibility** — pick which models each backend offers, so a CPU backend only serves the small ones it can actually run.
@@ -225,7 +227,7 @@ Then `docker compose up -d --build model-loader`.
 5. **Models** (`/models`) — everything you've downloaded. Click a model to open its detail page (metadata, quant, size, chat template, README).
 6. **Config** (`/config`) — one section per model in `models.ini`. For a new model, click **Autoconfig**; it fills in every field based on live hardware probe + GGUF metadata. Review the diff before saving: Fill also *clears* the keys Autoconfig wants unset, so a hand-tuned value inside its domain will go. Anything outside that domain is untouched.
 7. **Benchmark** (`/benchmark`) — pick a backend, some models and some prompts. A run evicts and reloads each model in turn, so expect the box to stall for the duration. Afterwards, read each response and rate the model on what you see.
-8. **Containers** (`/containers`) — restart, view logs (with grep filter), see OpenWebUI drift and one-click reconcile.
+8. **Containers** (`/containers`) — restart, view logs (with grep filter), see OpenWebUI drift and one-click reconcile. If a backend shows a model as not-loaded, **Diagnose** reads its log and names the likely cause with a fix.
 
 ## Configuration (environment variables)
 

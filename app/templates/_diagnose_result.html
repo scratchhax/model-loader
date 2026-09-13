@@ -1,0 +1,22 @@
+{# Diagnose fragment: what services.diagnose_container found in a backend's recent log.
+   expects: ok (bool), err (str), findings (list of {error, hint}). #}
+{% if not ok %}
+<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-xs">
+  Couldn't read logs: {{ err }}
+</div>
+{% elif not findings %}
+<div class="rounded-md bg-slate-50 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 px-3 py-2 text-xs">
+  No recognised failure signature in the recent log. That doesn't mean it's healthy — just that
+  the cause isn't one we can name (or it's since recovered). Check the raw log below.
+</div>
+{% else %}
+<div class="space-y-2">
+  <div class="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Possible cause{{ '' if findings | length == 1 else 's' }}:</div>
+  {% for f in findings %}
+  <div class="rounded-md border border-red-200 dark:border-red-900/60 bg-red-50/50 dark:bg-red-950/30 px-3 py-2">
+    <div class="font-mono text-[11px] text-red-700 dark:text-red-300 break-all">{{ f.error }}</div>
+    <div class="mt-1.5 text-xs text-slate-700 dark:text-slate-300">→ {{ f.hint }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

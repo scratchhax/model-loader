@@ -13,6 +13,7 @@ import httpx
 from docker.errors import APIError, DockerException, NotFound
 
 from . import ini
+from . import diagnose
 from .config import settings
 from .utils import human_bytes, shard_key
 
@@ -375,6 +376,11 @@ class LlamaBackend:
     internal_port: int | None = None
     loaded_model: str | None = None
     probe_error: str | None = None
+    # A genuine load failure reported by the router — a model whose /v1/models status is an
+    # error value, with its message. Distinct from probe_error (a probe/HTTP problem) and from
+    # mere idleness: under --models-preset with --models-max 1, "nothing loaded" is the normal
+    # resting state, so nothing-loaded must never read as a failure. None = no reported failure.
+    load_failed: str | None = None
     last_restart_error: str | None = None
 
 
@@ -485,30 +491,55 @@ def browser_endpoints(browser_host: str) -> list[dict]:
     return out
 
 
+# Model status values that mean "this is fine" in a router deployment. A model in any of these
+# states is NOT a failure — crucially including unloaded (on-demand load) and loading. Anything
+# else in the error family is surfaced as a real failure; unknown-but-benign future values are
+# not flagged, so we never cry wolf on a healthy box.
+_LOAD_OK = frozenset({"loaded", "unloaded", "loading", "not_provided", "not-provided", "empty"})
+_LOAD_FAILED = frozenset({"error", "failed", "load_failed", "load-failed"})
 
-async def _probe_loaded_model(container_name: str, internal_port: int | None) -> tuple[str | None, str | None]:
+
+async def _probe_loaded_model(
+    container_name: str, internal_port: int | None
+) -> tuple[str | None, str | None, str | None]:
+    """(loaded_model_csv, probe_error, load_failed) from a backend's /v1/models.
+
+    loaded_model  — comma list of ids whose status is 'loaded'.
+    probe_error   — a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
+    load_failed   — the first model reporting a genuine error status, with its message; None
+                    otherwise. This is the only field the dashboard alarm keys off, because it
+                    is a real failure rather than the normal unloaded state.
+    """
     if internal_port is None:
-        return None, None
+        return None, None, None
     url = f"http://{container_name}:{internal_port}/v1/models"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, read=3.0)) as client:
             r = await client.get(url)
             if r.status_code != 200:
-                return None, f"HTTP {r.status_code}"
+                return None, f"HTTP {r.status_code}", None
             data = r.json()
             items = data.get("data") or []
             if not items:
-                return None, "no models configured"
-            loaded_ids = [
-                str(it.get("id") or "")
-                for it in items
-                if (it.get("status") or {}).get("value") == "loaded"
-            ]
+                return None, "no models configured", None
+            loaded_ids: list[str] = []
+            failure: str | None = None
+            for it in items:
+                mid = str(it.get("id") or "")
+                status = it.get("status") or {}
+                val = str(status.get("value") or "").lower()
+                if val == "loaded":
+                    loaded_ids.append(mid)
+                elif val in _LOAD_FAILED and failure is None:
+                    msg = str(status.get("message") or "").strip()
+                    failure = f"{mid}: {msg}" if msg else f"{mid} ({val})"
+            if failure is not None:
+                return ", ".join(i for i in loaded_ids if i) or None, None, failure
             if loaded_ids:
-                return ", ".join(i for i in loaded_ids if i), None
-            return None, f"{len(items)} configured, none loaded"
+                return ", ".join(i for i in loaded_ids if i), None, None
+            return None, f"{len(items)} configured, none loaded", None
     except (httpx.HTTPError, ValueError) as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {e}", None
 
 
 def discover_llama_containers() -> list[dict]:
@@ -591,9 +622,10 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             *[_probe_loaded_model(n, p) for _, n, p in probe_targets],
             return_exceptions=False,
         )
-        for (i, _n, _p), (loaded, err) in zip(probe_targets, results):
+        for (i, _n, _p), (loaded, err, failed) in zip(probe_targets, results):
             out[i].loaded_model = loaded
             out[i].probe_error = err
+            out[i].load_failed = failed
     return out
 
 
@@ -767,7 +799,7 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
         return {"ok": False, "err": "container not reachable"}
 
     # discover a loaded model id first
-    loaded, err = await _probe_loaded_model(container_name, internal_port)
+    loaded, err, _failed = await _probe_loaded_model(container_name, internal_port)
     if not loaded:
         return {"ok": False, "err": err or "no model loaded on this backend"}
     model_id = loaded.split(",")[0].strip()
@@ -1583,6 +1615,20 @@ def container_logs(name: str, tail: int = 200) -> tuple[bool, str]:
     except DockerException as e:
         return False, f"log fetch failed: {e}"
     return True, raw.decode("utf-8", errors="replace")
+
+
+def diagnose_container(name: str) -> tuple[bool, list[dict], str]:
+    """Recognised failure signatures from a backend's recent log, each with a suggested fix.
+
+    Reads a wider tail than the log panel's 200 lines: a failed load is often preceded by a lot
+    of chatter, and the decisive line can sit well above the most recent noise. Returns
+    (ok, findings, err); findings is empty-and-ok when the log simply holds no known signature.
+    """
+    ok, tail = container_logs(name, tail=1200)
+    if not ok:
+        return False, [], tail
+    findings = [{"error": f.error, "hint": f.hint} for f in diagnose.diagnose(tail)]
+    return True, findings, ""
 
 
 def openwebui_capability_state() -> dict[str, "bool | None"]:

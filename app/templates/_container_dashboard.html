@@ -68,6 +68,14 @@
 </dl>
 {% endif %}
 
+{% if b.load_failed %}
+<div class="mt-3 flex items-start gap-2 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-xs">
+  <span class="shrink-0">{{ icon('alert-triangle', 13) }}</span>
+  <span>Load failed: <span class="font-mono">{{ b.load_failed }}</span>. Run
+    <a href="/containers" class="underline font-medium">Diagnose</a> to read the real error from its log.</span>
+</div>
+{% endif %}
+
 {% if b.last_restart_error %}
 <div class="mt-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-xs">
   last restart: {{ b.last_restart_error }}
