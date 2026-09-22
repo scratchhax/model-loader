@@ -1,3 +1,8 @@
+{% if foreign %}
+<div class="mb-3 rounded-md bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-300 px-3 py-2 text-xs">
+  <span class="font-semibold">llama.cpp probably can't run this</span> — {{ foreign }}
+</div>
+{% endif %}
 {% if gated %}
 <div class="mb-3 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 px-3 py-2 text-xs">
   <span class="font-semibold">No context estimates for this repo</span> — {{ gated }}.

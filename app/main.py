@@ -553,6 +553,7 @@ def _downloaded_and_still_present() -> dict[str, list[str]]:
 async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
     error: str | None = None
     gated: str = ""
+    foreign: str = ""
     groups: list[dict] = []
     try:
         detail = await hf.repo_detail(repo_id)
@@ -599,7 +600,10 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
             # A gated repo lists its files publicly but refuses the weights, so estimates
             # would silently vanish with no explanation. Surface the reason instead.
             gated = hf.gated_reason(repo_id) if not summary else ""
-            if summary:
+            # Warn BEFORE the download, not after: the header already tells us llama.cpp
+            # can't load this, and without this the estimates just silently didn't appear.
+            foreign = autoconfig.foreign_gguf_reason(summary)
+            if summary and not foreign:
                 for g in groups:
                     first = g["files"][0]["path"].lower()
                     if not first.endswith(".gguf") or "mmproj" in first:
@@ -610,7 +614,7 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
         error = f"HF returned HTTP {e.response.status_code} for {repo_id}"
     except httpx.HTTPError as e:
         error = f"network error: {e}"
-    return templates.TemplateResponse("_repo_files.html", {"request": request, "repo_id": repo_id, "groups": groups, "error": error, "gated": gated})
+    return templates.TemplateResponse("_repo_files.html", {"request": request, "repo_id": repo_id, "groups": groups, "error": error, "gated": gated, "foreign": foreign})
 
 
 # ---------- Downloads ----------

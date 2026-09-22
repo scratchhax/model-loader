@@ -1106,6 +1106,25 @@ def _find_mmproj(models_dir: "Path | None", section_name: str, subdir: str = "")
     return ""
 
 
+def foreign_gguf_reason(summary: dict | None) -> str:
+    """Why llama.cpp won't load this GGUF, if its metadata says so; "" otherwise.
+
+    Every architecture llama.cpp loads writes `{arch}.block_count`. A file with none was built
+    for some other runtime - seen with Qwen3-ASR, converted as `qwen3_asr` with its settings
+    under `stt.*` keys, where llama.cpp expects a `qwen3` model plus an audio mmproj. Only a
+    MISSING key counts; a present-but-zero value is a sizing problem, handled separately.
+    """
+    # No architecture at all is a non-first shard (only shard 1 carries metadata), not a verdict.
+    arch = (summary or {}).get("arch") or ""
+    if not arch or (summary.get("model") or {}).get("block_count") is not None:
+        return ""
+    return (f"This GGUF (architecture '{arch}') wasn't made for llama.cpp: it has none of the "
+            "layer metadata every llama.cpp model carries, so llama.cpp will most likely refuse "
+            "to load it. It was probably converted for a different runtime. Look for a "
+            "llama.cpp-format GGUF of the same model instead - for audio and vision models "
+            "that usually means a model file plus an mmproj file.")
+
+
 def analyze(*,
             summary: dict,
             file_size: int,
@@ -1209,6 +1228,12 @@ def analyze(*,
                   "does not fit; the size of the card is simply unknown.",
         )
     backends = _sized
+
+    # A GGUF with no {arch}.block_count at all wasn't converted for llama.cpp: every model it
+    # can load carries that key. Say so, rather than suggesting a manual ctx-size that cannot help.
+    _foreign = foreign_gguf_reason(summary)
+    if _foreign:
+        return Recommendation(plans=[], recommended_backend="", recommended_ctx=0, error=_foreign)
 
     # HARD STOP if the KV cache cannot be sized from this GGUF's metadata.
     #
