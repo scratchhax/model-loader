@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 import httpx
@@ -692,9 +693,28 @@ def _dest_for_companion(main_stem: str, companion_filename: str) -> str:
     return f"{main_stem}/{Path(companion_filename).name}"
 
 
+def _blocked_chip(reason: str) -> HTMLResponse:
+    """What a refused download button turns into. The reason rides in the tooltip."""
+    return HTMLResponse(
+        '<span class="shrink-0 inline-flex items-center rounded-md bg-red-100 dark:bg-red-950 '
+        'text-red-800 dark:text-red-300 px-3 py-1.5 text-xs font-medium" '
+        f'title="{html.escape(reason)}">Blocked: llama.cpp can&rsquo;t load this</span>')
+
+
+async def _foreign_repo(repo_id: str, main_path: str) -> str:
+    """Why a download from this repo is refused, or "". Checked server-side as well as hidden
+    in the page, so a stale page or a hand-made request can't queue a file llama.cpp won't load.
+    An unreadable header (network, gated) is not a verdict and never blocks."""
+    return autoconfig.foreign_gguf_reason(await hf.gguf_header(repo_id, main_path))
+
+
 @app.post("/download", response_class=HTMLResponse)
 async def download_single(repo_id: str = Form(...), path: str = Form(...), size: int = Form(0)) -> HTMLResponse:
     base = Path(path).name
+    if base.lower().endswith(".gguf") and "mmproj" not in base.lower():
+        reason = await _foreign_repo(repo_id, path)
+        if reason:
+            return _blocked_chip(reason)
     if "mmproj" in base.lower():
         # Standalone mmproj download: put in a subdir named after its own stem
         stem = _model_stem(base)
@@ -759,6 +779,12 @@ async def download_multi(repo_id: str = Form(...), shard_base: str = Form(...)) 
             f'<span class="shrink-0 inline-flex items-center rounded-md bg-red-100 dark:bg-red-950 '
             f'text-red-800 dark:text-red-300 px-3 py-1.5 text-xs font-medium" title="{e}">HF error</span>'
         )
+    shards = sorted((f for f in detail.files if f.shard_base == shard_base),
+                    key=lambda f: (f.shard_index or 0, f.path))
+    if shards:
+        reason = await _foreign_repo(repo_id, shards[0].path)
+        if reason:
+            return _blocked_chip(reason)
     # All shards + companion mmproj go into the same subdir named after the shard base.
     subdir = Path(shard_base).stem  # strip .gguf
     count = 0
@@ -796,6 +822,13 @@ async def download_url(url: str = Form(...), filename: str = Form("")) -> HTMLRe
         return HTMLResponse('<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">could not derive filename — set one explicitly</div>')
     if "/" in filename or ".." in filename:
         return HTMLResponse('<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">filename must be a plain basename</div>')
+
+    if filename.lower().endswith(".gguf") and "mmproj" not in filename.lower():
+        reason = autoconfig.foreign_gguf_reason(await hf.url_gguf_header(url))
+        if reason:
+            return HTMLResponse(
+                '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">'
+                f'Not queued. {html.escape(reason)}</div>')
 
     total = 0
     try:

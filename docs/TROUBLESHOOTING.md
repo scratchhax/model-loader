@@ -76,7 +76,7 @@ Containers page → **Align capabilities** writes each model's vision flag into 
 
 ## "llama.cpp probably can't run this" on a search result
 
-The repo's GGUF has no layer metadata under its architecture name, which every model llama.cpp loads carries. It was converted for a different runtime. Seen with Qwen3-ASR: `handy-computer/Qwen3-ASR-1.7B-gguf` is a single `qwen3_asr` file with its settings under `stt.*` keys, while `ggml-org/Qwen3-ASR-1.7B-GGUF` ships the llama.cpp layout, a `qwen3vl` model plus an audio mmproj. Pick a repo without the warning. Autoconfig reports the same thing for a file already downloaded.
+The repo's GGUF has no layer metadata under its architecture name, which every model llama.cpp loads carries. It was converted for a different runtime. Seen with Qwen3-ASR: `handy-computer/Qwen3-ASR-1.7B-gguf` is a single `qwen3_asr` file with its settings under `stt.*` keys, while `ggml-org/Qwen3-ASR-1.7B-GGUF` ships the llama.cpp layout, a `qwen3vl` model plus an audio mmproj. Downloads from that repo are blocked, including a URL import of the same file; pick a repo without the warning. Autoconfig reports the same thing for a file downloaded before the block existed.
 
 The check only catches files missing that metadata. A file that carries it under an architecture llama.cpp doesn't know will still pass, and fails at load with "unknown model architecture".
 

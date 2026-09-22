@@ -72,12 +72,14 @@
         </div>
         {{ est_chips(group.estimates, group.native_ctx) }}
       </div>
+      {% if foreign %}<span class="shrink-0 inline-flex items-center rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 px-3 py-1.5 text-xs font-medium cursor-not-allowed" title="{{ foreign }}">Blocked</span>{% else %}
       <button hx-post="/download/multi"
               hx-vals='{"repo_id": "{{ repo_id }}", "shard_base": "{{ group.shard_base }}"}'
               hx-swap="outerHTML"
               class="inline-flex items-center gap-1.5 shrink-0 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
         {{ icon('download', 12) }} Download all shards
       </button>
+      {% endif %}
     </div>
     <details class="mt-2">
       <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">show individual shards</summary>
@@ -102,12 +104,14 @@
         </div>
         {{ est_chips(group.estimates, group.native_ctx) }}
       </div>
+      {% if foreign %}<span class="shrink-0 inline-flex items-center rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 px-3 py-1.5 text-xs font-medium cursor-not-allowed" title="{{ foreign }}">Blocked</span>{% else %}
       <button hx-post="/download"
               hx-vals='{"repo_id": "{{ repo_id }}", "path": "{{ f.path }}", "size": {{ f.size }} }'
               hx-swap="outerHTML"
               class="inline-flex items-center gap-1.5 shrink-0 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 text-xs font-medium shadow-card">
         {{ icon('download', 12) }} Download
       </button>
+      {% endif %}
     </div>
     {% endif %}
   </div>

@@ -212,6 +212,35 @@ async def gguf_header(repo_id: str, path: str) -> dict | None:
     return summary
 
 
+async def url_gguf_header(url: str) -> dict | None:
+    """The same one-megabyte header read as gguf_header, for an arbitrary URL import.
+
+    None when it can't be read (not a GGUF, no range support, network error); callers treat
+    that as "unknown" and let the download through rather than block on a guess.
+    """
+    from . import gguf_meta
+    headers = {"Range": f"bytes=0-{_HEADER_BYTES - 1}"}
+    if url.startswith(HF_RESOLVE):
+        headers.update(_auth_headers())
+    try:
+        # Streamed and cut off at the header size: a server that ignores Range answers 200 with
+        # the whole multi-GB file, and reading r.content would download all of it here.
+        buf = bytearray()
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+            async with client.stream("GET", url, headers=headers) as r:
+                if r.status_code not in (200, 206):
+                    return None
+                async for chunk in r.aiter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) >= _HEADER_BYTES:
+                        break
+        if not buf:
+            return None
+        return gguf_meta.summarize(gguf_meta.read_raw_bytes(bytes(buf[:_HEADER_BYTES])))
+    except (httpx.HTTPError, gguf_meta.GgufMetaError, ValueError, OSError):
+        return None
+
+
 async def _fetch_owner_avatar(client: httpx.AsyncClient, owner: str) -> str | None:
     for endpoint in (f"{HF_API}/organizations/{owner}/overview", f"{HF_API}/users/{owner}/overview"):
         try:
