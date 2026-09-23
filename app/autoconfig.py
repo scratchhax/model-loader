@@ -33,12 +33,16 @@ _CACHE_BYTES_PER_ELEM = {
     "iq4_nl": 0.6250,
 }
 
-_RESERVE_PER_GPU = 1.0   # CUDA runtime + driver context + scratch/cuBLAS workspace.
-                         # Bumped from 0.5 -> 1.0 for llama.cpp 0.3.0-dev (commit d222767+) which
-                         # recognizes MTP nextn tensors and allocates larger cuBLAS workspaces on
-                         # inference. Empirical: Qwen3.8-27B at ctx=159744 loaded fine but OOM'd
-                         # on first inference (cuBLAS workspace on device 1). At ctx=131072 fits
-                         # cleanly. If you pin an older image and want more ctx, drop this back to 0.5.
+_RESERVE_PER_GPU = 0.5   # CUDA runtime + driver context, per card.
+                         # This was 1.0 for a while, after Qwen3.8-27B at ctx=159744 loaded and
+                         # then OOMed on its first inference. The diagnosis at the time was
+                         # "bigger cuBLAS workspaces"; the real cause was the compute buffer,
+                         # which grows with ctx and was not in the budget at all - so a flat
+                         # reserve was the only lever available, and it had to be sized for the
+                         # worst ctx anyone might pick. compute_buffer_gb() now charges that
+                         # properly per context, so this is back to what it actually covers:
+                         # ~300 MB of CUDA context per card, plus slack. Measured with a model
+                         # loaded, the two cards carry ~0.3 GB each beyond model+KV+compute.
 # Every key autoconfig has an opinion about. For each one it either SETS a value or wants the
 # key GONE — nothing here may survive a Fill untouched. The list is what makes "Fill form" honest:
 # Fill writes the keys present in `values` and clears the rest of this set, so a recommendation
@@ -112,7 +116,16 @@ _CACHE_RAM_CONVOS = 4           # conversations to keep warm at the recommended 
 _CACHE_RAM_HEADROOM_GB = 8.0    # left for the OS, the other containers and page cache churn
 
 _MODEL_OVERHEAD_SINGLE = 1.00  # Q_K_M loads at ~file size when everything's on one card
-_MODEL_OVERHEAD_SPLIT = 1.08   # +8% for cross-GPU handoffs, duplicated activation buffers, layer-imbalance.
+_MODEL_OVERHEAD_SPLIT = 1.02   # +2% for layer-split imbalance (llama.cpp splits on layer
+                               # boundaries, so one card usually carries a little more).
+                               # Was 1.08: the extra 6% was standing in for the unbudgeted
+                               # compute buffer. Ground truth from three models on this rig -
+                               # GPU-resident weights equal the file size to within a percent
+                               # (gemma-4-26B 15.77 GiB on GPU vs a 15.78 GiB file; gemma-4-12b
+                               # 6.62 vs 6.7; Qwen3.8-27B keeps ~0.7 GiB of embeddings on the
+                               # CPU and so uses LESS). Keeping 1.08 on top of an explicit
+                               # compute charge double-counts it, and cost Qwen3.8-27B 40K of
+                               # context that measurement shows it can hold.
 _CACHE_DEFAULT = "q8_0"  # symmetric K/V; K stays q8, V could drop to q4 for +20% ctx (future preset)
 _SSM_STATE_BYTES = 4 * 1024 * 1024  # ~4 MB per SSM layer, derived from typical state_size×inner_size
 _CPU_LAYER_PENALTY = 20.0  # how much slower one CPU-resident DENSE layer is than a GPU one.
@@ -140,6 +153,64 @@ _MMPROJ_COMPUTE_GB = 0.5  # modality-encoder scratch beyond the projector weight
                           # model+KV+projector accounts for ~20.96 GiB — so ALL remaining overhead,
                           # both cards' CUDA contexts included, is ~1.67 GiB. _RESERVE_PER_GPU
                           # already covers most of that.
+
+
+# Compute buffers: llama.cpp's per-device scratch for one graph evaluation. Measured on this
+# rig (2x RTX 5070, layer split, flash-attn on, default ubatch 512), per card, in MiB:
+#
+#   ctx      gemma-4-26B (30L, 2816H)   Qwen3.8-27B (64L, 5120H)   gemma-4-12b
+#   32768    344                        377                        290
+#   65536    600                        633                        -
+#   114688   -                          1017                       -
+#   131072   1112                       -                          856
+#   212992   -                          -                          1336
+#   262144   2136*                      -                          -
+#   (* what it asked for; see the pipeline-parallelism note below)
+#
+# The size is LINEAR IN CONTEXT and, strikingly, near-independent of layer count and hidden
+# size: a 30-layer MoE and a 64-layer dense model share the same 7.81 MiB per 1K of context.
+# The intercept is small. gemma-4-12b sits lower (5.8) - sliding-window layers need less mask -
+# so taking the higher slope over-reserves slightly on those, which is the safe direction.
+#
+# Why this exists at all: before it, compute buffers were not in the budget, on the theory that
+# the overhead multiplier absorbed them. At small contexts it does. At 262144 gemma-4-26B wants
+# 2.1 GB PER CARD, which is 4.3 GB the fit table could not see - and it approved that context.
+# The model then loaded only because llama.cpp silently retried without pipeline parallelism and
+# squeezed into 1.3 GB, and it stopped loading at all the day another service parked 0.8 GB on
+# one card. Budgeting the number it ASKS for keeps pipeline parallelism intact rather than
+# quietly relying on the fallback.
+_COMPUTE_BASE_MIB = 128.0        # intercept; fits 88-121 measured, rounded up
+_COMPUTE_MIB_PER_1K_CTX = 7.81   # the measured slope, at ubatch 512
+_COMPUTE_REF_UBATCH = 512.0      # ubatch the slope was measured at
+# When the first reservation does not fit, llama.cpp logs "compute buffer allocation failed,
+# retrying without pipeline parallelism" and reserves a smaller one. That smaller buffer is
+# what a load actually REQUIRES, so it is what the budget charges - charging the larger figure
+# would refuse contexts that demonstrably work. The ratio is remarkably stable: 1339/2136 on
+# gemma-4-26B at 262144, 840/1337 on Qwen3.8-27B-Uncensored at 155648. Both 0.63.
+# The fallback is not a degraded mode worth avoiding: A/B on this rig showed the same
+# throughput with and without pipeline parallelism (~1,915 tok/s prompt, 32 tok/s generation).
+_COMPUTE_PP_FALLBACK = 0.63
+
+
+def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool = False) -> float:
+    """Per-CARD compute buffer, in GB. Every card allocates its own, so the pooled cost is this
+    times gpu_count.
+
+    pipeline_parallel=False (the default, and what the fit math uses) returns the REQUIRED size:
+    what llama.cpp settles for after dropping pipeline parallelism. True returns the larger size
+    it asks for first, which is only useful for telling the user a retry is coming.
+
+    Scaled by ubatch because the ctx-sized term is a mask over the micro-batch: doubling ubatch
+    doubles it. Autoconfig never raises ubatch itself (see the note where batch-size is set), so
+    in practice this runs at the 512 the measurements used.
+    """
+    if total_ctx <= 0:
+        return 0.0
+    ub_mult = max(0.25, float(ubatch or _COMPUTE_REF_UBATCH) / _COMPUTE_REF_UBATCH)
+    mib = _COMPUTE_BASE_MIB + _COMPUTE_MIB_PER_1K_CTX * (total_ctx / 1024.0) * ub_mult
+    if not pipeline_parallel:
+        mib *= _COMPUTE_PP_FALLBACK
+    return mib / 1024.0
 
 
 def _cache_dtype_bytes(k: str) -> float:
@@ -335,7 +406,11 @@ class FitRow:
     total_ctx: int           # ctx * n_sessions — what llama-server allocates as --ctx-size
     model_gb: float          # GPU-resident weight VRAM (accounts for MoE offload)
     kv_gb: float
-    total_gb: float          # model_gb + kv_gb
+    compute_gb: float        # graph scratch, per card x cards. Grows with ctx; see
+                             # compute_buffer_gb. Carried on the row so the panel can show it:
+                             # this cost was invisible for a long time, and an invisible cost
+                             # is how a table ends up approving a context that cannot load.
+    total_gb: float          # model_gb + kv_gb + compute
     fits: bool
     free_gb: float
     offload_kind: str = ""   # "" | "cpu-moe" | "n-cpu-moe"
@@ -720,7 +795,9 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                      ssm_state_size: int | None = None,
                      v_bytes_per_elem: float | None = None,
                      card_ok: "Callable[[float, float, int], bool] | None" = None,
-                     swa: dict | None = None) -> list[tuple[int, int, float, float]]:
+                     swa: dict | None = None,
+                     compute_gb_fn: "Callable[[int], float] | None" = None,
+                     gpu_count: int = 1) -> list[tuple[int, int, float, float]]:
     """For a MoE model on a given backend, sweep n-cpu-moe from 0..layers.
 
     `card_ok(weight_gb, kv_gb, n_cpu_moe)` is the same per-card feasibility test the fit table
@@ -754,9 +831,14 @@ def _pareto_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                                    full_attention_interval=full_attention_interval,
                                    ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes_per_elem) / (1024 ** 3)
-            if card_ok is not None and not card_ok(weight_gb, kv_gb, ncm):
+            # The compute buffer is per card and grows with ctx, so it belongs to this loop
+            # rather than the flat budget. Folded into the KV term because that is the other
+            # ctx-sized cost both the budget test and card_ok already understand; pooled value
+            # is per-card x cards.
+            kv_eff = kv_gb + (compute_gb_fn(ctx * n) * max(1, gpu_count) if compute_gb_fn else 0.0)
+            if card_ok is not None and not card_ok(weight_gb, kv_eff, ncm):
                 continue
-            if weight_gb + kv_gb <= budget_gb:
+            if weight_gb + kv_eff <= budget_gb:
                 if ctx > best_ctx:
                     best_ctx = ctx
                     best_kv = kv_gb
@@ -777,7 +859,9 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                     ssm_state_size: int | None = None,
                     v_bytes_per_elem: float | None = None,
                     card_ok: "Callable[[float, float], bool] | None" = None,
-                    swa: dict | None = None) -> list[tuple[int, int, float, float]]:
+                    swa: dict | None = None,
+                    compute_gb_fn: "Callable[[int], float] | None" = None,
+                    gpu_count: int = 1) -> list[tuple[int, int, float, float]]:
     """Context-vs-speed frontier for a DENSE model, by moving whole layers off the GPU.
 
     MoE models offload expert weights (`--cpu-moe` / `--n-cpu-moe`), which is cheap because
@@ -812,8 +896,10 @@ def _dense_frontier(arch: str, layers: int, kv_heads: int, head_dim: int,
                                    full_attention_interval=full_attention_interval,
                                    ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes_per_elem) / (1024 ** 3)
-            if weight_gb + kv_gb <= budget_gb and ctx > best_ctx:
-                if card_ok is not None and not card_ok(weight_gb, kv_gb):
+            # Per-card compute buffer, folded into the ctx-sized cost. See the MoE frontier.
+            kv_eff = kv_gb + (compute_gb_fn(ctx * n) * max(1, gpu_count) if compute_gb_fn else 0.0)
+            if weight_gb + kv_eff <= budget_gb and ctx > best_ctx:
+                if card_ok is not None and not card_ok(weight_gb, kv_eff):
                     continue
                 best_ctx, best_kv = ctx, kv_gb
         if best_ctx == 0:
@@ -1399,17 +1485,23 @@ def analyze(*,
                 _offload[b["name"]] = max_fit_offload
         return _plans, _offload
 
+    # The micro-batch the compute buffer is sized against. llama-server defaults to 512,
+    # which is what the measurements behind compute_buffer_gb used; a user who raises it pays
+    # proportionally more scratch, so honour whatever the section actually sets.
+    try:
+        ubatch = int(str((current_section or {}).get("ubatch-size") or 512).strip() or 512)
+    except (TypeError, ValueError):
+        ubatch = 512
+
     def _fit_backend(b: dict, v_bytes: float,
                      weight_gb: float | None = None) -> tuple[list[FitRow], int, tuple[str, int]]:
         rows: list[FitRow] = []
         gpu_count = max(1, int(b.get("gpu_count", 1)))
         # Reserve scales per GPU (each CUDA context takes ~500 MB just to be initialized).
-        # NOTE: compute buffer VRAM (prompt-eval scratch, ~1-2 GB at stock ub) is NOT
-        # subtracted from budget. Real-world calibration on this rig shows the 1.08
-        # split-overhead + 0.5 GB/GPU reserve already over-estimates enough to absorb
-        # the compute buffer for models we've tested. Explicitly subtracting compute_gb
-        # here over-corrects and drops working ctx picks. If we hit OOMs on models the
-        # picker approves, revisit this.
+        # The compute buffer is charged per context inside the loop below - it is the one
+        # term here that grows with ctx, so it cannot live in a flat reserve. (This replaces
+        # an earlier decision to leave it out entirely and let the overhead multiplier absorb
+        # it; that held until a model asked for 2.1 GB a card at 262144. See compute_buffer_gb.)
         # The projector is pinned to the main GPU, not layer-split. Under an even layer
         # split every GB pinned to one card costs gpu_count GB of usable POOLED capacity,
         # because the matching share on the other cards cannot be used for it either.
@@ -1444,10 +1536,14 @@ def analyze(*,
                                    full_attention_interval=full_attention_interval,
                                    ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes) / (1024 ** 3)
+            # Scratch for one graph evaluation, allocated on EVERY card, growing with ctx.
+            comp_gb = compute_buffer_gb(total_ctx, ubatch)
+            ctx_budget = budget - comp_gb * gpu_count
+            ctx_caps = [c - comp_gb for c in card_caps]
             # The per-card test is handed to the search rather than applied to its answer, so
             # it can keep offloading until BOTH the pool and every individual card are happy.
             def _card_ok(gpu_gb: float, kind: str, n: int,
-                         _kv=kv_gb, _caps=card_caps, _pin=pinned_gb) -> bool:
+                         _kv=kv_gb, _caps=ctx_caps, _pin=pinned_gb) -> bool:
                 if gpu_count <= 1 or not _caps:
                     return True
                 if eff_moe > 0:
@@ -1459,11 +1555,14 @@ def analyze(*,
                 return _split_feasible(layers, ncm, att, exp, _kv, gpu_count, _pin, _caps)
 
             fits, gpu_model_gb, offload_kind, n_cm = _find_fit(
-                model_gb, kv_gb, budget, layers, eff_moe, card_ok=_card_ok)
-            total = gpu_model_gb + kv_gb
+                model_gb, kv_gb, ctx_budget, layers, eff_moe, card_ok=_card_ok)
+            # Reported totals include the compute buffer on every card, so the number in the
+            # table is what the load will actually occupy rather than an optimistic subset.
+            total = gpu_model_gb + kv_gb + comp_gb * gpu_count
             rows.append(FitRow(
                 ctx=per_session_ctx, total_ctx=total_ctx,
                 model_gb=round(gpu_model_gb, 2), kv_gb=round(kv_gb, 2),
+                compute_gb=round(comp_gb * gpu_count, 2),
                 total_gb=round(total, 2), fits=fits,
                 free_gb=round(float(b["vram_gb"]) - total, 2),
                 offload_kind=offload_kind, n_cpu_moe=n_cm,
@@ -1680,7 +1779,9 @@ def analyze(*,
                                         full_attention_interval=full_attention_interval,
                                         ssm_state_size=ssm_state_size,
                                         v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
-                                        card_ok=_moe_card_ok, swa=_swa)
+                                        card_ok=_moe_card_ok, swa=_swa,
+                                        compute_gb_fn=lambda tc: compute_buffer_gb(tc, ubatch),
+                                        gpu_count=gpu_count)
             presets = _presets_from_frontier(frontier, recommended.name, layers, native_ctx)
             frontier_opts = _frontier_options(frontier, recommended.name, layers, dense=False)
             if presets:
@@ -1723,7 +1824,9 @@ def analyze(*,
                                      full_attention_interval=full_attention_interval,
                                      ssm_state_size=ssm_state_size,
                                      v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
-                                     card_ok=_front_card_ok, swa=_swa)
+                                     card_ok=_front_card_ok, swa=_swa,
+                                     compute_gb_fn=lambda tc: compute_buffer_gb(tc, ubatch),
+                                     gpu_count=gpu_count)
             presets = _presets_from_dense_frontier(dfront, recommended.name, layers)
             frontier_opts = _frontier_options(dfront, recommended.name, layers, dense=True)
             if presets:

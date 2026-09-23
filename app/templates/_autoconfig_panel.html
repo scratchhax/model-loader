@@ -447,7 +447,7 @@
           {% for ctx in ctx_columns %}
             {% set row = plan_row_map[p.name].get(ctx) %}
             {% if row %}
-              {% set title = ('%.2f GB total (%.2f model + %.2f KV) · free %.2f GB' % (row.total_gb, row.model_gb, row.kv_gb, row.free_gb)) %}
+              {% set title = ('%.2f GB total (%.2f model + %.2f KV + %.2f compute) · free %.2f GB' % (row.total_gb, row.model_gb, row.kv_gb, row.compute_gb, row.free_gb)) %}
               {# Colour encodes HOW MUCH of the model stays on the GPU, not merely whether it
                  fits. A tick alone hid the difference between a config that is fully resident
                  and one clinging on with a quarter of its weights, which is the difference
