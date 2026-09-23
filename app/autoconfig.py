@@ -1211,6 +1211,35 @@ def foreign_gguf_reason(summary: dict | None) -> str:
             "that usually means a model file plus an mmproj file.")
 
 
+def _preset_for_saved_ctx(presets: list[PresetOption], current_section: dict | None,
+                          n_sessions: int) -> "PresetOption | None":
+    """The cheapest preset that still holds the context this section is ALREADY configured for.
+
+    Autoconfig runs on sections people have tuned and are using. Handing back less context than
+    the model is running with today reads as a downgrade even when the reasoning is sound, and
+    the person has to notice the chip they wanted and click it. So when the saved ctx-size is
+    still reachable, that becomes the default pick; the lower-context, faster presets remain one
+    click away.
+
+    Only ever preserves what is saved. If the saved context no longer fits - which is the whole
+    point of budgeting compute buffers - nothing here matches and the normal default applies.
+    The caller applies this only when it beats the ordinary default, so a section saved at a
+    deliberately small context still gets offered the larger one: this rule exists to prevent
+    silent downgrades, not to freeze whatever is already there.
+    """
+    if not presets or not current_section:
+        return None
+    try:
+        saved_total = int(str(current_section.get("ctx-size") or "").strip() or 0)
+    except (TypeError, ValueError):
+        return None
+    if saved_total <= 0:
+        return None
+    saved_per_session = saved_total // max(1, n_sessions)
+    holds = [p for p in presets if p.ctx >= saved_per_session]
+    return min(holds, key=lambda p: p.ctx) if holds else None
+
+
 def analyze(*,
             summary: dict,
             file_size: int,
@@ -1785,7 +1814,11 @@ def analyze(*,
             presets = _presets_from_frontier(frontier, recommended.name, layers, native_ctx)
             frontier_opts = _frontier_options(frontier, recommended.name, layers, dense=False)
             if presets:
-                chosen = next((p for p in presets if p.key == preset), presets[len(presets) // 2])
+                _default = presets[len(presets) // 2]
+                _saved = _preset_for_saved_ctx(presets, current_section, n_sessions)
+                if _saved is not None and _saved.ctx <= _default.ctx:
+                    _saved = None   # the default already matches or beats what is configured
+                chosen = next((p for p in presets if p.key == preset), _saved or _default)
                 active_preset = chosen.key
                 rec_ctx = chosen.ctx
                 off_kind = chosen.offload_kind
