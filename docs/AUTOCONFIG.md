@@ -11,20 +11,52 @@ For a backend with `V` GB of pooled VRAM across `N` GPUs:
 ```
 budget    = V - (RESERVE_PER_GPU × N) - projector_vram
 model_gb  = file_size_gb × overhead_mul
-kv_budget = budget - model_gb
+kv_budget = budget - model_gb - (compute_buffer_gb(ctx) × N)
 ```
 
 Constants (`app/autoconfig.py`):
 
 | Constant | Value | Why |
 |---|---|---|
-| `_RESERVE_PER_GPU` | `1.0` GB | CUDA runtime, driver context, scratch and cuBLAS workspace. Scales with GPU count. Raised from 0.5 for llama.cpp 0.3.0-dev, which allocates more per device. |
+| `_RESERVE_PER_GPU` | `0.5` GB | CUDA runtime and driver context, per card. Was 1.0 while the compute buffer went unbudgeted; a flat reserve was the only lever and had to cover the worst context anyone might pick. |
 | `_MODEL_OVERHEAD_SINGLE` | `1.00` | Q_K_M loads at roughly file size when everything is on one card. |
-| `_MODEL_OVERHEAD_SPLIT` | `1.08` | +8% for cross-GPU handoffs and duplicated activation buffers. |
+| `_MODEL_OVERHEAD_SPLIT` | `1.02` | +2% for layer-split imbalance. Was 1.08; the extra 6% was standing in for the compute buffer, which is now charged directly. |
+| `_COMPUTE_MIB_PER_1K_CTX` | `7.81` MiB | Compute buffer growth per 1K of context, per card, at ubatch 512. |
+| `_COMPUTE_PP_FALLBACK` | `0.63` | llama.cpp's reservation after it drops pipeline parallelism, which is what a load actually requires. |
 | `_CACHE_DEFAULT` | `q8_0` | Half the KV cache of fp16 with negligible quality loss. |
 | `_CPU_LAYER_PENALTY` | `20.0` | How much slower one CPU-resident **dense** layer is than a GPU one. Drives the speed estimate only. |
 | `_MMPROJ_VRAM_MULT` | `1.0` | A multimodal projector occupies about its file size in VRAM. |
 | `_MMPROJ_COMPUTE_GB` | `0.5` | Encoder scratch beyond the projector weights. |
+
+## Compute buffers
+
+Weights and KV cache are not the whole story. llama.cpp also allocates a **compute buffer** on
+every card: scratch for one graph evaluation. It grows with context, and on a model that
+otherwise fits it is usually what fails to allocate.
+
+Measured on 2× RTX 5070, layer split, flash attention on, ubatch 512, per card:
+
+| ctx | gemma-4-26B (30L, 2816H) | Qwen3.8-27B (64L, 5120H) | gemma-4-12b |
+|---|---|---|---|
+| 32768 | 344 MiB | 377 MiB | 290 MiB |
+| 65536 | 600 | 633 | — |
+| 131072 | 1112 | — | 856 |
+| 262144 | 2136* | — | — |
+
+Two things stand out. It is **linear in context**, at 7.81 MiB per 1K. And it barely depends on
+layer count or hidden size: a 30-layer MoE and a 64-layer dense model share the same slope.
+
+\* That is what it *asks* for. When the first reservation does not fit, llama.cpp logs
+`compute buffer allocation failed, retrying without pipeline parallelism` and takes a smaller
+one — 0.63×, measured twice (1339/2136 and 840/1337 on different models). The smaller figure is
+what a load genuinely requires, so that is what the budget charges. Refusing the bigger one
+would rule out contexts that demonstrably work, and the fallback costs no measurable
+throughput: the same model A/B'd at ~1,915 tok/s prompt and 32 tok/s generation either way.
+
+Before this was modelled, the cost was invisible and the margins were tuned to hide it. That
+held until a 262144 context asked for 2.1 GB a card, 4.3 GB the table could not see, and
+autoconfig recommended a configuration that would not load. The per-context figure now appears
+in the fit table tooltip next to model and KV.
 
 ## Pooled VRAM is not enough: the per-card check
 
