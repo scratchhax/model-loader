@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import re
 import shutil
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -798,6 +800,169 @@ def vram_fit_chips(size_bytes: int) -> list[dict]:
             "ratio_pct": round(ratio * 100),
             "is_cpu": True,
         })
+    return out
+
+
+@dataclass
+class InferenceSpeed:
+    """How fast the loaded model is working right now, for the card's speedometer."""
+    model: str = ""
+    state: str = "idle"        # "generating" | "prefill" | "idle"
+    gen_tps: float = 0.0       # tokens/s out. Rolling 3s figure where llama offers one.
+    gen_tokens: int = 0        # tokens produced in the run these rates came from
+    prefill_tps: float = 0.0   # tokens/s in
+    prefill_pct: int = 0       # progress through the current prompt, 0-100
+    ctx_used: int = 0          # tokens of the current request
+    ctx_total: int = 0         # the slot's ctx-size
+    ctx_cached: int = 0        # of ctx_used, how many came from cache instead of being re-read
+    live: bool = False         # rates describe work happening NOW, not the last run
+
+
+# llama-server prints these at its default log level, every ~3 s while a slot works. There is no
+# metrics endpoint to ask instead: /metrics needs a flag this deployment does not pass, and
+# /slots carries state but no counters or rates. So the numbers come from the log, and the
+# state comes from /slots - each from the source that actually has it.
+#
+#   ... n_gen =    806, tg =  26.02 t/s, tg_3s =  25.99 t/s
+#   ... prompt processing, n_tokens =   7105, progress = 1.00, t =   4.70 s / 1511.80 tokens per second
+_RE_TG = re.compile(r"n_gen\s*=\s*(\d+),\s*tg\s*=\s*([\d.]+) t/s"
+                    r"(?:,\s*tg_3s\s*=\s*([\d.]+))?")
+_RE_PP = re.compile(r"prompt processing, n_tokens\s*=\s*(\d+), progress\s*=\s*([\d.]+), "
+                    r"t\s*=\s*[\d.]+ s / ([\d.]+) tokens per second")
+_RE_TASK = re.compile(r"task\s+(\d+)\s*\|")
+
+# One read per container per interval, shared by every caller in that window. The card polls
+# every 2 s and reading a log tail is the expensive half, so this keeps a burst of renders from
+# multiplying docker calls.
+_SPEED_TTL = 1.8
+_speed_cache: dict[str, tuple[float, "InferenceSpeed | None"]] = {}
+# (when, token count, task) of the previous sample, so a rate can be derived from how fast the
+# slot's token count is moving. llama only logs a generation timing line every ~3 s, which left
+# the first seconds of a reply looking like it was still reading the prompt.
+_speed_prev: dict[str, tuple[float, int, int | None, bool]] = {}
+
+
+async def _slot_state(container_name: str, internal_port: int, model_id: str) -> dict:
+    """The loaded model's slot 0, or {} if it cannot be read."""
+    url = f"http://{container_name}:{internal_port}/slots"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, read=2.0)) as client:
+            r = await client.get(url, params={"model": model_id})
+        if r.status_code != 200:
+            return {}
+        slots = r.json()
+        return slots[0] if isinstance(slots, list) and slots else {}
+    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        return {}
+
+
+def _rates_from_log(name: str, task_id: int | None) -> dict:
+    """Throughput from the current run's log tail, split by WHICH request it describes.
+
+    Every timing line names its task, and /slots reports the task a busy slot is working on. Tying
+    the two together is what makes the difference between "reading the prompt at 1,985 tok/s" and
+    a stale number from the request before it. An earlier version ignored the task id and reported
+    the previous run's rates - and its finished 100% progress bar - as if they were current.
+
+    Returns rates for the live task (cur_*) and, separately, the most recent of any task (last_*),
+    which is what the card shows, dimmed, while the model sits idle.
+    """
+    out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
+           "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": ""}
+    # 300 lines, not 120: while a slot generates it logs a timing line every ~3 s, so a long
+    # reply buries the prompt-processing lines from the start of that same request - and the
+    # prefill rate would read as zero exactly when it is most interesting.
+    ok, text = container_logs(name, tail=300, current_run_only=True)
+    if not ok:
+        return out
+    for line in reversed(text.splitlines()):
+        m_task = _RE_TASK.search(line)
+        if not m_task:
+            continue
+        mine = task_id is not None and int(m_task.group(1)) == task_id
+        m = _RE_TG.search(line)
+        if m:
+            tps, toks = float(m.group(3) or m.group(2)), int(m.group(1))
+            if not out["last_gen_tps"]:
+                out["last_gen_tps"], out["last_gen_tokens"] = tps, toks
+            if mine and not out["cur_gen_tps"]:
+                out["cur_gen_tps"], out["cur_gen_tokens"] = tps, toks
+                out["newest"] = out["newest"] or "gen"
+            continue
+        m = _RE_PP.search(line)
+        if m:
+            tps, pct = float(m.group(3)), int(round(float(m.group(2)) * 100))
+            if not out["last_pp_tps"]:
+                out["last_pp_tps"] = tps
+            if mine and not out["cur_pp_tps"]:
+                out["cur_pp_tps"], out["cur_pp_pct"] = tps, pct
+                out["newest"] = out["newest"] or "prefill"
+    return out
+
+
+async def inference_speed(container_name: str, internal_port: int | None,
+                          loaded_model: str | None) -> "InferenceSpeed | None":
+    """Live throughput for a backend, or None when there is nothing to show.
+
+    Cheap parts first: no loaded model means no speedometer, and that is the common case on an
+    idle box. Both reads are skipped entirely in that state.
+    """
+    if not loaded_model or internal_port is None:
+        return None
+    cached = _speed_cache.get(container_name)
+    if cached and (time.time() - cached[0]) < _SPEED_TTL:
+        return cached[1]
+
+    model_id = loaded_model.split(",")[0].strip()
+    slot = await _slot_state(container_name, internal_port, model_id)
+    busy = bool(slot.get("is_processing"))
+    task_id = slot.get("id_task")
+    task_id = int(task_id) if isinstance(task_id, (int, float)) else None
+    r = await asyncio.to_thread(_rates_from_log, container_name, task_id if busy else None)
+
+    ctx_used = int(slot.get("n_prompt_tokens") or 0)
+    processed = int(slot.get("n_prompt_tokens_processed") or 0)
+    cached_tok = int(slot.get("n_prompt_tokens_cache") or 0)
+
+    now = time.time()
+    prev = _speed_prev.get(container_name)
+
+    if busy:
+        # A fresh task always reads its prompt first, so before any timing line for it appears,
+        # prefill is the truthful state - and its rates stay empty rather than borrowing the
+        # previous request's. Once the prompt is in, the slot is generating even if no timing
+        # line has been written yet.
+        prefill_tps, prefill_pct = r["cur_pp_tps"], r["cur_pp_pct"]
+        if not prefill_pct and ctx_used:
+            prefill_pct = min(100, int(round(100.0 * (cached_tok + processed) / ctx_used)))
+        state = "generating" if (r["cur_gen_tps"] or prefill_pct >= 100) else "prefill"
+        gen_tps, gen_tokens = r["cur_gen_tps"], r["cur_gen_tokens"]
+        if state == "generating" and not gen_tps and prev and prev[2] == task_id and prev[3]:
+            # The slot's token count climbs by one per generated token, so its movement between
+            # two polls is a live rate - available at once, where the log's is up to 3 s behind.
+            # Only valid when the PREVIOUS sample was already generating: across the prefill
+            # boundary the count jumps by a whole prompt chunk, which read as thousands of
+            # tokens per second before this guard existed.
+            dt, dn = now - prev[0], ctx_used - prev[1]
+            if 0.4 < dt < 10.0 and dn > 0:
+                gen_tps = dn / dt
+    else:
+        state = "idle"
+        gen_tps, gen_tokens = r["last_gen_tps"], r["last_gen_tokens"]
+        prefill_tps, prefill_pct = r["last_pp_tps"], 0
+
+    if busy:
+        _speed_prev[container_name] = (now, ctx_used, task_id, state == "generating")
+    else:
+        _speed_prev.pop(container_name, None)
+
+    out = InferenceSpeed(
+        model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
+        prefill_tps=prefill_tps, prefill_pct=prefill_pct,
+        ctx_used=ctx_used, ctx_total=int(slot.get("n_ctx") or 0), ctx_cached=cached_tok,
+        live=busy,
+    )
+    _speed_cache[container_name] = (time.time(), out)
     return out
 
 

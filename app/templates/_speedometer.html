@@ -1,0 +1,78 @@
+{% from "_icons.html" import icon %}
+{#
+  Live throughput for the loaded model. Rendered inside the card's 2s polling zone.
+
+  Three numbers, because they answer different questions:
+    generation  - how fast tokens come out, which is what you feel while reading a reply
+    prefill     - how fast the prompt goes in, which is what you wait through before it starts
+    context     - how much of the window this request uses, and how much came from cache
+                  instead of being re-read. That last part is why a follow-up is instant and a
+                  fresh conversation is not.
+
+  Rates come from llama-server's own log lines, so when nothing is running they describe the
+  LAST piece of work rather than the present. They are dimmed and labelled in that state rather
+  than blanked: the last speed you saw is the useful thing to compare against.
+#}
+{% if speed %}
+{% set busy = speed.live %}
+<div class="mt-3 rounded-lg border {% if busy %}border-emerald-300 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30{% else %}border-slate-200 dark:border-slate-800{% endif %} px-3 py-2">
+
+  <div class="flex items-center justify-between gap-2">
+    <span class="inline-flex items-center gap-1.5 text-[11px] font-medium">
+      {% if speed.state == 'generating' %}
+        <span class="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+        <span class="text-emerald-700 dark:text-emerald-300">generating</span>
+      {% elif speed.state == 'prefill' %}
+        <span class="inline-block h-1.5 w-1.5 rounded-full bg-sky-500"></span>
+        <span class="text-sky-700 dark:text-sky-300">reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}</span>
+      {% else %}
+        <span class="inline-block h-1.5 w-1.5 rounded-full bg-slate-300 dark:bg-slate-600"></span>
+        <span class="text-slate-500 dark:text-slate-400">idle{% if speed.gen_tps %} · last run{% endif %}</span>
+      {% endif %}
+    </span>
+    {% if speed.ctx_total %}
+    <span class="text-[10px] font-mono text-slate-500 dark:text-slate-400"
+          title="{{ '{:,}'.format(speed.ctx_used) }} of {{ '{:,}'.format(speed.ctx_total) }} tokens of context in use{% if speed.ctx_cached %}; {{ '{:,}'.format(speed.ctx_cached) }} of them were reused from cache rather than re-read{% endif %}">
+      ctx {{ (speed.ctx_used / 1024) | round(1) }}k / {{ (speed.ctx_total / 1024) | round(0) | int }}k
+    </span>
+    {% endif %}
+  </div>
+
+  <div class="mt-1.5 flex items-end gap-5">
+    <div>
+      <div class="flex items-baseline gap-1">
+        <span class="text-lg font-semibold tabular-nums {% if speed.state == 'generating' %}text-emerald-700 dark:text-emerald-300{% elif not busy %}text-slate-400 dark:text-slate-500{% endif %}">
+          {{ '%.1f' % speed.gen_tps if speed.gen_tps else '—' }}
+        </span>
+        <span class="text-[10px] text-slate-500 dark:text-slate-400">tok/s out</span>
+      </div>
+      <div class="text-[10px] text-slate-400 dark:text-slate-500">
+        {% if speed.gen_tokens %}{{ '{:,}'.format(speed.gen_tokens) }} generated{% else %}generation{% endif %}
+      </div>
+    </div>
+    <div>
+      <div class="flex items-baseline gap-1">
+        <span class="text-lg font-semibold tabular-nums {% if speed.state == 'prefill' %}text-sky-700 dark:text-sky-300{% elif not busy %}text-slate-400 dark:text-slate-500{% endif %}">
+          {{ '%.0f' % speed.prefill_tps if speed.prefill_tps else '—' }}
+        </span>
+        <span class="text-[10px] text-slate-500 dark:text-slate-400">tok/s in</span>
+      </div>
+      <div class="text-[10px] text-slate-400 dark:text-slate-500">prompt reading</div>
+    </div>
+  </div>
+
+  {% if speed.ctx_total and speed.ctx_used %}
+  {# Context bar: the cached share sits to the left of the freshly-read share, so a long
+     conversation that is mostly cache reads as cheap at a glance. #}
+  {% set used_pct = (100.0 * speed.ctx_used / speed.ctx_total) | round(1) %}
+  {% set cached_pct = (100.0 * speed.ctx_cached / speed.ctx_total) | round(1) %}
+  <div class="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
+       title="{{ used_pct }}% of the context window in use{% if speed.ctx_cached %}, {{ (100.0 * speed.ctx_cached / speed.ctx_used) | round(0) | int }}% of it reused from cache{% endif %}">
+    <div class="flex h-full">
+      <div class="h-full bg-slate-400 dark:bg-slate-500" style="width: {{ cached_pct }}%"></div>
+      <div class="h-full bg-sky-500" style="width: {{ (used_pct - cached_pct) if used_pct > cached_pct else 0 }}%"></div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}

@@ -1520,8 +1520,12 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     b = next((x for x in backends if x.name == name), None)
     if b is None:
         return HTMLResponse(f"<span class='text-xs text-slate-500'>unknown backend: {name}</span>")
+    # Throughput rides along with the rest of the 2 s poll rather than having its own timer:
+    # one refresh, one consistent picture, and no second interval to reason about.
+    speed = await services.inference_speed(name, b.internal_port, b.loaded_model)
     return templates.TemplateResponse("_container_dashboard.html", {
         "request": request, "b": b, "stats": _stats_by_name(), "perf": _perf_by_name(),
+        "speed": speed,
     })
 
 
