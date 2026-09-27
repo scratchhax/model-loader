@@ -219,40 +219,113 @@ def _read_vulkan(container, container_name: str) -> GpuStats | None:
     )
 
 
+def _amd_num(card: dict, include: tuple[str, ...], exclude: tuple[str, ...] = ()) -> float:
+    """First numeric value in a rocm-smi card dict whose key matches, or 0.0.
+
+    Keys are matched by substring rather than spelled out because rocm-smi renames them between
+    releases: power has been "Average Graphics Package Power (W)" and "Current Socket Graphics
+    Package Power (W)", and VRAM totals have moved between --showmemuse and --showmeminfo. A
+    literal lookup silently returns zero on the wrong version, which then reads as "this backend
+    has no VRAM" and stops autoconfig dead.
+    """
+    for key, val in card.items():
+        k = key.lower()
+        if all(n in k for n in include) and not any(x in k for x in exclude):
+            try:
+                return float(str(val).strip())
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _amd_name(card_key: str, card: dict) -> str:
+    for key in ("Card Series", "Card Model", "Device Name", "Card SKU", "Market Name"):
+        v = str(card.get(key) or "").strip()
+        if v and v.lower() not in ("n/a", "unknown"):
+            return v
+    return card_key
+
+
 def _read_amd(container, container_name: str) -> GpuStats | None:
-    cmd = "rocm-smi --showuse --showmemuse --showtemp --showpower --json"
-    try:
-        r = container.exec_run(cmd, demux=False)
-    except DockerException:
-        return None
-    if r.exit_code != 0:
-        return None
-    try:
-        data = json.loads(r.output.decode(errors="replace"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    """Per-card AMD stats, aggregated the same way as NVIDIA.
+
+    Reads EVERY card, not just the first. The earlier version took `next(iter(data.items()))`
+    and sourced VRAM only from the GPU_VRAM override, so on a two-card ROCm box the sampler
+    reported one device and no per-card capacities - which quietly disables the per-card fit
+    check in autoconfig. That check is the thing standing between a config that clears the
+    pooled budget and one that OOMs a single device, so on AMD the most dangerous class of
+    mis-sizing was invisible.
+
+    VRAM comes from the hardware when rocm-smi reports it, and falls back to the GPU_VRAM
+    override (split across the cards) only when it does not.
+    """
+    # --showmeminfo gives byte-accurate totals; the rest are cheap. Older rocm-smi builds reject
+    # unknown flags outright, so fall back to the minimal set it has always understood.
+    cmds = (
+        "rocm-smi --showid --showproductname --showuse --showmemuse "
+        "--showmeminfo vram --showtemp --showpower --json",
+        "rocm-smi --showuse --showmemuse --showtemp --showpower --json",
+    )
+    data: dict | None = None
+    for cmd in cmds:
+        try:
+            r = container.exec_run(cmd, demux=False)
+        except DockerException:
+            return None
+        if r.exit_code != 0:
+            continue
+        try:
+            parsed = json.loads(r.output.decode(errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(parsed, dict) and parsed:
+            data = parsed
+            break
     if not data:
         return None
-    try:
-        card_key, card = next(iter(data.items()))
-    except StopIteration:
+
+    # rocm-smi keys cards as "card0", "card1", ...; sort numerically so device order is stable.
+    def _idx(key: str) -> int:
+        digits = "".join(ch for ch in key if ch.isdigit())
+        return int(digits) if digits else 0
+
+    items = sorted(((k, v) for k, v in data.items() if isinstance(v, dict)), key=lambda kv: _idx(kv[0]))
+    if not items:
         return None
-    total_gb = float(settings.gpu_vram_map.get(container_name, 0)) or 0.0
-    try:
-        vram_pct = float(card.get("GPU Memory Allocated (VRAM%)", 0) or 0)
-        util = float(card.get("GPU use (%)", 0) or 0)
-        temp = float(card.get("Temperature (Sensor edge) (C)", 0) or 0)
-        power = float(card.get("Average Graphics Package Power (W)", 0) or 0)
-    except ValueError:
-        return None
+
+    env_total = float(settings.gpu_vram_map.get(container_name, 0) or 0.0)
+    per_card_env = (env_total / len(items)) if env_total else 0.0
+
+    cards: list[GpuCard] = []
+    for i, (card_key, card) in enumerate(items):
+        total_b = _amd_num(card, ("vram", "total"), exclude=("used", "%"))
+        used_b = _amd_num(card, ("vram", "used"))
+        total_gb = round(total_b / (1024 ** 3), 2) if total_b else round(per_card_env, 2)
+        used_gb = round(used_b / (1024 ** 3), 2) if used_b else 0.0
+        if not used_gb:
+            # No byte figure: derive from the percentage this build does report.
+            pct = _amd_num(card, ("vram", "%"))
+            used_gb = round(total_gb * pct / 100.0, 2) if (pct and total_gb) else 0.0
+        util = _amd_num(card, ("gpu use",)) or _amd_num(card, ("gfx", "activity"))
+        temp = _amd_num(card, ("temperature", "edge")) or _amd_num(card, ("temperature", "junction"))
+        power = _amd_num(card, ("power",), exclude=("cap", "limit", "max"))
+        cards.append(GpuCard(index=i, name=_amd_name(card_key, card), util_pct=util,
+                             vram_used_gb=used_gb, vram_total_gb=total_gb,
+                             temp_c=temp, power_w=power))
+
+    names = [c.name for c in cards]
+    display = (f"{len(names)} × {names[0]}" if len(set(names)) == 1 and len(names) > 1
+               else (names[0] if len(names) == 1 else " + ".join(names)))
     return GpuStats(
         vendor="amd",
-        name=card_key,
-        util_pct=util,
-        vram_used_gb=round(total_gb * vram_pct / 100.0, 1),
-        vram_total_gb=round(total_gb, 1),
-        temp_c=temp,
-        power_w=power,
+        name=display,
+        util_pct=round(sum(c.util_pct for c in cards) / len(cards), 1),
+        vram_used_gb=round(sum(c.vram_used_gb for c in cards), 1),
+        vram_total_gb=round(sum(c.vram_total_gb for c in cards), 1),
+        temp_c=max(c.temp_c for c in cards),
+        power_w=round(sum(c.power_w for c in cards), 1),
+        gpu_count=len(cards),
+        cards=cards,
     )
 
 
