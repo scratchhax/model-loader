@@ -101,27 +101,14 @@
           <div><span class="font-mono text-base font-semibold tabular-nums">{{ ini_sections | length }}</span>
                <span class="text-slate-500 dark:text-slate-400">configured</span></div>
         </div>
+        {% if active_downloads %}
+        <a href="/downloads" class="mt-2 flex items-center gap-1.5 text-[11px] text-sky-600 hover:underline dark:text-sky-400">
+          {{ icon('download', 12) }} {{ active_downloads }} downloading →
+        </a>
+        {% endif %}
       </div>
     </div>
 
-    <div>
-      <div class="mb-2 flex items-baseline justify-between">
-        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Recent downloads</h2>
-        <a href="/downloads" class="text-xs text-slate-500 hover:underline dark:text-slate-400">
-          {% if active_downloads %}{{ active_downloads }} active →{% else %}Downloads →{% endif %}
-        </a>
-      </div>
-      <div class="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100 dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
-        {% for r in recent[:5] %}
-        <div class="flex items-center justify-between gap-2 px-3 py-2">
-          <span class="truncate font-mono text-[11px]">{{ r.filename }}</span>
-          <span class="shrink-0 text-[10px] tabular-nums text-slate-400">{{ r.size_h }}</span>
-        </div>
-        {% else %}
-        <div class="px-3 py-3 text-[11px] text-slate-500 dark:text-slate-400">Nothing downloaded yet.</div>
-        {% endfor %}
-      </div>
-    </div>
   </section>
 </div>
 

@@ -291,20 +291,11 @@ def _gpu_strip_context() -> dict:
 async def dashboard_v2(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
     backends = await services.snapshot_llama_backends()
-    rows = db.recent_downloads(20)
-    seen: set[str] = set()
-    recent: list[dict] = []
-    for r in rows:
-        if r["status"] != "done" or r["filename"] in seen:
-            continue
-        seen.add(r["filename"])
-        recent.append({"filename": r["filename"],
-                       "size_h": human_bytes(int(r["total_bytes"] or 0))})
-        if len(recent) >= 5:
-            break
+    # What downloaded last does not tell you anything about what the box is doing now, so the
+    # list is gone from this page; only a download still in flight is worth a line.
     active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
     ctx = {"request": request, "snap": snap, "backends": backends,
-           "ini_sections": ini.list_sections(), "recent": recent,
+           "ini_sections": ini.list_sections(),
            "active_downloads": active, "host_line": _host_line()}
     ctx.update(await _hero_context())
     ctx.update(_gpu_strip_context())
