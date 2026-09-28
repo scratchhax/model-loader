@@ -2,7 +2,7 @@
 
 A browser UI for managing llama.cpp GGUF models and containers on a personal homelab box. FastAPI + HTMX + Alpine + Tailwind, no build step, one Docker container.
 
-![The Model Loader overview page: disk and backend summary, live GPU utilisation and VRAM sparklines, per-GPU breakdown, recent downloads, and the models.ini sections](docs/model_loader.png)
+![The Model Loader overview page: estimated power at the wall and the hottest device in the box, each with a sparkline drawn against a configured ceiling; the model currently being served with its tokens/sec and how much of its context window is in use; per-card GPU utilisation, VRAM, temperature, power against the enforced cap and fan speed; then backend and storage summaries](docs/model_loader.png)
 
 ## What it does
 
@@ -34,7 +34,7 @@ The two jobs above are one action: downloading a multimodal model auto-queues th
 
 ### Autoconfig, in practice
 
-![The Autoconfig panel: a concurrent-sessions picker, four priority presets (Fast, Balanced, Long context, Custom) each showing context size, GPU layers and a relative speed estimate, and a per-backend table marking which context sizes fit and which do not](docs/model_performance_selector.png)
+![The Autoconfig panel: measured generation and prompt speed from real requests with a table comparing the configurations actually run, then a concurrent-sessions picker, a vision toggle, four priority presets (Fast, Balanced, Long context, Custom) each showing context size and KV cost, and a per-backend table marking which context sizes fit and which do not](docs/model_performance_selector.png)
 
 Pick how many chats will hit the model at once, then pick a priority. Each preset shows what you are trading: context size against GPU layers against speed. The table underneath marks every context size as fitting or not on each backend, and names the cost when it doesn't — `9L on CPU` means nine layers had to move off the GPU to make that context fit.
 
@@ -44,7 +44,7 @@ The speed figures are an **ordering hint, not a benchmark**. They come from a ca
 
 ### The models.ini editor
 
-![The models.ini page: one card per section showing every set option as a chip — model path, ctx-size, ngl, cache types, tensor-split, n-cpu-moe — with Copy CLI, Edit and Delete per section](docs/models_ini.png)
+![The models.ini page: one card per section showing every set option as a chip — model path, ctx-size, ngl, cache types, flash-attn, speculative decoding settings — with Show CLI, Client config, Edit and Delete per section](docs/models_ini.png)
 
 One card per section, with every option you have set shown as a chip, so the whole file is readable at a glance rather than by scrolling a text editor. **Copy CLI** renders the section as the equivalent `llama-server` command line, which is useful for reproducing a config outside Model Loader or pasting into a bug report.
 
@@ -83,7 +83,7 @@ This is deliberately manual, and an automated version was built as far as the sc
 
 ### Routing models to backends
 
-![The Models directory: each downloaded GGUF with its status, whether it is in models.ini and under what alias, a vision capability chip, and per-backend "serves on" toggles](docs/models_available.png)
+![The Models directory: each downloaded GGUF with its status, whether it is in models.ini and under what alias, capability chips, per-backend "serves on" toggles, and a "good at" row where you rate the model for coding, creative writing, vision and so on, editable in place](docs/models_available.png)
 
 Every llama.cpp backend reads the same `models.ini`, which means by default every backend offers every model — including the CPU one being asked for a 27B. The **serves on** toggles fix that per model: click a backend to include or exclude it, and Model Loader writes the change into OpenWebUI's per-connection whitelist.
 
@@ -179,7 +179,7 @@ A minimal, working service:
 
 If you don't have a compose file yet, the **Containers** page has ready-made service blocks for CUDA, ROCm, Vulkan and CPU that you can copy after installing.
 
-![The Add another backend panel: tabs for NVIDIA CUDA, AMD ROCm, CPU only and Vulkan, each with a copyable compose service block, above a warning that inference flags on the container command line override models.ini](docs/add_a_backend.png)
+![The Add another backend panel: a warning that inference flags on the container command line override models.ini, above tabs for NVIDIA CUDA, AMD ROCm, CPU only and Vulkan, each with a copyable compose service block](docs/add_a_backend.png)
 
 The panel repeats the warning above, because it is the mistake that costs the most time: flags like `-ngl`, `-fa`, `-ctk`, `-np` and `-sm` on the container command line **override** `models.ini` rather than acting as defaults, and a preset that disagrees is silently discarded. Keep the command to `--models-preset`, `--host`, `--port` and `--models-max`, and set everything per-model in the config form.
 
