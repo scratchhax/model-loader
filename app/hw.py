@@ -26,6 +26,8 @@ class GpuCard:
     vram_total_gb: float
     temp_c: float
     power_w: float
+    fan_pct: float = 0.0     # 0 when the card does not report a fan, or reports it as stopped
+    fan_rpm: float = 0.0
 
     @property
     def vram_free_gb(self) -> float:
@@ -135,7 +137,7 @@ def _read_nvidia(container) -> GpuStats | None:
     """
     cmd = (
         "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,"
-        "temperature.gpu,power.draw,name --format=csv,noheader,nounits"
+        "temperature.gpu,power.draw,name,fan.speed --format=csv,noheader,nounits"
     )
     try:
         r = container.exec_run(cmd, demux=False)
@@ -159,12 +161,18 @@ def _read_nvidia(container) -> GpuStats | None:
             temps.append(float(parts[3]))
             powers.append(float(parts[4]))
             names.append(parts[5] if len(parts) > 5 else "GPU")
+            # fan.speed is "[N/A]" on cards without a controllable fan (datacentre parts,
+            # some laptops), so it is parsed leniently rather than trusted.
+            try:
+                fan_pct = float(parts[6]) if len(parts) > 6 else 0.0
+            except ValueError:
+                fan_pct = 0.0
             cards.append(GpuCard(
                 index=len(cards), name=names[-1],
                 util_pct=utils[-1],
                 vram_used_gb=round(mems_used[-1] / 1024.0, 2),
                 vram_total_gb=round(mems_total[-1] / 1024.0, 2),
-                temp_c=temps[-1], power_w=powers[-1],
+                temp_c=temps[-1], power_w=powers[-1], fan_pct=fan_pct,
             ))
         if not utils:
             return None
@@ -278,7 +286,7 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
     # unknown flags outright, so fall back to the minimal set it has always understood.
     cmds = (
         "rocm-smi --showid --showproductname --showuse --showmemuse "
-        "--showmeminfo vram --showtemp --showpower --json",
+        "--showmeminfo vram --showtemp --showpower --showfan --json",
         "rocm-smi --showuse --showmemuse --showtemp --showpower --json",
     )
     data: dict | None = None
@@ -324,9 +332,13 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
         util = _amd_num(card, ("gpu use",)) or _amd_num(card, ("gfx", "activity"))
         temp = _amd_num(card, ("temperature", "edge")) or _amd_num(card, ("temperature", "junction"))
         power = _amd_num(card, ("power",), exclude=("cap", "limit", "max"))
+        # "Fan speed (level)" is a raw PWM value (0-255) and would read as 102%, so the percent
+        # key is matched explicitly and the level excluded.
+        fan_pct = _amd_num(card, ("fan", "%"), exclude=("level",))
+        fan_rpm = _amd_num(card, ("fan", "rpm"))
         cards.append(GpuCard(index=i, name=_amd_name(card_key, card), util_pct=util,
                              vram_used_gb=used_gb, vram_total_gb=total_gb,
-                             temp_c=temp, power_w=power))
+                             temp_c=temp, power_w=power, fan_pct=fan_pct, fan_rpm=fan_rpm))
 
     names = [c.name for c in cards]
     display = (f"{len(names)} × {names[0]}" if len(set(names)) == 1 and len(names) > 1

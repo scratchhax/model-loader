@@ -27,6 +27,16 @@
       <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-400">
         <div><span class="text-slate-500">util</span> {{ '%.0f' % c.util_pct }}%</div>
         <div class="mt-0.5"><span class="text-slate-500">{{ '%.0f' % c.temp_c }}°C</span> · {{ '%.0f' % c.power_w }} W</div>
+        {% if c.fan_rpm or c.fan_pct %}
+        {# Both figures, because neither is enough alone: percent says how hard the card is
+           being asked to work, RPM says whether the fan is actually doing it. A card sitting
+           at 40% and 0 RPM has a dead fan, and the temperature will say so a minute later. #}
+        <div class="mt-0.5 text-slate-500" title="fan duty {{ '%.0f' % c.fan_pct }}%{% if c.fan_rpm %}, {{ '%.0f' % c.fan_rpm }} rpm{% endif %}">
+          {{ icon('fan', 10) }}
+          {%- if c.fan_pct %} {{ '%.0f' % c.fan_pct }}%{% endif %}
+          {%- if c.fan_rpm %} <span class="text-slate-600">{{ '%.0f' % c.fan_rpm }} rpm</span>{% endif %}
+        </div>
+        {% endif %}
       </div>
     </div>
 
