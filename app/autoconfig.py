@@ -179,9 +179,31 @@ _MMPROJ_COMPUTE_GB = 0.5  # modality-encoder scratch beyond the projector weight
 # squeezed into 1.3 GB, and it stopped loading at all the day another service parked 0.8 GB on
 # one card. Budgeting the number it ASKS for keeps pipeline parallelism intact rather than
 # quietly relying on the fallback.
-_COMPUTE_BASE_MIB = 128.0        # intercept; fits 88-121 measured, rounded up
-_COMPUTE_MIB_PER_1K_CTX = 7.81   # the measured slope, at ubatch 512
-_COMPUTE_REF_UBATCH = 512.0      # ubatch the slope was measured at
+# Per backend, because the two stacks need not allocate alike - but measurement says they do.
+#
+# Qwen3.8-27B-Q4_K_M, per card, compute buffer in MiB:
+#
+#   ctx      CUDA (2x RTX 5070)   ROCm (2x Radeon AI PRO R9700, gfx1201)
+#   32768    377                  377
+#   65536    633                  633
+#   131072   1145                 1145
+#
+# Identical, which is the useful result: the compute buffer is ggml's graph planning, sized from
+# the model shape and ubatch, not from the vendor's runtime. The fitted slope (7.81 MiB per 1K)
+# lands within 2.5% of the ROCm figures, and the per-card overhead beyond model+KV+compute
+# measured 0.43 GB on ROCm against the 0.5 GB _RESERVE_PER_GPU already charges.
+#
+# The one number NOT confirmed on ROCm is the pipeline-parallelism fallback ratio: with 32 GB a
+# card, nothing came close to needing the retry, so 0.63 remains a CUDA measurement. It only
+# matters when a context is tight enough to trigger the fallback, which on 64 GB is rare.
+_COMPUTE_REF_UBATCH = 512.0      # ubatch every slope below was measured at
+_COMPUTE_PROFILES = {
+    # vendor: (base MiB, MiB per 1K ctx, no-pipeline-parallel fallback ratio, measured?)
+    "nvidia": (128.0, 7.81, 0.63, True),
+    "amd": (128.0, 7.81, 0.63, True),
+}
+_COMPUTE_BASE_MIB = 128.0        # nvidia intercept; fits 88-121 measured, rounded up
+_COMPUTE_MIB_PER_1K_CTX = 7.81   # nvidia slope, at ubatch 512
 # When the first reservation does not fit, llama.cpp logs "compute buffer allocation failed,
 # retrying without pipeline parallelism" and reserves a smaller one. That smaller buffer is
 # what a load actually REQUIRES, so it is what the budget charges - charging the larger figure
@@ -192,7 +214,21 @@ _COMPUTE_REF_UBATCH = 512.0      # ubatch the slope was measured at
 _COMPUTE_PP_FALLBACK = 0.63
 
 
-def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool = False) -> float:
+def _compute_profile(vendor: str) -> tuple[float, float, float, bool]:
+    """(base, slope, fallback ratio, measured) for a backend vendor.
+
+    Unknown vendors get the NVIDIA numbers: they are the ones actually measured, and being
+    slightly wrong is better than charging nothing, which is the bug this whole mechanism exists
+    to fix.
+    """
+    v = (vendor or "").strip().lower()
+    if v in ("rocm", "amd", "hip"):
+        return _COMPUTE_PROFILES["amd"]
+    return _COMPUTE_PROFILES["nvidia"]
+
+
+def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool = False,
+                      vendor: str = "") -> float:
     """Per-CARD compute buffer, in GB. Every card allocates its own, so the pooled cost is this
     times gpu_count.
 
@@ -206,10 +242,11 @@ def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool
     """
     if total_ctx <= 0:
         return 0.0
+    base, slope, fallback, _measured = _compute_profile(vendor)
     ub_mult = max(0.25, float(ubatch or _COMPUTE_REF_UBATCH) / _COMPUTE_REF_UBATCH)
-    mib = _COMPUTE_BASE_MIB + _COMPUTE_MIB_PER_1K_CTX * (total_ctx / 1024.0) * ub_mult
+    mib = base + slope * (total_ctx / 1024.0) * ub_mult
     if not pipeline_parallel:
-        mib *= _COMPUTE_PP_FALLBACK
+        mib *= fallback
     return mib / 1024.0
 
 
@@ -1566,7 +1603,7 @@ def analyze(*,
                                    ssm_state_size=ssm_state_size, **_swa,
                                    v_bytes_per_elem=v_bytes) / (1024 ** 3)
             # Scratch for one graph evaluation, allocated on EVERY card, growing with ctx.
-            comp_gb = compute_buffer_gb(total_ctx, ubatch)
+            comp_gb = compute_buffer_gb(total_ctx, ubatch, vendor=b.get("vendor", ""))
             ctx_budget = budget - comp_gb * gpu_count
             ctx_caps = [c - comp_gb for c in card_caps]
             # The per-card test is handed to the search rather than applied to its answer, so
@@ -1809,7 +1846,8 @@ def analyze(*,
                                         ssm_state_size=ssm_state_size,
                                         v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
                                         card_ok=_moe_card_ok, swa=_swa,
-                                        compute_gb_fn=lambda tc: compute_buffer_gb(tc, ubatch),
+                                        compute_gb_fn=lambda tc: compute_buffer_gb(
+                                            tc, ubatch, vendor=(rec_backend or {}).get("vendor", "")),
                                         gpu_count=gpu_count)
             presets = _presets_from_frontier(frontier, recommended.name, layers, native_ctx)
             frontier_opts = _frontier_options(frontier, recommended.name, layers, dense=False)
@@ -1858,7 +1896,8 @@ def analyze(*,
                                      ssm_state_size=ssm_state_size,
                                      v_bytes_per_elem=_cache_dtype_bytes(v_cache_type),
                                      card_ok=_front_card_ok, swa=_swa,
-                                     compute_gb_fn=lambda tc: compute_buffer_gb(tc, ubatch),
+                                     compute_gb_fn=lambda tc: compute_buffer_gb(
+                                         tc, ubatch, vendor=(rec_backend or {}).get("vendor", "")),
                                      gpu_count=gpu_count)
             presets = _presets_from_dense_frontier(dfront, recommended.name, layers)
             frontier_opts = _frontier_options(dfront, recommended.name, layers, dense=True)

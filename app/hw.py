@@ -239,11 +239,23 @@ def _amd_num(card: dict, include: tuple[str, ...], exclude: tuple[str, ...] = ()
 
 
 def _amd_name(card_key: str, card: dict) -> str:
+    """A useful label for an AMD card, with its ISA when the marketing name is vague.
+
+    rocm-smi reports "AMD Radeon Graphics" for anything its PCI-ID table predates - on this rig
+    that is a pair of Radeon AI PRO R9700s, which the container's older ROCm userspace does not
+    recognise even though the host's newer amd-smi does. The gfx target is the more useful fact
+    anyway: gfx1201 is what decides whether a ROCm build has kernels for the card at all.
+    """
+    name = ""
     for key in ("Card Series", "Card Model", "Device Name", "Card SKU", "Market Name"):
         v = str(card.get(key) or "").strip()
         if v and v.lower() not in ("n/a", "unknown"):
-            return v
-    return card_key
+            name = v
+            break
+    gfx = str(card.get("GFX Version") or "").strip()
+    if gfx and gfx.lower() not in ("n/a", "unknown"):
+        return f"{name} ({gfx})" if name else gfx
+    return name or card_key
 
 
 def _read_amd(container, container_name: str) -> GpuStats | None:
