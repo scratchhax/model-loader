@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import time
 from pathlib import Path
 
 import httpx
@@ -169,6 +170,23 @@ def _host_line() -> str:
     return " · ".join(bits) if bits else "Everything live at a glance."
 
 
+# Which backends exist and what they hold changes on the timescale of a model load, not of a
+# 500 ms poll, and discovering it costs ~50 ms of docker API and HTTP probes - the most
+# expensive thing on the hero's path. Cached briefly so the fast poll spends its time on the
+# ~1 ms slot read that actually moves.
+_HERO_BACKENDS_TTL = 1.5
+_hero_backends: tuple[float, list] | None = None
+
+
+async def _hero_backends_cached() -> list:
+    global _hero_backends
+    if _hero_backends and (time.time() - _hero_backends[0]) < _HERO_BACKENDS_TTL:
+        return _hero_backends[1]
+    backends = await services.snapshot_llama_backends()
+    _hero_backends = (time.time(), backends)
+    return backends
+
+
 async def _hero_context() -> dict:
     """The loaded model, its throughput, and enough of its config to read the panel.
 
@@ -176,7 +194,7 @@ async def _hero_context() -> dict:
     working is the one worth leading with. Falls back to any backend holding a model, then to
     an empty standby panel.
     """
-    backends = await services.snapshot_llama_backends()
+    backends = await _hero_backends_cached()
     best: tuple[int, object, object] | None = None      # (rank, backend, speed)
     for b in backends:
         if not b.loaded_model:

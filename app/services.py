@@ -834,12 +834,19 @@ _RE_TASK = re.compile(r"task\s+(\d+)\s*\|")
 # One read per container per interval, shared by every caller in that window. The card polls
 # every 2 s and reading a log tail is the expensive half, so this keeps a burst of renders from
 # multiplying docker calls.
-_SPEED_TTL = 1.8
+# Two different clocks. The slot read is ~1 ms so it happens on every poll; the log read is
+# ~11 ms and its numbers only change every few seconds anyway, so it is throttled. An earlier
+# version cached the whole result for 1.8 s, which meant polling faster just redrew stale text.
+_SPEED_TTL = 0.35          # floor on full recomputation, to survive a burst of requests
+_RATES_TTL = 1.5           # how often the log tail is re-read
 _speed_cache: dict[str, tuple[float, "InferenceSpeed | None"]] = {}
+_rates_cache: dict[str, tuple[float, dict]] = {}
+_GEN_EMA_ALPHA = 0.4       # smoothing for the token-delta rate; raw 500 ms deltas twitch
 # (when, token count, task) of the previous sample, so a rate can be derived from how fast the
 # slot's token count is moving. llama only logs a generation timing line every ~3 s, which left
 # the first seconds of a reply looking like it was still reading the prompt.
 _speed_prev: dict[str, tuple[float, int, int | None, bool]] = {}
+_gen_ema: dict[str, float] = {}      # smoothed token-delta rate, per backend
 
 
 async def _slot_state(container_name: str, internal_port: int, model_id: str) -> dict:
@@ -918,7 +925,12 @@ async def inference_speed(container_name: str, internal_port: int | None,
     busy = bool(slot.get("is_processing"))
     task_id = slot.get("id_task")
     task_id = int(task_id) if isinstance(task_id, (int, float)) else None
-    r = await asyncio.to_thread(_rates_from_log, container_name, task_id if busy else None)
+    cached_rates = _rates_cache.get(container_name)
+    if cached_rates and (time.time() - cached_rates[0]) < _RATES_TTL:
+        r = cached_rates[1]
+    else:
+        r = await asyncio.to_thread(_rates_from_log, container_name, task_id if busy else None)
+        _rates_cache[container_name] = (time.time(), r)
 
     ctx_used = int(slot.get("n_prompt_tokens") or 0)
     processed = int(slot.get("n_prompt_tokens_processed") or 0)
@@ -944,8 +956,14 @@ async def inference_speed(container_name: str, internal_port: int | None,
             # boundary the count jumps by a whole prompt chunk, which read as thousands of
             # tokens per second before this guard existed.
             dt, dn = now - prev[0], ctx_used - prev[1]
-            if 0.4 < dt < 10.0 and dn > 0:
-                gen_tps = dn / dt
+            if 0.25 < dt < 10.0 and dn > 0:
+                raw = dn / dt
+                # Smooth against the previous displayed figure: at a 500 ms poll a couple of
+                # tokens either way is 4 tok/s of noise on a number people watch.
+                last = _gen_ema.get(container_name)
+                gen_tps = raw if last is None else (_GEN_EMA_ALPHA * raw
+                                                    + (1 - _GEN_EMA_ALPHA) * last)
+                _gen_ema[container_name] = gen_tps
     else:
         state = "idle"
         gen_tps, gen_tokens = r["last_gen_tps"], r["last_gen_tokens"]
@@ -955,6 +973,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         _speed_prev[container_name] = (now, ctx_used, task_id, state == "generating")
     else:
         _speed_prev.pop(container_name, None)
+        _gen_ema.pop(container_name, None)   # a finished run must not smooth into the next one
 
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,

@@ -80,7 +80,9 @@ _CACHE: dict[str, BackendStats] = {}
 # per backend costs a few KB and can never grow without limit.
 _HISTORY_MAXLEN = 450
 _HISTORY: dict[str, deque] = {}
-_SAMPLE_INTERVAL_S = 2.0
+_SAMPLE_INTERVAL_S = 1.0   # rocm-smi/nvidia-smi through docker exec costs ~90 ms, so 1 s is
+                           # a ~9% duty cycle - cheap enough for a live readout, and the
+                           # dashboard cannot show anything fresher than this.
 _VENDOR_CACHE: dict[str, str] = {}
 _LOCK = threading.Lock()
 _sampler_started = False

@@ -31,12 +31,16 @@
 </div>
 
 {# ---------------- polled zone 1: what is loaded right now ---------------- #}
-<div class="mt-5" hx-get="/hero" hx-trigger="load, every 2s" hx-swap="innerHTML">
+{# 500 ms: the slot read behind this is ~1 ms, and the token counter it exposes moves every
+   few milliseconds during generation. This is the one zone worth polling hard. #}
+<div class="mt-5" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
   {% include "_hero.html" %}
 </div>
 
 {# ---------------- polled zone 2: the cards ---------------- #}
-<div class="mt-3" hx-get="/gpu-strip" hx-trigger="load, every 2s" hx-swap="innerHTML">
+{# 1 s, matching the hw sampler: rocm-smi through docker exec costs ~90 ms, so polling faster
+   would redraw the same numbers and spend CPU doing it. #}
+<div class="mt-3" hx-get="/gpu-strip" hx-trigger="load, every 1s" hx-swap="innerHTML">
   {% include "_gpu_strip.html" %}
 </div>
 
