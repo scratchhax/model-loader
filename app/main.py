@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
@@ -104,8 +104,10 @@ def palette() -> dict:
     return {"items": items}
 
 
-@app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request) -> HTMLResponse:
+@app.get("/classic", response_class=HTMLResponse)
+async def dashboard_classic(request: Request) -> HTMLResponse:
+    """The counter-led overview this replaced. Kept reachable for one release in case the new
+    one is missing something; delete it, and dashboard_classic.html, once nobody wants it."""
     snap = services.snapshot_models_dir()
     backends = await services.snapshot_llama_backends()
     sections = ini.list_sections()
@@ -134,7 +136,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     for r in recent:
         r["avatar_url"] = avatars.get(r["owner"], "")
     active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
-    return templates.TemplateResponse("dashboard.html", {
+    return templates.TemplateResponse("dashboard_classic.html", {
         "request": request,
         "snap": snap,
         "backends": backends,
@@ -288,8 +290,8 @@ def _gpu_strip_context() -> dict:
     return {"cards": cards, "gpu_history": history}
 
 
-@app.get("/v2", response_class=HTMLResponse)
-async def dashboard_v2(request: Request) -> HTMLResponse:
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
     backends = await services.snapshot_llama_backends()
     # What downloaded last does not tell you anything about what the box is doing now, so the
@@ -302,7 +304,13 @@ async def dashboard_v2(request: Request) -> HTMLResponse:
     ctx.update(_gpu_strip_context())
     ctx.update(_power_context())
     ctx.update(_power_settings_context())
-    return templates.TemplateResponse("dashboard_v2.html", ctx)
+    return templates.TemplateResponse("dashboard.html", ctx)
+
+
+@app.get("/v2")
+def dashboard_v2_redirect() -> RedirectResponse:
+    """This lived at /v2 while it was being built; send stale tabs and bookmarks to the front."""
+    return RedirectResponse("/", status_code=308)
 
 
 @app.get("/hero", response_class=HTMLResponse)

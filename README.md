@@ -12,7 +12,8 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 - **Benchmarking** — a fixed prompt suite run through the live server (first-token latency, draft acceptance, VRAM), and throughput sweeps driven by llama.cpp's own `llama bench`. Charts and stat panels; every response's text is kept so a run can be read, not just measured. Nothing is written back to any config.
 - **Capability badges** — rate a model yourself, out of five, per category (coding, creative writing, reasoning, tool use, vision), from the benchmark run where you just read its output. The models list shows what each model is good at, or says `not rated`.
 - **Measured throughput, not just predicted** — llama-server already reports prompt speed, generation speed and speculative acceptance for every request it serves. Model Loader reads those back out of the container logs and shows the median in the Autoconfig panel, alongside a comparison of every configuration that model has actually run under.
-- **Per-backend hardware dashboard** — GPU util, VRAM used/total, temperature, power draw; container CPU% and RSS; log tail with grep filter; one-click restart.
+- **Live overview** — power at the wall and the hottest device in the box, each with a sparkline drawn against a ceiling you set; then the loaded model with tokens/sec in and out, how much of its context window is in use and how much of that came from cache; then per-card GPU telemetry. Power and temperature thresholds are editable from the page.
+- **Per-backend hardware dashboard** — GPU util, VRAM used/total, temperature, power draw, fan duty and RPM; container CPU% and RSS; log tail with grep filter; one-click restart.
 - **Inline load-failure diagnosis** — when a model's load actually fails, the dashboard and backend card say which model and its exit code, and a **Diagnose** button reads that model's own log lines and maps the failure to a concrete fix (VRAM OOM → lower `ngl`/`ctx` or enable `--fit`; KV-cache overflow → quantize it; missing `model =` or `mmproj =` file; corrupt/incomplete GGUF; ctx past the trained length; port in use). An idle router with nothing loaded is normal and never raises it, a model that loads successfully afterwards clears it, and only the container's current run is read, so errors from before a restart don't linger. It only ever proposes what to check, and says so plainly when the cause isn't one it can name.
 
 - **Auto-discovers llama containers** on your Docker socket (any `ghcr.io/ggml-org/llama.cpp:*` image). Add a new backend to your compose file, run `docker compose up -d`, it appears in the UI within 2 seconds.
@@ -132,7 +133,12 @@ Vendor is detected from the image tag, so a custom-built image may need `LLAMA_C
 
 Without it, Autoconfig says so plainly rather than claiming the model doesn't fit. You still get everything except live telemetry and the per-card split, which falls back to dividing pooled VRAM evenly.
 
-**A note on testing.** The CUDA path is what this has been developed and calibrated against. ROCm and Vulkan are implemented and exercised in code, but have had far less real-world use — if something looks wrong on those, it probably is, and a bug report is welcome.
+**A note on testing.** CUDA and ROCm are both run daily by the author — the fit maths is calibrated against measurements taken on each, and they agree. Vulkan is implemented and exercised in code but has had far less real-world use; if something looks wrong there, it probably is, and a bug report is welcome.
+
+**CPU package power and host temperatures** on the overview come from an optional host-side
+publisher, because RAPL's energy counter is root-only and its sysfs path is not visible inside a
+container. Without it the panel still works and simply says CPU power is unavailable rather than
+under-reporting the total. See `docs/HOST_SENSORS.md`.
 
 ### The llama.cpp container
 

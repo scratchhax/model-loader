@@ -21,8 +21,8 @@ Constants (`app/autoconfig.py`):
 | `_RESERVE_PER_GPU` | `0.5` GB | CUDA runtime and driver context, per card. Was 1.0 while the compute buffer went unbudgeted; a flat reserve was the only lever and had to cover the worst context anyone might pick. |
 | `_MODEL_OVERHEAD_SINGLE` | `1.00` | Q_K_M loads at roughly file size when everything is on one card. |
 | `_MODEL_OVERHEAD_SPLIT` | `1.02` | +2% for layer-split imbalance. Was 1.08; the extra 6% was standing in for the compute buffer, which is now charged directly. |
-| `_COMPUTE_MIB_PER_1K_CTX` | `7.81` MiB | Compute buffer growth per 1K of context, per card, at ubatch 512. |
-| `_COMPUTE_PP_FALLBACK` | `0.63` | llama.cpp's reservation after it drops pipeline parallelism, which is what a load actually requires. |
+| `_COMPUTE_PROFILES` | per vendor | Compute buffer growth per card: base MiB, MiB per 1K of context at ubatch 512, and the no-pipeline-parallelism fallback ratio. NVIDIA and AMD currently hold the same numbers because measurement says they allocate identically. |
+| fallback ratio | `0.63` | llama.cpp's reservation after it drops pipeline parallelism, which is what a load actually requires. Measured on CUDA; on ROCm nothing came close to needing the retry, so it is carried over rather than confirmed. |
 | `_CACHE_DEFAULT` | `q8_0` | Half the KV cache of fp16 with negligible quality loss. |
 | `_CPU_LAYER_PENALTY` | `20.0` | How much slower one CPU-resident **dense** layer is than a GPU one. Drives the speed estimate only. |
 | `_MMPROJ_VRAM_MULT` | `1.0` | A multimodal projector occupies about its file size in VRAM. |
@@ -45,6 +45,13 @@ Measured on 2× RTX 5070, layer split, flash attention on, ubatch 512, per card:
 
 Two things stand out. It is **linear in context**, at 7.81 MiB per 1K. And it barely depends on
 layer count or hidden size: a 30-layer MoE and a 64-layer dense model share the same slope.
+
+The same sweep on **ROCm** (2x Radeon AI PRO R9700, gfx1201) returned the same figures to the
+megabyte — 377, 633 and 1145 MiB at 32K, 64K and 128K — so the buffer is ggml's graph planning,
+sized from model shape and ubatch rather than from the vendor's runtime. The constants live in
+`_COMPUTE_PROFILES` keyed by vendor anyway, so a future backend that does allocate differently
+can be corrected without disturbing the others. Per-card overhead beyond model+KV+compute
+measured 0.43 GB on ROCm, against the 0.5 GB `_RESERVE_PER_GPU` already charges.
 
 \* That is what it *asks* for. When the first reservation does not fit, llama.cpp logs
 `compute buffer allocation failed, retrying without pipeline parallelism` and takes a smaller

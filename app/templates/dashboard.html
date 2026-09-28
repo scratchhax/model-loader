@@ -1,141 +1,125 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% from "_avatar.html" import avatar %}
 {% set active_nav = 'dashboard' %}
-{% block title %}Dashboard · Model Loader{% endblock %}
+{% block title %}Mission control · Model Loader{% endblock %}
 {% block content %}
 
+{#
+  Mission-control overview. Two polled zones (hero, GPU strip) on the same 2s cadence the
+  container cards already use, then the calmer reference material underneath.
+
+  The ordering is the point: what is loaded and how fast it is going, then what the cards are
+  doing, then the inventory. The previous overview led with disk free and a count of GGUFs -
+  true facts that look identical whether the box is mid-generation or has been asleep all day.
+#}
+
 <div class="flex flex-wrap items-end justify-between gap-4">
-  <div>
-    <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
-    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Everything live at a glance.</p>
+  <div class="min-w-0">
+    <h1 class="text-2xl font-semibold tracking-tight">Mission control</h1>
+    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+      {{ host_line }}
+    </p>
   </div>
   <div class="flex items-center gap-2">
     <a href="/search" class="inline-flex items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium shadow-card hover:shadow-card-lg">
       {{ icon('search', 14) }} Search HF
     </a>
     <a href="/config" class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">
-      {{ icon('file-cog', 14) }} Edit models.ini
+      {{ icon('file-cog', 14) }} models.ini
     </a>
   </div>
 </div>
 
-{# top stat strip #}
-<div class="mt-6 grid gap-3 md:grid-cols-4">
-  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
-    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
-      {{ icon('hard-drive', 13) }} Disk free
-    </div>
-    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ snap.disk.free_h if snap.disk else '—' }}</div>
-    {% if snap.disk %}
-    <div class="mt-2 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-      <div class="h-full bg-gradient-to-r from-sky-500 to-indigo-600" style="width: {{ snap.disk.used_pct }}%"></div>
-    </div>
-    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 tabular-nums">{{ snap.disk.used_pct }}% of {{ snap.disk.total_h }} used</div>
-    {% endif %}
-  </div>
+{# Power first: the models are the interesting part, the UPS is the constraint. Shares the 1s
+   cadence of the sensors underneath it - RAPL publishes every 2s, rocm-smi is sampled every 1s. #}
+<div class="mt-5" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_power.html" %}
+</div>
+{# Outside the poll on purpose - see _power_settings.html #}
+{% include "_power_settings.html" %}
 
-  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
-    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
-      {{ icon('layers-3', 13) }} GGUFs
-    </div>
-    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ snap.ggufs | length }}</div>
-    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ ini_sections | length }} in models.ini</div>
-  </div>
-
-  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
-    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
-      {{ icon('server', 13) }} Backends
-    </div>
-    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ backends | length }}</div>
-    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-      {% set running = backends | selectattr('status', 'equalto', 'running') | list | length %}
-      {{ running }} running
-    </div>
-  </div>
-
-  <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
-    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wide">
-      {{ icon('download', 13) }} Active downloads
-    </div>
-    <div class="mt-2 text-2xl font-semibold tabular-nums">{{ active_downloads }}</div>
-    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400"><a href="/downloads" class="hover:underline">Downloads →</a></div>
-  </div>
+{# ---------------- polled zone 1: what is loaded right now ---------------- #}
+{# 500 ms: the slot read behind this is ~1 ms, and the token counter it exposes moves every
+   few milliseconds during generation. This is the one zone worth polling hard. #}
+<div class="mt-3" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
+  {% include "_hero.html" %}
 </div>
 
-<div class="mt-6 grid gap-4 md:grid-cols-2">
+{# ---------------- polled zone 2: the cards ---------------- #}
+{# 1 s, matching the hw sampler: rocm-smi through docker exec costs ~90 ms, so polling faster
+   would redraw the same numbers and spend CPU doing it. #}
+<div class="mt-3" hx-get="/gpu-strip" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_gpu_strip.html" %}
+</div>
 
-  {# LEFT: llama backends #}
-  <section>
-    <div class="flex items-baseline justify-between mb-3">
-      <h2 class="text-sm font-semibold tracking-tight uppercase text-slate-500 dark:text-slate-400">Backends</h2>
-      <a href="/containers" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">details →</a>
+
+
+{# ---------------- calm layer: inventory and recent activity ---------------- #}
+<div class="mt-6 grid gap-4 lg:grid-cols-3">
+
+  <section class="lg:col-span-2">
+    <div class="mb-2 flex items-baseline justify-between">
+      <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Backends</h2>
+      <a href="/containers" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Containers →</a>
     </div>
-    <div class="grid gap-3">
+    <div class="space-y-2">
       {% for b in backends %}
-      <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card"
-           hx-get="/containers/{{ b.name }}/dashboard"
-           hx-trigger="load, every 2s"
-           hx-swap="innerHTML">
-        {% include "_container_dashboard.html" %}
-      </div>
+      <a href="/containers"
+         class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/60">
+        <div class="flex min-w-0 items-center gap-2.5">
+          <span class="h-1.5 w-1.5 shrink-0 rounded-full
+            {% if b.status == 'running' %}bg-emerald-500{% elif b.status == 'restarting' %}bg-amber-500{% else %}bg-slate-300 dark:bg-slate-600{% endif %}"></span>
+          <span class="truncate font-mono text-sm">{{ b.name }}</span>
+          {% if b.load_failed %}
+          <span class="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950 dark:text-red-300">load failed</span>
+          {% endif %}
+        </div>
+        <div class="shrink-0 text-right text-[11px]">
+          {% if b.loaded_model %}
+          <span class="font-mono text-slate-600 dark:text-slate-300">{{ b.loaded_model }}</span>
+          {% else %}
+          <span class="text-slate-400 dark:text-slate-500">idle</span>
+          {% endif %}
+        </div>
+      </a>
       {% endfor %}
     </div>
   </section>
 
-  {# RIGHT: quick lists #}
   <section class="space-y-4">
     <div>
-      <div class="flex items-baseline justify-between mb-3">
-        <h2 class="text-sm font-semibold tracking-tight uppercase text-slate-500 dark:text-slate-400">Recent downloads</h2>
-        <a href="/downloads" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">all →</a>
+      <div class="mb-2 flex items-baseline justify-between">
+        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Storage</h2>
+        <a href="/models" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Models →</a>
       </div>
-      <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
-        {% if recent_downloads %}
-        <ul class="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
-          {% for r in recent_downloads %}
-          <li class="py-2 flex items-center justify-between gap-3">
-            <div class="min-w-0 flex items-center gap-2">
-              {% if r.owner %}{{ avatar(r.owner, r.avatar_url or '', size=20) }}{% else %}<span class="w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-800"></span>{% endif %}
-              <span class="font-mono text-xs truncate">{{ r.filename }}</span>
-            </div>
-            <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400 tabular-nums">{{ r.size_h }}</span>
-          </li>
-          {% endfor %}
-        </ul>
-        {% else %}
-        <p class="text-sm text-slate-500 dark:text-slate-400">Nothing yet. <a href="/search" class="underline">Search Hugging Face</a> to get started.</p>
+      <div class="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
+        <div class="flex items-baseline justify-between">
+          <span class="font-mono text-lg font-semibold tabular-nums">{{ snap.disk.free_h if snap.disk else '—' }}</span>
+          <span class="text-[11px] text-slate-500 dark:text-slate-400">free</span>
+        </div>
+        {% if snap.disk %}
+        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+          <div class="h-full bg-gradient-to-r from-sky-500 to-indigo-600" style="width: {{ snap.disk.used_pct }}%"></div>
+        </div>
+        <div class="mt-1.5 text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+          {{ snap.disk.used_pct }}% of {{ snap.disk.total_h }} used
+        </div>
+        {% endif %}
+        <div class="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2.5 text-[11px] dark:border-slate-800">
+          <div><span class="font-mono text-base font-semibold tabular-nums">{{ snap.ggufs | length }}</span>
+               <span class="text-slate-500 dark:text-slate-400">GGUFs</span></div>
+          <div><span class="font-mono text-base font-semibold tabular-nums">{{ ini_sections | length }}</span>
+               <span class="text-slate-500 dark:text-slate-400">configured</span></div>
+        </div>
+        {% if active_downloads %}
+        <a href="/downloads" class="mt-2 flex items-center gap-1.5 text-[11px] text-sky-600 hover:underline dark:text-sky-400">
+          {{ icon('download', 12) }} {{ active_downloads }} downloading →
+        </a>
         {% endif %}
       </div>
     </div>
 
-    <div>
-      <div class="flex items-baseline justify-between mb-3">
-        <h2 class="text-sm font-semibold tracking-tight uppercase text-slate-500 dark:text-slate-400">Configured (models.ini)</h2>
-        <a href="/config" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">edit →</a>
-      </div>
-      <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-card">
-        {% if ini_sections %}
-        <ul class="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
-          {% for s in ini_sections %}
-          <li class="py-2 flex items-center justify-between gap-3">
-            <a href="/config/section/{{ s.name }}/edit"
-               hx-get="/config/section/{{ s.name }}/edit" hx-target="body" hx-swap="none"
-               class="font-mono text-xs truncate hover:underline">{{ s.name }}</a>
-            <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
-              {% if s.has_file %}{{ icon('check-circle', 11) }}{% else %}<span class="text-amber-500">{{ icon('alert-triangle', 11) }}</span>{% endif %}
-              {{ s.items | length }} opts
-            </span>
-          </li>
-          {% endfor %}
-        </ul>
-        {% else %}
-        <p class="text-sm text-slate-500 dark:text-slate-400">No sections yet.</p>
-        {% endif %}
-      </div>
-    </div>
   </section>
-
 </div>
 
 {% endblock %}

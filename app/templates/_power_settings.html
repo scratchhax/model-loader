@@ -19,7 +19,7 @@
     </label>
     {% endmacro %}
     {{ field('power_warn_w', 'warn W', power_warn_w | int, 'Amber above this estimated wall draw') }}
-    {{ field('power_crit_w', 'limit W', power_crit_w | int, 'Your UPS capacity. The percentage and the height of the power sparkline are both drawn against it.') }}
+    {{ field('power_crit_w', 'limit W', power_crit_w | int, 'Whatever ceiling you care about: PSU rating, UPS capacity, or the circuit. The percentage and the height of the power sparkline are both drawn against it.') }}
     {{ field('baseline_w', 'base W', baseline_w | int, 'Board, RAM, fans, drives, NIC - nothing meters these, so this is your figure') }}
     {{ field('temp_warn_c', 'warn °C', temp_warn_c | int, 'Amber at or above this temperature') }}
     {{ field('temp_crit_c', 'crit °C', temp_crit_c | int, 'Red at or above, and the ceiling the temperature sparkline is drawn against') }}

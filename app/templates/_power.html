@@ -2,7 +2,8 @@
 {#
   Two readings, each with a line: what the machine is pulling at the wall, and the hottest thing
   in it. Sits above everything else because it is the constraint - the models are interesting,
-  the UPS is not optional.
+  the power budget is not optional. The limit is whatever ceiling the owner sets: a UPS, the
+  PSU rating, or the breaker.
 
   Both sparklines are drawn against their configured ceiling rather than their own window, so
   the height of the line is the headroom. Scaled to its own range instead, a quiet box and one
