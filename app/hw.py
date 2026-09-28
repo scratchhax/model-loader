@@ -533,6 +533,18 @@ def start_sampler() -> None:
 
 # ---------------------------------------------------------------- host sensors + power roll-up
 
+# Rolling history for the two things the dashboard draws. 240 samples at the panel's 1s poll is
+# four minutes - long enough to see a job start and the fans catch up.
+_POWER_HISTORY_MAX = 240
+_POWER_MIN_GAP_S = 0.5
+_power_history: list[tuple[float, float, float, str]] = []   # (ts, wall_w, temp_c, temp_label)
+
+
+def power_history() -> tuple[list[float], list[float]]:
+    """(wall watts, hottest temperature) series, oldest first."""
+    return [w for _t, w, _c, _l in _power_history], [c for _t, _w, c, _l in _power_history]
+
+
 _HOST_SENSORS_PATH = Path("/data/host_sensors.json")
 _HOST_SENSORS_MAX_AGE_S = 15.0     # a stale file is worse than no file
 
@@ -577,11 +589,30 @@ def power_rollup(baseline_w: float, psu_efficiency: float) -> dict:
 
     host = host_sensors()
     cpu_w = host.get("cpu_package_w")
+    # Hottest device, named: "78 C" is not actionable unless you know whether it is a GPU
+    # junction, the CPU package or an NVMe controller baking under the cards.
+    hottest_c, hottest_label = 0.0, ""
+    for label, value in (("GPU", gpu_temp_max), ("CPU", host.get("cpu_temp_c")),
+                         ("NVMe", host.get("nvme_temp_max_c"))):
+        try:
+            v = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > hottest_c:
+            hottest_c, hottest_label = v, label
     measured_w = gpu_w + (cpu_w or 0.0)
     dc_w = measured_w + max(0.0, baseline_w)
     eff = psu_efficiency if 0.5 <= psu_efficiency <= 1.0 else 0.9
     wall_w = dc_w / eff
+    now = time.time()
+    if not _power_history or (now - _power_history[-1][0]) >= _POWER_MIN_GAP_S:
+        _power_history.append((now, round(wall_w, 1), round(hottest_c, 1), hottest_label))
+        if len(_power_history) > _POWER_HISTORY_MAX:
+            del _power_history[:len(_power_history) - _POWER_HISTORY_MAX]
+
     return {
+        "hottest_c": round(hottest_c, 1) if hottest_c else None,
+        "hottest_label": hottest_label,
         "gpu_w": round(gpu_w, 1),
         "gpu_cards": gpu_cards,
         "gpu_temp_max_c": round(gpu_temp_max, 1) if gpu_temp_max else None,

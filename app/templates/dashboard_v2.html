@@ -30,10 +30,16 @@
   </div>
 </div>
 
+{# Power first: the models are the interesting part, the UPS is the constraint. Shares the 1s
+   cadence of the sensors underneath it - RAPL publishes every 2s, rocm-smi is sampled every 1s. #}
+<div class="mt-5" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_power.html" %}
+</div>
+
 {# ---------------- polled zone 1: what is loaded right now ---------------- #}
 {# 500 ms: the slot read behind this is ~1 ms, and the token counter it exposes moves every
    few milliseconds during generation. This is the one zone worth polling hard. #}
-<div class="mt-5" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
+<div class="mt-3" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
   {% include "_hero.html" %}
 </div>
 
@@ -44,11 +50,7 @@
   {% include "_gpu_strip.html" %}
 </div>
 
-{# Power and thermals share the 1s cadence: RAPL is published every 2s and rocm-smi sampled
-   every 1s, so this is as fresh as the sensors underneath it get. #}
-<div class="mt-3" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_power.html" %}
-</div>
+
 
 {# ---------------- calm layer: inventory and recent activity ---------------- #}
 <div class="mt-6 grid gap-4 lg:grid-cols-3">

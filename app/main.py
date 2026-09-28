@@ -352,10 +352,16 @@ def _power_settings() -> dict:
 
 def _power_context() -> dict:
     cfg = _power_settings()
+    roll = hw.power_rollup(cfg["power_baseline_w"], cfg["psu_efficiency"])
+    watts, temps = hw.power_history()
+    # Pinned to the configured ceilings, so the height of each line is the headroom. Scaled to
+    # its own window instead, a quiet box and a box about to trip the UPS would look identical.
     return {
-        "p": hw.power_rollup(cfg["power_baseline_w"], cfg["psu_efficiency"]),
+        "p": roll,
         "power_warn_w": cfg["power_warn_w"], "power_crit_w": cfg["power_crit_w"],
         "temp_warn_c": cfg["temp_warn_c"], "temp_crit_c": cfg["temp_crit_c"],
+        "power_spark": hw.sparkline(watts, cfg["power_crit_w"]) if len(watts) > 2 else "",
+        "temp_spark": hw.sparkline(temps, cfg["temp_crit_c"]) if len(temps) > 2 else "",
     }
 
 
