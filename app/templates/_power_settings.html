@@ -1,0 +1,30 @@
+{% from "_icons.html" import icon %}
+{#
+  Alert thresholds. Deliberately NOT part of the polled readings partial: that one is replaced
+  every second, which slammed this disclosure shut and threw away whatever was half-typed in it.
+  Anything interactive has to live outside the poll.
+#}
+<details class="mt-2" {% if reopen %}open{% endif %}>
+  <summary class="cursor-pointer list-none text-[10px] uppercase tracking-wide text-slate-500 hover:text-slate-300">
+    {{ icon('sliders-horizontal', 10) }} alert thresholds
+    {% if saved %}<span class="ml-1.5 text-emerald-400">saved</span>{% endif %}
+  </summary>
+  <form hx-post="/power/settings" hx-target="this" hx-swap="outerHTML"
+        class="mt-2 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-6">
+    {% macro field(name, label, value, hint) %}
+    <label class="block">
+      <span class="block text-[10px] text-slate-500" title="{{ hint }}">{{ label }}</span>
+      <input type="number" step="any" name="{{ name }}" value="{{ value }}"
+             class="mt-0.5 w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-200">
+    </label>
+    {% endmacro %}
+    {{ field('power_warn_w', 'warn W', power_warn_w | int, 'Amber above this estimated wall draw') }}
+    {{ field('power_crit_w', 'limit W', power_crit_w | int, 'Your UPS capacity. The percentage and the height of the power sparkline are both drawn against it.') }}
+    {{ field('baseline_w', 'base W', baseline_w | int, 'Board, RAM, fans, drives, NIC - nothing meters these, so this is your figure') }}
+    {{ field('temp_warn_c', 'warn °C', temp_warn_c | int, 'Amber at or above this temperature') }}
+    {{ field('temp_crit_c', 'crit °C', temp_crit_c | int, 'Red at or above, and the ceiling the temperature sparkline is drawn against') }}
+    <div class="flex items-end">
+      <button class="w-full rounded bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-900 hover:bg-white">Save</button>
+    </div>
+  </form>
+</details>

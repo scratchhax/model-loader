@@ -301,6 +301,7 @@ async def dashboard_v2(request: Request) -> HTMLResponse:
     ctx.update(await _hero_context())
     ctx.update(_gpu_strip_context())
     ctx.update(_power_context())
+    ctx.update(_power_settings_context())
     return templates.TemplateResponse("dashboard_v2.html", ctx)
 
 
@@ -372,9 +373,20 @@ def power_partial(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("_power.html", ctx)
 
 
+def _power_settings_context(saved: bool = False) -> dict:
+    cfg = _power_settings()
+    return {"power_warn_w": cfg["power_warn_w"], "power_crit_w": cfg["power_crit_w"],
+            "baseline_w": cfg["power_baseline_w"], "temp_warn_c": cfg["temp_warn_c"],
+            "temp_crit_c": cfg["temp_crit_c"], "saved": saved, "reopen": saved}
+
+
 @app.post("/power/settings", response_class=HTMLResponse)
 async def power_settings_save(request: Request) -> HTMLResponse:
-    """Save thresholds and hand back the panel, so the new limits are visible immediately."""
+    """Save thresholds and re-render just this form.
+
+    Returns the form rather than the readings panel: the readings are on a 1s poll and would
+    replace whatever came back within the second anyway.
+    """
     form = await request.form()
     mapping = {"power_warn_w": "power_warn_w", "power_crit_w": "power_crit_w",
                "baseline_w": "power_baseline_w", "temp_warn_c": "temp_warn_c",
@@ -392,8 +404,8 @@ async def power_settings_save(request: Request) -> HTMLResponse:
             continue
         db.set_setting(key, str(value))
     ctx = {"request": request}
-    ctx.update(_power_context())
-    return templates.TemplateResponse("_power.html", ctx)
+    ctx.update(_power_settings_context(saved=True))
+    return templates.TemplateResponse("_power_settings.html", ctx)
 
 
 # ---------- Models directory ----------

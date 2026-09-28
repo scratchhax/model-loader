@@ -35,6 +35,8 @@
 <div class="mt-5" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
   {% include "_power.html" %}
 </div>
+{# Outside the poll on purpose - see _power_settings.html #}
+{% include "_power_settings.html" %}
 
 {# ---------------- polled zone 1: what is loaded right now ---------------- #}
 {# 500 ms: the slot read behind this is ~1 ms, and the token counter it exposes moves every
