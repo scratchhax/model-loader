@@ -77,7 +77,7 @@
 
     {# ---- the three numbers that matter ---- #}
     <div class="mt-4 grid grid-cols-3 gap-3">
-      {% macro readout(value, unit, label, active, tint) %}
+      {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n) %}
       <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
                   {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}">
         <div class="flex items-baseline gap-1">
@@ -85,16 +85,30 @@
                        {% if active %}text-{{ tint }}-300{% else %}text-slate-300{% endif %}">{{ value }}</span>
           <span class="text-[10px] text-slate-500">{{ unit }}</span>
         </div>
-        <div class="mt-1 text-[10px] uppercase tracking-wide text-slate-500">{{ label }}</div>
+        <div class="mt-1 flex items-baseline justify-between gap-2">
+          <span class="text-[10px] uppercase tracking-wide text-slate-500">{{ label }}</span>
+          {% if spark_peak %}
+          {# The scale is stated rather than implied: this line is drawn against its own window
+             peak, because no fixed ceiling is meaningful across a dense 27B and a 4B-active MoE. #}
+          <span class="text-[9px] tabular-nums text-slate-600" title="the sparkline is drawn against this peak, over the last {{ spark_n }} samples">peak {{ '%.0f' % spark_peak }}</span>
+          {% endif %}
+        </div>
+        {% if spark %}
+        <svg viewBox="0 0 100 20" class="mt-1 block h-6 w-full {% if active %}text-{{ tint }}-400{% else %}text-slate-600{% endif %}" preserveAspectRatio="none">
+          <polyline fill="none" stroke="currentColor" stroke-width="1.5"
+                    vector-effect="non-scaling-stroke" points="{{ spark }}"/>
+        </svg>
+        {% endif %}
       </div>
       {% endmacro %}
 
       {{ readout('%.1f' % speed.gen_tps if (speed and speed.gen_tps) else '—', 'tok/s', 'out',
-                 speed and speed.state == 'generating', 'emerald') }}
+                 speed and speed.state == 'generating', 'emerald',
+                 tps_spark, tps_peak, tps_samples) }}
       {{ readout('%.0f' % speed.prefill_tps if (speed and speed.prefill_tps) else '—', 'tok/s', 'in',
-                 speed and speed.state == 'prefill', 'sky') }}
+                 speed and speed.state == 'prefill', 'sky', '', 0, 0) }}
       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
-                 false, 'slate') }}
+                 false, 'slate', '', 0, 0) }}
     </div>
 
     {# ---- context bar: cached share first, so a long conversation that is mostly cache reads cheap ---- #}

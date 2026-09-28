@@ -848,6 +848,27 @@ _GEN_EMA_ALPHA = 0.4       # smoothing for the token-delta rate; raw 500 ms delt
 _speed_prev: dict[str, tuple[float, int, int | None, bool]] = {}
 _gen_ema: dict[str, float] = {}      # smoothed token-delta rate, per backend
 
+# Rolling generation-speed history for the dashboard sparkline. 240 samples at the hero's 500 ms
+# poll is about two minutes, which is long enough to see a request start, run and finish.
+_TPS_HISTORY_MAX = 240
+_TPS_MIN_GAP_S = 0.25                # two tabs polling at once must not double-sample
+_tps_history: dict[str, list[tuple[float, float]]] = {}
+
+
+def tps_history(container_name: str) -> list[float]:
+    """Recent generation speeds for a backend, oldest first. Empty until something has run."""
+    return [v for _ts, v in _tps_history.get(container_name, [])]
+
+
+def _record_tps(container_name: str, value: float) -> None:
+    hist = _tps_history.setdefault(container_name, [])
+    now = time.time()
+    if hist and (now - hist[-1][0]) < _TPS_MIN_GAP_S:
+        return
+    hist.append((now, round(float(value or 0.0), 2)))
+    if len(hist) > _TPS_HISTORY_MAX:
+        del hist[:len(hist) - _TPS_HISTORY_MAX]
+
 
 async def _slot_state(container_name: str, internal_port: int, model_id: str) -> dict:
     """The loaded model's slot 0, or {} if it cannot be read."""
@@ -977,6 +998,10 @@ async def inference_speed(container_name: str, internal_port: int | None,
     else:
         _speed_prev.pop(container_name, None)
         _gen_ema.pop(container_name, None)   # a finished run must not smooth into the next one
+
+    # Idle samples are recorded as zero rather than skipped: the gaps between requests are part
+    # of the shape, and a line drawn only from busy moments would imply continuous work.
+    _record_tps(container_name, gen_tps if state == "generating" else 0.0)
 
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,

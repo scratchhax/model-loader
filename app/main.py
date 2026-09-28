@@ -206,7 +206,8 @@ async def _hero_context() -> dict:
     if best is None:
         return {"speed": None, "hero_model": "", "hero_backend": "",
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
-                "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0}
+                "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
+                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0}
 
     _rank, b, sp = best
     model_id = (b.loaded_model or "").split(",")[0].strip()
@@ -240,9 +241,17 @@ async def _hero_context() -> dict:
     st = hw.stats_for(b.name)
     vram_used = st.gpu.vram_used_gb if (st.ok and st.gpu) else None
     vram_total = st.gpu.vram_total_gb if (st.ok and st.gpu) else 0.0
+
+    # The sparkline is scaled to the peak in its own window, and that peak is printed beside it.
+    # A fixed scale cannot work here: 27 tok/s is a busy dense model and a slow MoE one, so the
+    # only honest options are a stated scale or a meaningless one.
+    tps = services.tps_history(b.name)
+    tps_peak = max(tps) if tps else 0.0
     return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
-            "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total}
+            "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
+            "tps_spark": hw.sparkline(tps, tps_peak or None) if len(tps) > 2 else "",
+            "tps_peak": tps_peak, "tps_samples": len(tps)}
 
 
 def _gpu_strip_context() -> dict:
