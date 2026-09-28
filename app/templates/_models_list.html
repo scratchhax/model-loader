@@ -187,25 +187,19 @@
               {% endif %}
             </div>
 
-            {# 5 - what it is GOOD at, in your judgement. Set from a benchmark run detail,
-               where the model's actual output is on screen to judge. Rendered even when
-               empty, and labelled "not rated", because a row that simply vanishes makes
-               "never judged" and "judged and poor" look identical. #}
+            {# 5 - what it is GOOD at, in your judgement, and editable right here. A benchmark
+               run is the best place to FORM the opinion, with the output on screen, but most of
+               what you learn about a model you learn by using it for a week - so the editor
+               lives wherever the model does. Collapsed behind a button because this list is
+               dense and most rows are not being re-rated today.
+
+               Rated against g.model_id: the ini section name llama-server actually serves the
+               file under, which is also what _badges_for_files reads back. #}
             <div class="flex flex-wrap items-center gap-1.5">
               <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">good at</span>
-              {% if _badges %}
-                {% for b in _badges %}
-                  <span class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px]
-                    {% if b.rating >= 4 %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
-                    {% elif b.rating == 3 %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
-                    {% else %}bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300{% endif %}"
-                    title="{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5 - your rating, set {{ b.created_at | ts }}{% if b.run_id %} from benchmark run #{{ b.run_id }}{% endif %}{% if b.note %} - {{ b.note }}{% endif %}">
-                    {{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5
-                  </span>
-                {% endfor %}
-              {% else %}
-                <span class="text-[10px] text-slate-400 dark:text-slate-600">not rated</span>
-              {% endif %}
+              {% with alias = g.model_id, badges = _badges, run_id = 0, collapsible = True %}
+                {% include "_badges.html" %}
+              {% endwith %}
             </div>
 
           </div>

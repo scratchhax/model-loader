@@ -26,6 +26,10 @@ class GpuCard:
     vram_total_gb: float
     temp_c: float
     power_w: float
+    # The enforced board power limit, when the driver reports one. Worth carrying: a capped card
+    # sitting at its limit and an uncapped card coasting look identical as a bare wattage, and it
+    # also gives the sampler a ceiling to sanity-check readings against.
+    power_cap_w: float = 0.0
     fan_pct: float = 0.0     # 0 when the card does not report a fan, or reports it as stopped
     fan_rpm: float = 0.0
 
@@ -47,6 +51,7 @@ class GpuStats:
     vram_total_gb: float
     temp_c: float
     power_w: float
+    power_cap_w: float = 0.0   # sum of the cards' caps, 0 when none of them report one
     gpu_count: int = 1
     cards: list[GpuCard] = field(default_factory=list)  # per-device detail
 
@@ -86,6 +91,15 @@ _HISTORY: dict[str, deque] = {}
 _SAMPLE_INTERVAL_S = 1.0   # rocm-smi/nvidia-smi through docker exec costs ~90 ms, so 1 s is
                            # a ~9% duty cycle - cheap enough for a live readout, and the
                            # dashboard cannot show anything fresher than this.
+
+# Container CPU%/RSS is read on its own thread because Docker's stats endpoint blocks for ~2 s
+# per container while it derives CPU% from two internal samples. Measured: with three backends
+# that dragged the shared 1 s tick out to 6.1 s, and every GPU figure, sparkline and filter
+# window on the page inherited the delay. Nothing needs RSS at 1 Hz; the GPU probe does want to
+# be near it, so the two no longer share a loop.
+_RUNTIME_INTERVAL_S = 2.0
+_RUNTIME_MAX_AGE_S = 20.0
+_RUNTIME_CACHE: dict[str, tuple[float, "ContainerRuntimeStats | None"]] = {}
 _VENDOR_CACHE: dict[str, str] = {}
 _LOCK = threading.Lock()
 _sampler_started = False
@@ -137,7 +151,8 @@ def _read_nvidia(container) -> GpuStats | None:
     """
     cmd = (
         "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,"
-        "temperature.gpu,power.draw,name,fan.speed --format=csv,noheader,nounits"
+        "temperature.gpu,power.draw,name,fan.speed,power.limit "
+        "--format=csv,noheader,nounits"
     )
     try:
         r = container.exec_run(cmd, demux=False)
@@ -167,12 +182,18 @@ def _read_nvidia(container) -> GpuStats | None:
                 fan_pct = float(parts[6]) if len(parts) > 6 else 0.0
             except ValueError:
                 fan_pct = 0.0
+            # power.limit reads "[N/A]" where the board exposes no limit.
+            try:
+                power_cap = float(parts[7]) if len(parts) > 7 else 0.0
+            except ValueError:
+                power_cap = 0.0
             cards.append(GpuCard(
                 index=len(cards), name=names[-1],
                 util_pct=utils[-1],
                 vram_used_gb=round(mems_used[-1] / 1024.0, 2),
                 vram_total_gb=round(mems_total[-1] / 1024.0, 2),
-                temp_c=temps[-1], power_w=powers[-1], fan_pct=fan_pct,
+                temp_c=temps[-1], power_w=powers[-1], power_cap_w=power_cap,
+                fan_pct=fan_pct,
             ))
         if not utils:
             return None
@@ -189,6 +210,7 @@ def _read_nvidia(container) -> GpuStats | None:
             vram_total_gb=round(sum(mems_total) / 1024.0, 1),
             temp_c=max(temps),
             power_w=round(sum(powers), 1),
+            power_cap_w=round(sum(c.power_cap_w for c in cards), 1),
             gpu_count=len(utils),
             cards=cards,
         )
@@ -269,6 +291,44 @@ def _amd_name(card_key: str, card: dict) -> str:
     return name or card_key
 
 
+def _read_amd_power(container) -> dict[str, tuple[float, float]]:
+    """{card key: (draw W, cap W)} from a rocm-smi call that asks for nothing else.
+
+    Power has to be read on its own, and this is not fussiness. "Average Graphics Package Power"
+    is an average over the interval since the previous read, so it is sensitive to when in the
+    invocation each card gets sampled. Bundled behind --showid --showproductname --showuse
+    --showmemuse --showmeminfo --showtemp --showfan, the gap before each card differs enough to
+    skew them in opposite directions: measured on two evenly loaded cards, 14 consecutive reads
+    of the bundled command produced a split worse than 60 W in 12 of them - 63/302, 263/49,
+    65/270 - while the same 14 reads of --showpower alone gave 152/153, 152/150, 152/154, matching
+    hwmon exactly. The pair total stayed correct throughout, which is the tell for a timing
+    artefact rather than a bad sensor.
+
+    Returns {} if the call fails, and the caller falls back to the bundled figures.
+    """
+    try:
+        r = container.exec_run("rocm-smi --showpower --showmaxpower --json", demux=False)
+    except DockerException:
+        return {}
+    if r.exit_code != 0:
+        return {}
+    try:
+        parsed = json.loads(r.output.decode(errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, tuple[float, float]] = {}
+    for key, card in parsed.items():
+        if not isinstance(card, dict):
+            continue
+        draw = _amd_num(card, ("power",), exclude=("cap", "limit", "max"))
+        cap = _amd_num(card, ("power", "max")) or _amd_num(card, ("power", "cap"))
+        if draw or cap:
+            out[key] = (draw, cap)
+    return out
+
+
 def _read_amd(container, container_name: str) -> GpuStats | None:
     """Per-card AMD stats, aggregated the same way as NVIDIA.
 
@@ -286,7 +346,7 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
     # unknown flags outright, so fall back to the minimal set it has always understood.
     cmds = (
         "rocm-smi --showid --showproductname --showuse --showmemuse "
-        "--showmeminfo vram --showtemp --showpower --showfan --json",
+        "--showmeminfo vram --showtemp --showpower --showmaxpower --showfan --json",
         "rocm-smi --showuse --showmemuse --showtemp --showpower --json",
     )
     data: dict | None = None
@@ -316,6 +376,9 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
     if not items:
         return None
 
+    # Power comes from its own call; the bundled figures below are only a fallback.
+    power_by_card = _read_amd_power(container)
+
     env_total = float(settings.gpu_vram_map.get(container_name, 0) or 0.0)
     per_card_env = (env_total / len(items)) if env_total else 0.0
 
@@ -331,14 +394,21 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
             used_gb = round(total_gb * pct / 100.0, 2) if (pct and total_gb) else 0.0
         util = _amd_num(card, ("gpu use",)) or _amd_num(card, ("gfx", "activity"))
         temp = _amd_num(card, ("temperature", "edge")) or _amd_num(card, ("temperature", "junction"))
-        power = _amd_num(card, ("power",), exclude=("cap", "limit", "max"))
+        # "Max Graphics Package Power (W)" tracks the enforced cap, not the board's rating: it
+        # reads 210 on these cards after amd-smi caps them down from 300.
+        power, power_cap = power_by_card.get(
+            card_key,
+            (_amd_num(card, ("power",), exclude=("cap", "limit", "max")),
+             _amd_num(card, ("power", "max")) or _amd_num(card, ("power", "cap"))),
+        )
         # "Fan speed (level)" is a raw PWM value (0-255) and would read as 102%, so the percent
         # key is matched explicitly and the level excluded.
         fan_pct = _amd_num(card, ("fan", "%"), exclude=("level",))
         fan_rpm = _amd_num(card, ("fan", "rpm"))
         cards.append(GpuCard(index=i, name=_amd_name(card_key, card), util_pct=util,
                              vram_used_gb=used_gb, vram_total_gb=total_gb,
-                             temp_c=temp, power_w=power, fan_pct=fan_pct, fan_rpm=fan_rpm))
+                             temp_c=temp, power_w=power, power_cap_w=power_cap,
+                             fan_pct=fan_pct, fan_rpm=fan_rpm))
 
     names = [c.name for c in cards]
     display = (f"{len(names)} × {names[0]}" if len(set(names)) == 1 and len(names) > 1
@@ -351,6 +421,7 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
         vram_total_gb=round(sum(c.vram_total_gb for c in cards), 1),
         temp_c=max(c.temp_c for c in cards),
         power_w=round(sum(c.power_w for c in cards), 1),
+        power_cap_w=round(sum(c.power_cap_w for c in cards), 1),
         gpu_count=len(cards),
         cards=cards,
     )
@@ -384,6 +455,44 @@ def _read_container_runtime(container) -> ContainerRuntimeStats | None:
         return None
 
 
+# Per-card raw power samples, keyed (container, card index), newest last. Three of them, spanning
+# ~3 s at the sampler's 1 s tick: see _clean_card_power for the measurements behind that.
+_POWER_SAMPLES: dict[tuple[str, int], list[float]] = {}
+_POWER_WINDOW = 3
+
+
+def _clean_card_power(name: str, cards: list[GpuCard]) -> None:
+    """Replace each card's raw power sample with a median of recent ones, in place.
+
+    A guard, not the fix. Nearly all of the bad per-card wattage this used to show came from
+    bundling the power query with the others in one rocm-smi call, which _read_amd_power now
+    avoids - that alone took impossible readings from 48% of samples to 5%.
+
+    What remains is the sensor. Both available sources overshoot the enforced cap sometimes, and
+    the one that looks most trustworthy is not: pooled over 36 steady-load samples against a
+    210 W cap,
+
+        hwmon power1_average (what nvtop shows)   sd 87.9 W   median 148 W   29/72 over cap
+        rocm-smi --showpower, raw                 sd 21.5 W   median 154 W    2/72 over cap
+        rocm-smi --showpower, median of 3         sd  4.7 W   median 154 W    0/72 over cap
+
+    which is why nvtop is also seen reporting wattages its own cap forbids. The two sensors agree
+    on the answer - pair total 305 vs 308 W - and disagree on how much noise they show.
+
+    A median rather than an average, because the errors are impulses and an average cannot shrug
+    one off. Width 3 rather than 5: the extra samples buy about 1 W of jitter and cost a second
+    of lag. And no discarding of over-cap readings, tempting as that is - the excursions come in
+    mirrored pairs, so dropping the high half while keeping the low half can only read low, which
+    measured as a -7.5 W bias when tried.
+    """
+    for c in cards:
+        key = (name, c.index)
+        window = _POWER_SAMPLES.setdefault(key, [])
+        window.append(c.power_w)
+        del window[:-_POWER_WINDOW]
+        c.power_w = round(sorted(window)[len(window) // 2], 1)
+
+
 def _collect(name: str) -> BackendStats:
     client = _client()
     if client is None:
@@ -407,7 +516,16 @@ def _collect(name: str) -> BackendStats:
         gpu = _read_vulkan(c, name)
     else:
         gpu = None
-    cont = _read_container_runtime(c)
+    if gpu and gpu.cards:
+        _clean_card_power(name, gpu.cards)
+        # The pooled figure is what the wall estimate sums, so it has to follow the cards.
+        gpu.power_w = round(sum(card.power_w for card in gpu.cards), 1)
+        gpu.power_cap_w = round(sum(card.power_cap_w for card in gpu.cards), 1)
+    # Whatever the runtime thread last published. Deliberately not read inline: that is the
+    # call that used to make this function take two seconds.
+    with _LOCK:
+        entry = _RUNTIME_CACHE.get(name)
+    cont = entry[1] if entry and (time.time() - entry[0]) <= _RUNTIME_MAX_AGE_S else None
     return BackendStats(ok=True, gpu=gpu, container=cont)
 
 
@@ -531,7 +649,35 @@ def _sample_loop() -> None:
                 for gone in [k for k in _HISTORY if k not in names]:
                     _HISTORY.pop(gone, None)
                     _CACHE.pop(gone, None)
+                    _RUNTIME_CACHE.pop(gone, None)
         time.sleep(_SAMPLE_INTERVAL_S)
+
+
+def _runtime_loop() -> None:
+    """Container CPU%/RSS, on its own slow thread. See _RUNTIME_INTERVAL_S."""
+    from . import services
+    client = _client()
+    while True:
+        try:
+            names = services._effective_container_names()
+        except Exception:  # noqa: BLE001
+            names = []
+        for name in names:
+            stats = None
+            try:
+                if client is None:
+                    client = _client()
+                if client is not None:
+                    c = client.containers.get(name)
+                    if c.status == "running":
+                        stats = _read_container_runtime(c)
+            except (NotFound, DockerException):
+                stats = None
+            except Exception:  # noqa: BLE001 — this thread must not die
+                stats = None
+            with _LOCK:
+                _RUNTIME_CACHE[name] = (time.time(), stats)
+        time.sleep(_RUNTIME_INTERVAL_S)
 
 
 def start_sampler() -> None:
@@ -539,8 +685,8 @@ def start_sampler() -> None:
     if _sampler_started:
         return
     _sampler_started = True
-    t = threading.Thread(target=_sample_loop, daemon=True, name="hw-sampler")
-    t.start()
+    threading.Thread(target=_sample_loop, daemon=True, name="hw-sampler").start()
+    threading.Thread(target=_runtime_loop, daemon=True, name="hw-runtime").start()
 
 
 # ---------------------------------------------------------------- host sensors + power roll-up

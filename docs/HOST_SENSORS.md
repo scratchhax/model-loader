@@ -60,6 +60,28 @@ them through its own vendor tool, and two sources for one number is how they end
 
 ## AMD notes
 
+**Read GPU power in its own `rocm-smi` call.** `Average Graphics Package Power` is averaged over
+the interval since the previous read, so it depends on when in the invocation each card is
+sampled. Bundled behind the other queries, the gap before each card differs enough to skew them
+in opposite directions. Measured on two evenly loaded cards capped at 210 W, 14 consecutive reads
+of the bundled command:
+
+| command | result |
+|---|---|
+| `--showid --showproductname --showuse --showmemuse --showmeminfo vram --showtemp --showpower --showfan` | split worse than 60 W in **12 of 14**: 63/302, 263/49, 65/270 |
+| `--showpower` alone | 152/153, 152/150, 152/154 — matches hwmon |
+
+The pair total stayed correct in both, which is the signature of a timing artefact rather than a
+bad sensor. If per-card wattage ever looks mirrored again — one card absurdly high, the other as
+absurdly low, total about right — this is the first thing to check.
+
+**Neither power sensor is exact.** `power1_average` under hwmon, which is what nvtop displays,
+overshot the enforced cap in 29 of 72 steady-load readings on this box; rocm-smi's SMU figure did
+so in 2 of 72. nvtop is not doing anything smarter, it just prints the counter, which is why it
+too will occasionally show a wattage the cap forbids. Model Loader takes a median of the last
+three samples per card, which measured sd 21.5 W down to 4.7 W with no bias.
+
+
 `amd-smi set --power-cap` is per card and applies to the **last** `-g` flag only, so cap each
 card in its own invocation. It also reports success while the kernel keeps the old value — read
 `/sys/bus/pci/devices/<bdf>/hwmon/hwmon*/power1_cap` back to confirm. On gfx1201 neither

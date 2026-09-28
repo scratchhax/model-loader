@@ -648,6 +648,7 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
         "avatar_url": avatar_url,
         "loaded_on": loaded_on,
         "in_ini": in_ini,
+        "badges": db.badges_for(model_id),
     })
 
 
@@ -1992,11 +1993,15 @@ def badge_assign(request: Request,
                  category: str = Form(...),
                  rating: int = Form(...),
                  note: str = Form(""),
-                 run_id: int = Form(0)) -> HTMLResponse:
+                 run_id: int = Form(0),
+                 collapsible: int = Form(0)) -> HTMLResponse:
     ok, err = db.badge_set(alias, category, rating, note, run_id or None)
+    # open=True on the way back: you just used the form, so you may well want it again. Without
+    # it the re-rendered partial would come back collapsed after every single change.
     return templates.TemplateResponse("_badges.html", {
         "request": request, "alias": alias, "badges": db.badges_for(alias),
         "run_id": run_id, "badge_err": "" if ok else err,
+        "collapsible": bool(collapsible), "open": True,
     })
 
 
@@ -2004,11 +2009,13 @@ def badge_assign(request: Request,
 def badge_remove(request: Request,
                  alias: str = Form(...),
                  category: str = Form(...),
-                 run_id: int = Form(0)) -> HTMLResponse:
+                 run_id: int = Form(0),
+                 collapsible: int = Form(0)) -> HTMLResponse:
     db.badge_clear(alias, category)
     return templates.TemplateResponse("_badges.html", {
         "request": request, "alias": alias, "badges": db.badges_for(alias),
         "run_id": run_id, "badge_err": "",
+        "collapsible": bool(collapsible), "open": True,
     })
 
 
