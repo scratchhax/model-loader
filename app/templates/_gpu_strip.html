@@ -1,0 +1,81 @@
+{% from "_icons.html" import icon %}
+{#
+  Per-card telemetry for the GPU backend. Polled on the same 2s cadence as the hero.
+
+  Per CARD, not pooled, for the same reason the fit table is: llama.cpp places each layer on one
+  device, and the non-split allocations (compute buffer, projector, cuBLAS/rocBLAS workspace) all
+  land on the main GPU. A pooled bar reading 60% can hide a card that is full, which is the
+  difference between a config that loads and one that OOMs.
+
+  Sparklines come from the hw sampler's existing history - no extra probing.
+#}
+{% if cards %}
+<div class="grid gap-3 {% if cards | length > 1 %}sm:grid-cols-2{% endif %}">
+  {% for c in cards %}
+  {% set pct = c.vram_pct %}
+  {% set hot = pct >= 92 %}
+  <div class="rounded-xl border border-slate-800 bg-slate-950/95 px-4 py-3 text-slate-200">
+
+    <div class="flex items-baseline justify-between gap-2">
+      <div class="min-w-0">
+        <div class="truncate font-mono text-[11px] text-slate-400">{{ c.name }}</div>
+        <div class="mt-0.5 flex items-baseline gap-1">
+          <span class="font-mono text-lg font-semibold tabular-nums {% if hot %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.1f' % c.vram_used_gb }}</span>
+          <span class="text-[10px] text-slate-500">/ {{ '%.0f' % c.vram_total_gb }} GB</span>
+        </div>
+      </div>
+      <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-400">
+        <div><span class="text-slate-500">util</span> {{ '%.0f' % c.util_pct }}%</div>
+        <div class="mt-0.5"><span class="text-slate-500">{{ '%.0f' % c.temp_c }}°C</span> · {{ '%.0f' % c.power_w }} W</div>
+      </div>
+    </div>
+
+    {# VRAM bar. Amber past 92% because that is roughly where a further context bump stops fitting. #}
+    <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+      <div class="h-full transition-all duration-700 ease-out {% if hot %}bg-amber-400{% else %}bg-gradient-to-r from-sky-500 to-indigo-500{% endif %}"
+           style="width: {{ pct }}%"></div>
+    </div>
+
+    {% set hist = gpu_history.get(c.index) if gpu_history else None %}
+    {% if hist %}
+    {# Both lines are pinned to a fixed scale (100% and this card's VRAM total) so their shape
+       means the same thing every refresh - an auto-scaled sparkline turns a flat-but-noisy
+       metric into fake drama. #}
+    <div class="mt-2.5 grid grid-cols-2 gap-3">
+      <div>
+        <div class="flex items-baseline justify-between text-[10px] text-slate-500">
+          <span>util</span><span class="tabular-nums text-slate-600">{{ hist.window_label }}</span>
+        </div>
+        {% if hist.util %}
+        <svg viewBox="0 0 100 20" class="mt-0.5 block h-5 w-full text-emerald-400/80" preserveAspectRatio="none">
+          <polyline fill="none" stroke="currentColor" stroke-width="1.5"
+                    vector-effect="non-scaling-stroke" points="{{ hist.util }}"/>
+        </svg>
+        {% else %}
+        <div class="mt-0.5 flex h-5 items-center text-[10px] text-slate-600">collecting…</div>
+        {% endif %}
+      </div>
+      <div>
+        <div class="flex items-baseline justify-between text-[10px] text-slate-500">
+          <span>vram</span><span class="tabular-nums text-slate-600">{{ '%.0f' % c.vram_total_gb }} GB scale</span>
+        </div>
+        {% if hist.vram %}
+        <svg viewBox="0 0 100 20" class="mt-0.5 block h-5 w-full text-sky-400/80" preserveAspectRatio="none">
+          <polyline fill="none" stroke="currentColor" stroke-width="1.5"
+                    vector-effect="non-scaling-stroke" points="{{ hist.vram }}"/>
+        </svg>
+        {% else %}
+        <div class="mt-0.5 flex h-5 items-center text-[10px] text-slate-600">collecting…</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="rounded-xl border border-slate-800 bg-slate-950/95 px-4 py-6 text-center text-[11px] text-slate-500">
+  No GPU telemetry yet. The sampler probes inside the backend container, so this fills in once a
+  llama backend is running.
+</div>
+{% endif %}

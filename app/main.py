@@ -143,6 +143,161 @@ async def dashboard(request: Request) -> HTMLResponse:
     })
 
 
+# ---------- Mission control (v2 overview) ----------
+
+def _host_line() -> str:
+    """One line of context under the page title: what this box is, in its own terms."""
+    bits: list[str] = []
+    names: list[str] = []
+    total_vram = 0.0
+    isa = ""
+    for name in services._effective_container_names():
+        st = hw.stats_for(name)
+        if st.ok and st.gpu and st.gpu.vram_total_gb > 0:
+            total_vram = max(total_vram, st.gpu.vram_total_gb)
+            names.append(name)
+            for c in st.gpu.cards:
+                if "gfx" in (c.name or "") and not isa:
+                    isa = c.name.split("(")[-1].rstrip(")")
+    if total_vram:
+        bits.append(f"{total_vram:.0f} GB VRAM")
+    if isa:
+        bits.append(isa)
+    ram = hw.host_ram_gb()
+    if ram:
+        bits.append(f"{ram:.0f} GB RAM")
+    return " · ".join(bits) if bits else "Everything live at a glance."
+
+
+async def _hero_context() -> dict:
+    """The loaded model, its throughput, and enough of its config to read the panel.
+
+    Picks the busiest backend rather than the first: with several backends, the one actually
+    working is the one worth leading with. Falls back to any backend holding a model, then to
+    an empty standby panel.
+    """
+    backends = await services.snapshot_llama_backends()
+    best: tuple[int, object, object] | None = None      # (rank, backend, speed)
+    for b in backends:
+        if not b.loaded_model:
+            continue
+        sp = await services.inference_speed(b.name, b.internal_port, b.loaded_model)
+        rank = 2 if (sp and sp.live) else 1
+        if best is None or rank > best[0]:
+            best = (rank, b, sp)
+    if best is None:
+        return {"speed": None, "hero_model": "", "hero_backend": "",
+                "hero_shape": None, "hero_quant": "", "hero_size_h": "",
+                "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0}
+
+    _rank, b, sp = best
+    model_id = (b.loaded_model or "").split(",")[0].strip()
+
+    # Config and shape come from the section and the GGUF header - the same sources the models
+    # page uses, so the hero cannot disagree with the rest of the app.
+    ctx_cfg = ""
+    quant = ""
+    size_h = ""
+    shape = None
+    try:
+        sec = ini.get_section(model_id) or {}
+        raw_ctx = str(sec.get("ctx-size") or "").strip()
+        if raw_ctx.isdigit():
+            ctx_cfg = f"{int(raw_ctx) // 1024}k"
+        rel = str(sec.get("model") or "").replace("/models/", "", 1)
+        if rel:
+            path = settings.models_dir / rel
+            quant = hf.infer_quant(path.name) or ""
+            if path.exists():
+                size = path.stat().st_size
+                if "/" in rel:
+                    size = sum(x.stat().st_size for x in path.parent.iterdir()
+                               if x.is_file() and x.suffix.lower() == ".gguf"
+                               and not ini._is_companion(x.name))
+                size_h = human_bytes(size)
+                shape = services.model_shape(path)
+    except Exception:  # noqa: BLE001 - the hero degrades to fewer facts, it never 500s
+        pass
+
+    st = hw.stats_for(b.name)
+    vram_used = st.gpu.vram_used_gb if (st.ok and st.gpu) else None
+    vram_total = st.gpu.vram_total_gb if (st.ok and st.gpu) else 0.0
+    return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
+            "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
+            "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total}
+
+
+def _gpu_strip_context() -> dict:
+    """Per-card stats plus per-card sparklines, for whichever backend has GPUs.
+
+    Per card on purpose: llama.cpp places each layer on one device, and the allocations that are
+    not layer-split all land on the main GPU, so a pooled bar can read comfortable while one card
+    is full.
+    """
+    cards: list = []
+    history: dict[int, dict] = {}
+    for name in services._effective_container_names():
+        st = hw.stats_for(name)
+        if not (st.ok and st.gpu and st.gpu.cards):
+            continue
+        cards = st.gpu.cards
+        pts = hw.history_for(name)
+        if pts:
+            span_s = (pts[-1].ts - pts[0].ts) if len(pts) > 1 else 0.0
+            mins = int(span_s // 60)
+            label = f"last {mins}m" if mins >= 1 else f"last {int(span_s)}s"
+            for c in cards:
+                util = [p.per_gpu_util[c.index] for p in pts
+                        if len(p.per_gpu_util) > c.index]
+                vram = [p.per_gpu_vram_used_gb[c.index] for p in pts
+                        if len(p.per_gpu_vram_used_gb) > c.index]
+                history[c.index] = {
+                    "window_label": label,
+                    "util": hw.sparkline(util, 100.0) if util else "",
+                    "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
+                }
+        break
+    return {"cards": cards, "gpu_history": history}
+
+
+@app.get("/v2", response_class=HTMLResponse)
+async def dashboard_v2(request: Request) -> HTMLResponse:
+    snap = services.snapshot_models_dir()
+    backends = await services.snapshot_llama_backends()
+    rows = db.recent_downloads(20)
+    seen: set[str] = set()
+    recent: list[dict] = []
+    for r in rows:
+        if r["status"] != "done" or r["filename"] in seen:
+            continue
+        seen.add(r["filename"])
+        recent.append({"filename": r["filename"],
+                       "size_h": human_bytes(int(r["total_bytes"] or 0))})
+        if len(recent) >= 5:
+            break
+    active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
+    ctx = {"request": request, "snap": snap, "backends": backends,
+           "ini_sections": ini.list_sections(), "recent": recent,
+           "active_downloads": active, "host_line": _host_line()}
+    ctx.update(await _hero_context())
+    ctx.update(_gpu_strip_context())
+    return templates.TemplateResponse("dashboard_v2.html", ctx)
+
+
+@app.get("/hero", response_class=HTMLResponse)
+async def hero_partial(request: Request) -> HTMLResponse:
+    ctx = {"request": request}
+    ctx.update(await _hero_context())
+    return templates.TemplateResponse("_hero.html", ctx)
+
+
+@app.get("/gpu-strip", response_class=HTMLResponse)
+async def gpu_strip_partial(request: Request) -> HTMLResponse:
+    ctx = {"request": request}
+    ctx.update(_gpu_strip_context())
+    return templates.TemplateResponse("_gpu_strip.html", ctx)
+
+
 # ---------- Models directory ----------
 
 async def _loaded_map() -> dict[str, list[str]]:

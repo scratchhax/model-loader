@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'dashboard' %}
+{% block title %}Mission control · Model Loader{% endblock %}
+{% block content %}
+
+{#
+  Mission-control overview. Two polled zones (hero, GPU strip) on the same 2s cadence the
+  container cards already use, then the calmer reference material underneath.
+
+  The ordering is the point: what is loaded and how fast it is going, then what the cards are
+  doing, then the inventory. The previous overview led with disk free and a count of GGUFs -
+  true facts that look identical whether the box is mid-generation or has been asleep all day.
+#}
+
+<div class="flex flex-wrap items-end justify-between gap-4">
+  <div class="min-w-0">
+    <h1 class="text-2xl font-semibold tracking-tight">Mission control</h1>
+    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+      {{ host_line }}
+    </p>
+  </div>
+  <div class="flex items-center gap-2">
+    <a href="/search" class="inline-flex items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium shadow-card hover:shadow-card-lg">
+      {{ icon('search', 14) }} Search HF
+    </a>
+    <a href="/config" class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">
+      {{ icon('file-cog', 14) }} models.ini
+    </a>
+  </div>
+</div>
+
+{# ---------------- polled zone 1: what is loaded right now ---------------- #}
+<div class="mt-5" hx-get="/hero" hx-trigger="load, every 2s" hx-swap="innerHTML">
+  {% include "_hero.html" %}
+</div>
+
+{# ---------------- polled zone 2: the cards ---------------- #}
+<div class="mt-3" hx-get="/gpu-strip" hx-trigger="load, every 2s" hx-swap="innerHTML">
+  {% include "_gpu_strip.html" %}
+</div>
+
+{# ---------------- calm layer: inventory and recent activity ---------------- #}
+<div class="mt-6 grid gap-4 lg:grid-cols-3">
+
+  <section class="lg:col-span-2">
+    <div class="mb-2 flex items-baseline justify-between">
+      <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Backends</h2>
+      <a href="/containers" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Containers →</a>
+    </div>
+    <div class="space-y-2">
+      {% for b in backends %}
+      <a href="/containers"
+         class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/60">
+        <div class="flex min-w-0 items-center gap-2.5">
+          <span class="h-1.5 w-1.5 shrink-0 rounded-full
+            {% if b.status == 'running' %}bg-emerald-500{% elif b.status == 'restarting' %}bg-amber-500{% else %}bg-slate-300 dark:bg-slate-600{% endif %}"></span>
+          <span class="truncate font-mono text-sm">{{ b.name }}</span>
+          {% if b.load_failed %}
+          <span class="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950 dark:text-red-300">load failed</span>
+          {% endif %}
+        </div>
+        <div class="shrink-0 text-right text-[11px]">
+          {% if b.loaded_model %}
+          <span class="font-mono text-slate-600 dark:text-slate-300">{{ b.loaded_model }}</span>
+          {% else %}
+          <span class="text-slate-400 dark:text-slate-500">idle</span>
+          {% endif %}
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <div>
+      <div class="mb-2 flex items-baseline justify-between">
+        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Storage</h2>
+        <a href="/models" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Models →</a>
+      </div>
+      <div class="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
+        <div class="flex items-baseline justify-between">
+          <span class="font-mono text-lg font-semibold tabular-nums">{{ snap.disk.free_h if snap.disk else '—' }}</span>
+          <span class="text-[11px] text-slate-500 dark:text-slate-400">free</span>
+        </div>
+        {% if snap.disk %}
+        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+          <div class="h-full bg-gradient-to-r from-sky-500 to-indigo-600" style="width: {{ snap.disk.used_pct }}%"></div>
+        </div>
+        <div class="mt-1.5 text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+          {{ snap.disk.used_pct }}% of {{ snap.disk.total_h }} used
+        </div>
+        {% endif %}
+        <div class="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2.5 text-[11px] dark:border-slate-800">
+          <div><span class="font-mono text-base font-semibold tabular-nums">{{ snap.ggufs | length }}</span>
+               <span class="text-slate-500 dark:text-slate-400">GGUFs</span></div>
+          <div><span class="font-mono text-base font-semibold tabular-nums">{{ ini_sections | length }}</span>
+               <span class="text-slate-500 dark:text-slate-400">configured</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="mb-2 flex items-baseline justify-between">
+        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Recent downloads</h2>
+        <a href="/downloads" class="text-xs text-slate-500 hover:underline dark:text-slate-400">
+          {% if active_downloads %}{{ active_downloads }} active →{% else %}Downloads →{% endif %}
+        </a>
+      </div>
+      <div class="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100 dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
+        {% for r in recent[:5] %}
+        <div class="flex items-center justify-between gap-2 px-3 py-2">
+          <span class="truncate font-mono text-[11px]">{{ r.filename }}</span>
+          <span class="shrink-0 text-[10px] tabular-nums text-slate-400">{{ r.size_h }}</span>
+        </div>
+        {% else %}
+        <div class="px-3 py-3 text-[11px] text-slate-500 dark:text-slate-400">Nothing downloaded yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</div>
+
+{% endblock %}

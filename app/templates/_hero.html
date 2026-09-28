@@ -1,0 +1,122 @@
+{% from "_icons.html" import icon %}
+{#
+  NOW SERVING - the main page's hero. Polled every 2s.
+
+  The old overview led with counters (disk free, how many GGUFs, how many backends). Those are
+  facts about storage, not about what the box is doing, and they look identical whether a model
+  is mid-generation or the machine has been idle for a day. This leads with the thing you
+  actually came to check: which model is loaded, whether it is working, and how fast.
+
+  Deliberately dark in both themes - it is a readout, not a document - and deliberately still:
+  colour and a soft halo carry the state instead of anything that blinks or pulses.
+#}
+{% set live = speed and speed.live %}
+{% set accent = 'emerald' if (speed and speed.state == 'generating') else ('sky' if (speed and speed.state == 'prefill') else 'slate') %}
+
+<div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 px-5 py-4 text-slate-100
+            shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)]">
+
+  {# state wash: a wide, very soft gradient so the panel reads its own status from across the desk #}
+  <div class="pointer-events-none absolute inset-0 transition-opacity duration-700
+              {% if live %}opacity-100{% else %}opacity-40{% endif %}
+              {% if accent == 'emerald' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(16,185,129,0.16),transparent_55%)]
+              {% elif accent == 'sky' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(14,165,233,0.16),transparent_55%)]
+              {% else %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(148,163,184,0.10),transparent_55%)]{% endif %}"></div>
+
+  <div class="relative">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em] text-slate-400">
+          <span class="relative flex h-2 w-2">
+            <span class="absolute inline-flex h-full w-full rounded-full
+              {% if accent == 'emerald' %}bg-emerald-400{% elif accent == 'sky' %}bg-sky-400{% else %}bg-slate-600{% endif %}"></span>
+            {% if live %}
+            <span class="absolute -inset-1 rounded-full opacity-60 blur-[3px]
+              {% if accent == 'emerald' %}bg-emerald-500{% else %}bg-sky-500{% endif %}"></span>
+            {% endif %}
+          </span>
+          now serving
+          {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-400">{{ hero_backend }}</span>{% endif %}
+        </div>
+
+        {% if hero_model %}
+        <h2 class="mt-1.5 truncate font-mono text-xl font-semibold tracking-tight text-white sm:text-2xl">{{ hero_model }}</h2>
+        <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+          {% if hero_shape and hero_shape.is_moe %}
+          <span class="rounded bg-violet-500/15 px-1.5 py-0.5 font-medium text-violet-300"
+                title="Mixture of experts: only a few experts run per token, so offloading experts to host RAM costs far less speed than moving whole layers">MoE</span>
+          {% elif hero_shape %}
+          <span class="rounded bg-slate-700/60 px-1.5 py-0.5 font-medium text-slate-300"
+                title="Dense: every parameter is read for every token, so any CPU offload is expensive">dense</span>
+          {% endif %}
+          {% if hero_quant %}<span class="font-mono">{{ hero_quant }}</span>{% endif %}
+          {% if hero_size_h %}<span class="text-slate-600">·</span><span class="tabular-nums">{{ hero_size_h }}</span>{% endif %}
+          {% if hero_ctx_cfg %}<span class="text-slate-600">·</span><span class="tabular-nums">ctx {{ hero_ctx_cfg }}</span>{% endif %}
+        </div>
+        {% else %}
+        <h2 class="mt-1.5 font-mono text-xl font-semibold tracking-tight text-slate-500 sm:text-2xl">nothing loaded</h2>
+        <p class="mt-1 text-[11px] text-slate-500">
+          Under <span class="font-mono">--models-max 1</span> a backend holds one model and loads it on demand.
+          Send a request, or use Test prompt on the Containers page.
+        </p>
+        {% endif %}
+      </div>
+
+      <div class="shrink-0 text-right">
+        <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+          {% if speed and speed.state == 'generating' %}generating
+          {% elif speed and speed.state == 'prefill' %}reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}
+          {% elif hero_model %}idle
+          {% else %}standby{% endif %}
+        </div>
+        {% if hero_vram_used is not none %}
+        <div class="mt-1 font-mono text-sm tabular-nums text-slate-300">{{ '%.1f' % hero_vram_used }}<span class="text-slate-600"> / {{ '%.0f' % hero_vram_total }} GB</span></div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ---- the three numbers that matter ---- #}
+    <div class="mt-4 grid grid-cols-3 gap-3">
+      {% macro readout(value, unit, label, active, tint) %}
+      <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
+                  {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}">
+        <div class="flex items-baseline gap-1">
+          <span class="font-mono text-2xl font-semibold tabular-nums leading-none
+                       {% if active %}text-{{ tint }}-300{% else %}text-slate-300{% endif %}">{{ value }}</span>
+          <span class="text-[10px] text-slate-500">{{ unit }}</span>
+        </div>
+        <div class="mt-1 text-[10px] uppercase tracking-wide text-slate-500">{{ label }}</div>
+      </div>
+      {% endmacro %}
+
+      {{ readout('%.1f' % speed.gen_tps if (speed and speed.gen_tps) else '—', 'tok/s', 'out',
+                 speed and speed.state == 'generating', 'emerald') }}
+      {{ readout('%.0f' % speed.prefill_tps if (speed and speed.prefill_tps) else '—', 'tok/s', 'in',
+                 speed and speed.state == 'prefill', 'sky') }}
+      {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
+                 false, 'slate') }}
+    </div>
+
+    {# ---- context bar: cached share first, so a long conversation that is mostly cache reads cheap ---- #}
+    {% if speed and speed.ctx_total and speed.ctx_used %}
+    {% set used_pct = (100.0 * speed.ctx_used / speed.ctx_total) | round(2) %}
+    {% set cached_pct = (100.0 * speed.ctx_cached / speed.ctx_total) | round(2) %}
+    <div class="mt-3">
+      <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-800"
+           title="{{ '{:,}'.format(speed.ctx_used) }} of {{ '{:,}'.format(speed.ctx_total) }} tokens in use{% if speed.ctx_cached %}, {{ '{:,}'.format(speed.ctx_cached) }} reused from cache rather than re-read{% endif %}">
+        <div class="flex h-full transition-all duration-700 ease-out">
+          <div class="h-full bg-slate-500" style="width: {{ cached_pct }}%"></div>
+          <div class="h-full bg-sky-500" style="width: {{ (used_pct - cached_pct) if used_pct > cached_pct else 0 }}%"></div>
+        </div>
+      </div>
+      <div class="mt-1.5 flex justify-between text-[10px] tabular-nums text-slate-500">
+        <span>{{ (speed.ctx_used / 1024) | round(1) }}k of {{ (speed.ctx_total / 1024) | round(0) | int }}k window</span>
+        {% if speed.ctx_cached %}
+        <span class="text-slate-400">{{ (100.0 * speed.ctx_cached / speed.ctx_used) | round(0) | int }}% from cache
+          <span class="text-slate-600">· only the rest was re-read</span></span>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
