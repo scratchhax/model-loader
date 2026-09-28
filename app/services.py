@@ -949,7 +949,10 @@ async def inference_speed(container_name: str, internal_port: int | None,
             prefill_pct = min(100, int(round(100.0 * (cached_tok + processed) / ctx_used)))
         state = "generating" if (r["cur_gen_tps"] or prefill_pct >= 100) else "prefill"
         gen_tps, gen_tokens = r["cur_gen_tps"], r["cur_gen_tokens"]
-        if state == "generating" and not gen_tps and prev and prev[2] == task_id and prev[3]:
+        # Prefer the live delta over llama's logged figure. Both are real measurements, but the
+        # log's is a 3s rolling average written every ~3s, so at a 500ms poll it shows the same
+        # digits six times in a row and the panel looks frozen mid-generation.
+        if state == "generating" and prev and prev[2] == task_id and prev[3]:
             # The slot's token count climbs by one per generated token, so its movement between
             # two polls is a live rate - available at once, where the log's is up to 3 s behind.
             # Only valid when the PREVIOUS sample was already generating: across the prefill
