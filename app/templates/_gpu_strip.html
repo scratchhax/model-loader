@@ -26,7 +26,8 @@
       </div>
       <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-400">
         <div><span class="text-slate-500">util</span> {{ '%.0f' % c.util_pct }}%</div>
-        <div class="mt-0.5"><span class="text-slate-500">{{ '%.0f' % c.temp_c }}°C</span> · {{ '%.0f' % c.power_w }} W</div>
+        <div class="mt-0.5"><span class="text-slate-500">{{ '%.0f' % c.temp_c }}°C</span> ·
+          {{ '%.0f' % c.power_w }}{% if c.power_cap_w %}<span class="text-slate-500"> / {{ '%.0f' % c.power_cap_w }}</span>{% endif %} W</div>
         {% if c.fan_rpm or c.fan_pct %}
         {# Both figures, because neither is enough alone: percent says how hard the card is
            being asked to work, RPM says whether the fan is actually doing it. A card sitting

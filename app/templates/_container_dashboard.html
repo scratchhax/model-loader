@@ -36,7 +36,8 @@
     {{ icon('hard-drive', 11) }} {{ '%.1f' % st.gpu.vram_used_gb }}/{{ '%.1f' % st.gpu.vram_total_gb }} GB
   </span>
   <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="temperature">{{ icon('thermometer', 11) }} {{ '%.0f' % st.gpu.temp_c }}°C</span>
-  <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="power">{{ '%.0f' % st.gpu.power_w }} W</span>
+  <span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5"
+            title="power draw{% if st.gpu.power_cap_w %}, against the enforced cap{% endif %}">{{ '%.0f' % st.gpu.power_w }}{% if st.gpu.power_cap_w %}<span class="text-slate-500 dark:text-slate-400"> / {{ '%.0f' % st.gpu.power_cap_w }}</span>{% endif %} W</span>
   {% endif %}
   {% if st.container %}
   <span class="ml-2 inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5" title="container CPU">{{ icon('cpu', 11) }} {{ '%.0f' % st.container.cpu_pct }}%</span>
