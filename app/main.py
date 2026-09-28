@@ -648,6 +648,7 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
         "avatar_url": avatar_url,
         "loaded_on": loaded_on,
         "in_ini": in_ini,
+        "badges": db.badges_for(model_id),
     })
 
 

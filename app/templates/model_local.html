@@ -57,6 +57,18 @@
   {% endif %}
 </div>
 
+{# What you reckon this model is good at. Deliberately ABOVE the GGUF parse guard below: an
+   opinion formed from actually using the thing does not stop being valid because its metadata
+   failed to read, and a model whose header is unparseable is exactly the one you want a note
+   on. The form is not collapsed here the way it is in the models list - this page is about one
+   model, so there is nothing to keep out of the way. #}
+<div class="mt-4 flex flex-wrap items-center gap-2">
+  <span class="text-[10px] uppercase tracking-wide text-slate-400 shrink-0">good at</span>
+  {% with alias = model_id, run_id = 0 %}
+    {% include "_badges.html" %}
+  {% endwith %}
+</div>
+
 {% if summary._error %}
 <p class="mt-6 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-4 py-3 text-sm">Failed to parse GGUF: {{ summary._error }}</p>
 {% else %}
