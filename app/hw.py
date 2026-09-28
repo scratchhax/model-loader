@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from dataclasses import dataclass, field, replace
 
 import docker
@@ -528,6 +529,72 @@ def start_sampler() -> None:
     _sampler_started = True
     t = threading.Thread(target=_sample_loop, daemon=True, name="hw-sampler")
     t.start()
+
+
+# ---------------------------------------------------------------- host sensors + power roll-up
+
+_HOST_SENSORS_PATH = Path("/data/host_sensors.json")
+_HOST_SENSORS_MAX_AGE_S = 15.0     # a stale file is worse than no file
+
+
+def host_sensors() -> dict:
+    """CPU package power and host temperatures, published by host-sensors.service.
+
+    Empty when the file is missing or stale: RAPL is root-only and invisible inside a container,
+    so if that unit is not running this genuinely cannot be known, and guessing would undermine
+    the one number the page exists to provide.
+    """
+    try:
+        raw = json.loads(_HOST_SENSORS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    ts = float(raw.get("ts") or 0)
+    if ts and (time.time() - ts) > _HOST_SENSORS_MAX_AGE_S:
+        return {"stale": True, "age_s": round(time.time() - ts, 1)}
+    return raw
+
+
+def power_rollup(baseline_w: float, psu_efficiency: float) -> dict:
+    """What the machine is drawing, split into measured parts and a stated allowance.
+
+    GPU figures come from the same sampler the dashboard already uses, so the cards' numbers
+    here and on the GPU strip cannot disagree.
+    """
+    from . import services
+    gpu_w = 0.0
+    gpu_cards: list[dict] = []
+    gpu_temp_max = 0.0
+    for name in services._effective_container_names():
+        st = stats_for(name)
+        if not (st.ok and st.gpu and st.gpu.cards):
+            continue
+        for c in st.gpu.cards:
+            gpu_w += c.power_w
+            gpu_temp_max = max(gpu_temp_max, c.temp_c)
+            gpu_cards.append({"index": c.index, "watts": round(c.power_w, 1),
+                              "temp_c": round(c.temp_c, 1)})
+        break
+
+    host = host_sensors()
+    cpu_w = host.get("cpu_package_w")
+    measured_w = gpu_w + (cpu_w or 0.0)
+    dc_w = measured_w + max(0.0, baseline_w)
+    eff = psu_efficiency if 0.5 <= psu_efficiency <= 1.0 else 0.9
+    wall_w = dc_w / eff
+    return {
+        "gpu_w": round(gpu_w, 1),
+        "gpu_cards": gpu_cards,
+        "gpu_temp_max_c": round(gpu_temp_max, 1) if gpu_temp_max else None,
+        "cpu_w": round(cpu_w, 1) if cpu_w is not None else None,
+        "cpu_temp_c": host.get("cpu_temp_c"),
+        "nvme_temp_max_c": host.get("nvme_temp_max_c"),
+        "baseline_w": round(max(0.0, baseline_w), 1),
+        "measured_w": round(measured_w, 1),
+        "wall_w": round(wall_w, 1),
+        "psu_efficiency": eff,
+        "host_ok": bool(host) and not host.get("stale"),
+        "host_stale": bool(host.get("stale")),
+    }
 
 
 def host_ram_gb() -> float:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 import time
 from pathlib import Path
 
@@ -299,6 +300,7 @@ async def dashboard_v2(request: Request) -> HTMLResponse:
            "active_downloads": active, "host_line": _host_line()}
     ctx.update(await _hero_context())
     ctx.update(_gpu_strip_context())
+    ctx.update(_power_context())
     return templates.TemplateResponse("dashboard_v2.html", ctx)
 
 
@@ -314,6 +316,78 @@ async def gpu_strip_partial(request: Request) -> HTMLResponse:
     ctx = {"request": request}
     ctx.update(_gpu_strip_context())
     return templates.TemplateResponse("_gpu_strip.html", ctx)
+
+
+# ---------- Power and thermals ----------
+
+# Defaults, overridable per box from the panel (stored in the kv table). The power ones are
+# deliberately generic: only the owner knows what UPS is under the desk, and a number invented
+# from the hardware would look authoritative while meaning nothing.
+_POWER_DEFAULTS = {
+    "power_warn_w": 700.0,
+    "power_crit_w": 900.0,
+    "power_baseline_w": 55.0,    # board, RAM, fans, drives, NIC - nothing here meters them
+    "temp_warn_c": 85.0,
+    "temp_crit_c": 95.0,
+}
+
+
+def _power_settings() -> dict:
+    """Thresholds, with env as the first override and the kv table as the second."""
+    out = dict(_POWER_DEFAULTS)
+    for key in out:
+        env = os.environ.get(key.upper())
+        raw = db.get_setting(key, env or "")
+        if raw:
+            try:
+                out[key] = float(raw)
+            except ValueError:
+                pass
+    try:
+        out["psu_efficiency"] = float(os.environ.get("POWER_PSU_EFFICIENCY", "0.90"))
+    except ValueError:
+        out["psu_efficiency"] = 0.90
+    return out
+
+
+def _power_context() -> dict:
+    cfg = _power_settings()
+    return {
+        "p": hw.power_rollup(cfg["power_baseline_w"], cfg["psu_efficiency"]),
+        "power_warn_w": cfg["power_warn_w"], "power_crit_w": cfg["power_crit_w"],
+        "temp_warn_c": cfg["temp_warn_c"], "temp_crit_c": cfg["temp_crit_c"],
+    }
+
+
+@app.get("/power", response_class=HTMLResponse)
+def power_partial(request: Request) -> HTMLResponse:
+    ctx = {"request": request}
+    ctx.update(_power_context())
+    return templates.TemplateResponse("_power.html", ctx)
+
+
+@app.post("/power/settings", response_class=HTMLResponse)
+async def power_settings_save(request: Request) -> HTMLResponse:
+    """Save thresholds and hand back the panel, so the new limits are visible immediately."""
+    form = await request.form()
+    mapping = {"power_warn_w": "power_warn_w", "power_crit_w": "power_crit_w",
+               "baseline_w": "power_baseline_w", "temp_warn_c": "temp_warn_c",
+               "temp_crit_c": "temp_crit_c"}
+    for field, key in mapping.items():
+        raw = str(form.get(field) or "").strip()
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        # A limit of zero would divide by zero in the bar and make every reading "over limit".
+        if key.endswith("_w") and value <= 0:
+            continue
+        db.set_setting(key, str(value))
+    ctx = {"request": request}
+    ctx.update(_power_context())
+    return templates.TemplateResponse("_power.html", ctx)
 
 
 # ---------- Models directory ----------

@@ -1,0 +1,120 @@
+{% from "_icons.html" import icon %}
+{#
+  Power and thermals. Polled on the GPU strip's 1s cadence - the sensors behind it update at
+  1-2s, so anything faster would redraw the same numbers.
+
+  The headline is an estimate AT THE WALL, and the breakdown says which parts are measured and
+  which are the user's own allowance. Nothing on this box meters the board, RAM, fans or drives,
+  and a UPS figure invented from nothing is worse than an honest sum with a stated assumption.
+#}
+{% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
+{% set crit = p.wall_w >= power_crit_w %}
+{% set headroom = (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 %}
+
+<div class="rounded-xl border px-4 py-3 transition-colors duration-500
+            {% if crit %}border-red-500/50 bg-red-950/30
+            {% elif warn %}border-amber-500/40 bg-amber-950/20
+            {% else %}border-slate-800 bg-slate-950/95{% endif %}">
+
+  <div class="flex items-start justify-between gap-3">
+    <div>
+      <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em] text-slate-400">
+        {{ icon('zap', 11) }} power at the wall
+        {% if crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-red-300">over limit</span>
+        {% elif warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-300">high</span>{% endif %}
+      </div>
+      <div class="mt-1 flex items-baseline gap-1.5">
+        <span class="font-mono text-3xl font-semibold tabular-nums leading-none
+                     {% if crit %}text-red-300{% elif warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % p.wall_w }}</span>
+        <span class="text-xs text-slate-500">W est.</span>
+      </div>
+    </div>
+    <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500">
+      <div>limit <span class="text-slate-300">{{ power_crit_w | int }} W</span></div>
+      <div class="mt-0.5">{{ '%.0f' % headroom }}% of it</div>
+    </div>
+  </div>
+
+  {# Bar against the configured limit, so "how close am I" is answerable at a glance. #}
+  <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+    <div class="h-full transition-all duration-700 ease-out
+                {% if crit %}bg-red-500{% elif warn %}bg-amber-400{% else %}bg-gradient-to-r from-emerald-500 to-sky-500{% endif %}"
+         style="width: {{ [headroom, 100] | min }}%"></div>
+  </div>
+
+  {# ---- what makes up that number ---- #}
+  <div class="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+    <div class="rounded-lg bg-slate-900/70 px-2.5 py-2">
+      <div class="font-mono text-base font-semibold tabular-nums text-slate-200">{{ '%.0f' % p.gpu_w }}<span class="text-[10px] font-normal text-slate-500"> W</span></div>
+      <div class="mt-0.5 text-[10px] text-slate-500">GPUs · measured</div>
+      {% if p.gpu_cards %}
+      <div class="mt-0.5 font-mono text-[10px] tabular-nums text-slate-600">
+        {% for c in p.gpu_cards %}{{ '%.0f' % c.watts }}W{% if not loop.last %} + {% endif %}{% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    <div class="rounded-lg bg-slate-900/70 px-2.5 py-2">
+      <div class="font-mono text-base font-semibold tabular-nums text-slate-200">
+        {% if p.cpu_w is not none %}{{ '%.0f' % p.cpu_w }}<span class="text-[10px] font-normal text-slate-500"> W</span>
+        {% else %}<span class="text-slate-500">—</span>{% endif %}
+      </div>
+      <div class="mt-0.5 text-[10px] text-slate-500">CPU · {% if p.cpu_w is not none %}measured{% else %}unavailable{% endif %}</div>
+      {% if p.cpu_w is none %}
+      <div class="mt-0.5 text-[10px] text-amber-400/80" title="RAPL is root-only and invisible inside a container; host-sensors.service publishes it">host-sensors down</div>
+      {% endif %}
+    </div>
+    <div class="rounded-lg bg-slate-900/70 px-2.5 py-2">
+      <div class="font-mono text-base font-semibold tabular-nums text-slate-400">{{ '%.0f' % p.baseline_w }}<span class="text-[10px] font-normal text-slate-500"> W</span></div>
+      <div class="mt-0.5 text-[10px] text-slate-500">board, drives, fans</div>
+      <div class="mt-0.5 text-[10px] text-slate-600" title="Nothing on this box meters these, so this is your figure, not a measurement">your allowance</div>
+    </div>
+  </div>
+  <div class="mt-1.5 text-[10px] text-slate-600">
+    {{ '%.0f' % p.measured_w }} W measured + {{ '%.0f' % p.baseline_w }} W allowance, divided by {{ '%.0f' % (p.psu_efficiency * 100) }}% PSU efficiency
+  </div>
+
+  {# ---- thermals ---- #}
+  {% macro temp(label, value) %}
+  {% set tcrit = value is not none and value >= temp_crit_c %}
+  {% set twarn = value is not none and value >= temp_warn_c and not tcrit %}
+  <div class="rounded-lg px-2.5 py-2 {% if tcrit %}bg-red-500/10{% elif twarn %}bg-amber-500/10{% else %}bg-slate-900/70{% endif %}">
+    <div class="font-mono text-base font-semibold tabular-nums
+                {% if tcrit %}text-red-300{% elif twarn %}text-amber-300{% else %}text-slate-200{% endif %}">
+      {% if value is not none %}{{ '%.0f' % value }}<span class="text-[10px] font-normal text-slate-500">°C</span>{% else %}<span class="text-slate-500">—</span>{% endif %}
+    </div>
+    <div class="mt-0.5 text-[10px] text-slate-500">{{ label }}</div>
+  </div>
+  {% endmacro %}
+
+  <div class="mt-3 grid grid-cols-3 gap-2">
+    {{ temp('hottest GPU', p.gpu_temp_max_c) }}
+    {{ temp('CPU package', p.cpu_temp_c) }}
+    {{ temp('hottest NVMe', p.nvme_temp_max_c) }}
+  </div>
+
+  {# ---- thresholds, editable here rather than in a config file ---- #}
+  <details class="mt-3 group">
+    <summary class="cursor-pointer list-none text-[10px] uppercase tracking-wide text-slate-500 hover:text-slate-300">
+      {{ icon('sliders-horizontal', 10) }} alert thresholds
+    </summary>
+    <form hx-post="/power/settings" hx-target="closest div.rounded-xl" hx-swap="outerHTML"
+          class="mt-2 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-5">
+      {% macro field(name, label, value, hint) %}
+      <label class="block">
+        <span class="block text-[10px] text-slate-500" title="{{ hint }}">{{ label }}</span>
+        <input type="number" step="any" name="{{ name }}" value="{{ value }}"
+               class="mt-0.5 w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-200">
+      </label>
+      {% endmacro %}
+      {{ field('power_warn_w', 'warn W', power_warn_w | int, 'Amber above this estimated wall draw') }}
+      {{ field('power_crit_w', 'limit W', power_crit_w | int, 'Your UPS capacity, or whatever you consider the ceiling. The bar is drawn against this.') }}
+      {{ field('baseline_w', 'base W', p.baseline_w | int, 'Everything nothing meters: board, RAM, fans, drives, NIC') }}
+      {{ field('temp_warn_c', 'warn °C', temp_warn_c | int, 'Amber at or above this temperature') }}
+      {{ field('temp_crit_c', 'crit °C', temp_crit_c | int, 'Red at or above this temperature') }}
+      <div class="col-span-2 sm:col-span-5 flex items-center gap-2 pt-0.5">
+        <button class="rounded bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-900 hover:bg-white">Save</button>
+        <span class="text-[10px] text-slate-600">PSU efficiency {{ '%.0f' % (p.psu_efficiency * 100) }}% · set POWER_PSU_EFFICIENCY to change</span>
+      </div>
+    </form>
+  </details>
+</div>

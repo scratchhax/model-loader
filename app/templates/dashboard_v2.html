@@ -44,6 +44,12 @@
   {% include "_gpu_strip.html" %}
 </div>
 
+{# Power and thermals share the 1s cadence: RAPL is published every 2s and rocm-smi sampled
+   every 1s, so this is as fresh as the sensors underneath it get. #}
+<div class="mt-3" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_power.html" %}
+</div>
+
 {# ---------------- calm layer: inventory and recent activity ---------------- #}
 <div class="mt-6 grid gap-4 lg:grid-cols-3">
 
