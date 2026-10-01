@@ -871,7 +871,14 @@ def _record_tps(container_name: str, value: float) -> None:
 
 
 async def _slot_state(container_name: str, internal_port: int, model_id: str) -> dict:
-    """The loaded model's slot 0, or {} if it cannot be read."""
+    """The loaded model's working slot, falling back to slot 0, or {} if it cannot be read.
+
+    Slot 0 is not the only slot that works. A section with `parallel = 3` spreads requests over
+    all three, and reading slots[0] unconditionally reported an idle slot for every request that
+    landed anywhere else - measured at 38% of tasks (5,304 of 13,922) on Qwen3.8-27B-UD-Q4_K_M,
+    each one a gap in the speedometer and a zero in the history. The busy slot is the one worth
+    reporting; when none is busy, slot 0 is as good as any for the idle readout.
+    """
     url = f"http://{container_name}:{internal_port}/slots"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, read=2.0)) as client:
@@ -879,7 +886,12 @@ async def _slot_state(container_name: str, internal_port: int, model_id: str) ->
         if r.status_code != 200:
             return {}
         slots = r.json()
-        return slots[0] if isinstance(slots, list) and slots else {}
+        if not (isinstance(slots, list) and slots):
+            return {}
+        for s in slots:
+            if isinstance(s, dict) and s.get("is_processing"):
+                return s
+        return slots[0] if isinstance(slots[0], dict) else {}
     except (httpx.HTTPError, ValueError, KeyError, IndexError):
         return {}
 
@@ -897,13 +909,18 @@ def _rates_from_log(name: str, task_id: int | None) -> dict:
     """
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": ""}
-    # 300 lines, not 120: while a slot generates it logs a timing line every ~3 s, so a long
-    # reply buries the prompt-processing lines from the start of that same request - and the
-    # prefill rate would read as zero exactly when it is most interesting.
-    ok, text = container_logs(name, tail=300, current_run_only=True)
+    # A wide tail, then the router's own chatter removed. It has to be both. While a slot
+    # generates it logs a timing line only every ~3 s, so a long reply buries the
+    # prompt-processing lines from the start of that same request; and in router mode llama.cpp
+    # logs EVERY proxied request, including this app's own 500 ms /slots poll, at about two lines
+    # a second, forever. At tail=300 that spam was 92% of the window (276 of 300 lines, measured
+    # on llama-9700x2), leaving two generation timing lines and no prompt-processing lines at
+    # all, so every rate here came back zero while the model was plainly working. The proxy lines
+    # carry nothing this function wants, so they go before the scan rather than inside it.
+    ok, text = container_logs(name, tail=1200, current_run_only=True)
     if not ok:
         return out
-    for line in reversed(text.splitlines()):
+    for line in reversed([ln for ln in text.splitlines() if "proxy_reques" not in ln]):
         m_task = _RE_TASK.search(line)
         if not m_task:
             continue
@@ -956,30 +973,43 @@ async def inference_speed(container_name: str, internal_port: int | None,
     ctx_used = int(slot.get("n_prompt_tokens") or 0)
     processed = int(slot.get("n_prompt_tokens_processed") or 0)
     cached_tok = int(slot.get("n_prompt_tokens_cache") or 0)
+    # Tokens decoded so far for the task in this slot, and the only honest "has generation
+    # started" signal. n_prompt_tokens USED to be the prompt length; in current builds it counts
+    # the prompt plus everything decoded since, so a progress fraction built from it FALLS as the
+    # reply grows (measured 49% -> 5% across one generation) and never reaches the 100% that used
+    # to mark the switch out of prefill. That pinned the state at "prefill" for whole replies,
+    # which recorded a zero every sample and left the sparkline flat on the floor. It is also
+    # inflated by speculative drafts, by 3 tokens where this was measured; n_decoded is not.
+    _nt = slot.get("next_token")
+    _nt0 = _nt[0] if isinstance(_nt, list) and _nt and isinstance(_nt[0], dict) else {}
+    decoded = int(_nt0.get("n_decoded") or 0)
 
     now = time.time()
     prev = _speed_prev.get(container_name)
 
     if busy:
-        # A fresh task always reads its prompt first, so before any timing line for it appears,
+        # A fresh task always reads its prompt first, so until a token has actually been decoded
         # prefill is the truthful state - and its rates stay empty rather than borrowing the
-        # previous request's. Once the prompt is in, the slot is generating even if no timing
-        # line has been written yet.
+        # previous request's. One decoded token is the switch, and it needs no timing line, so
+        # the panel no longer leans on the log for the thing the log supplies worst.
         prefill_tps, prefill_pct = r["cur_pp_tps"], r["cur_pp_pct"]
-        if not prefill_pct and ctx_used:
+        state = "generating" if (decoded or r["cur_gen_tps"]) else "prefill"
+        if not prefill_pct and ctx_used and state == "prefill":
+            # Only meaningful before generation starts, while n_prompt_tokens is still just the
+            # prompt. Once decoding begins the denominator grows and the fraction lies.
             prefill_pct = min(100, int(round(100.0 * (cached_tok + processed) / ctx_used)))
-        state = "generating" if (r["cur_gen_tps"] or prefill_pct >= 100) else "prefill"
-        gen_tps, gen_tokens = r["cur_gen_tps"], r["cur_gen_tokens"]
+        gen_tps = r["cur_gen_tps"]
+        gen_tokens = decoded or r["cur_gen_tokens"]
         # Prefer the live delta over llama's logged figure. Both are real measurements, but the
         # log's is a 3s rolling average written every ~3s, so at a 500ms poll it shows the same
         # digits six times in a row and the panel looks frozen mid-generation.
         if state == "generating" and prev and prev[2] == task_id and prev[3]:
-            # The slot's token count climbs by one per generated token, so its movement between
-            # two polls is a live rate - available at once, where the log's is up to 3 s behind.
-            # Only valid when the PREVIOUS sample was already generating: across the prefill
-            # boundary the count jumps by a whole prompt chunk, which read as thousands of
-            # tokens per second before this guard existed.
-            dt, dn = now - prev[0], ctx_used - prev[1]
+            # n_decoded climbs by one per generated token, so its movement between two polls is
+            # a live rate - available at once, where the log's is up to 3 s behind. Only valid
+            # when the PREVIOUS sample was already generating: on the first generating sample
+            # n_decoded has already jumped from zero to whatever landed inside that window,
+            # which would read as a huge rate.
+            dt, dn = now - prev[0], decoded - prev[1]
             if 0.25 < dt < 10.0 and dn > 0:
                 raw = dn / dt
                 # Smooth against the previous displayed figure: at a 500 ms poll a couple of
@@ -994,7 +1024,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         prefill_tps, prefill_pct = r["last_pp_tps"], 0
 
     if busy:
-        _speed_prev[container_name] = (now, ctx_used, task_id, state == "generating")
+        _speed_prev[container_name] = (now, decoded, task_id, state == "generating")
     else:
         _speed_prev.pop(container_name, None)
         _gen_ema.pop(container_name, None)   # a finished run must not smooth into the next one
