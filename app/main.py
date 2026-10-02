@@ -1520,18 +1520,23 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         })
 
     file_size = gguf_path.stat().st_size
-    # If sharded, sum all shard sizes for accurate model_gb. But exclude companions
-    # (mmproj, draft heads) that happen to sit in the same subdir — those aren't
-    # part of the main model's parameter footprint and are budgeted separately.
-    if rel and "/" in rel and gguf_path is not None:
-        try:
-            file_size = sum(
-                p.stat().st_size for p in gguf_path.parent.iterdir()
-                if p.is_file() and p.suffix.lower() == ".gguf"
-                and not ini._is_companion(p.name)
-            )
-        except OSError:
-            pass
+    # If sharded, sum THIS model's own shards. Matching on the shard base rather than on
+    # "every non-companion GGUF in the folder" matters as soon as a folder holds two quants of
+    # one model: the turbo folder has an 11.3 GiB IQ2_M beside a 27.7 GiB Q8_0, and the old
+    # rule reported 28.3 GB of weights whichever of them was selected - for the IQ2_M that is
+    # nearly triple. An unsharded file is simply its own size, so the sum only runs when this
+    # file actually declares itself part of a set.
+    if gguf_path is not None:
+        _base, _idx, _parts = shard_key(gguf_path.name)
+        if _parts:
+            try:
+                file_size = sum(
+                    q.stat().st_size for q in gguf_path.parent.iterdir()
+                    if q.is_file() and q.suffix.lower() == ".gguf"
+                    and shard_key(q.name)[0] == _base
+                )
+            except OSError:
+                pass
 
     backend_list = _backend_list()
 
@@ -1604,6 +1609,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
     # long. Ordered weights -> context -> overhead -> compute: that order keeps the two hues
     # the palette validator flags as a weak pair for protanopia from touching.
     vram_breakdown = None
+    _is_moe_model = isinstance((summary.get("model") or {}).get("expert_count"), int)         and ((summary.get("model") or {}).get("expert_count") or 0) > 1
     _rec_plan = next((p for p in rec.plans if p.name == rec.recommended_backend), None)
     _rec_row = (plan_row_map.get(rec.recommended_backend) or {}).get(rec.recommended_ctx)
     if _rec_plan and _rec_row and _rec_plan.vram_gb > 0 and _rec_row.fits:
@@ -1631,10 +1637,34 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
             _segments.append({"key": "free", "label": "free", "gb": _free,
                               "pct": 100.0 * _free / _total,
                               "note": "unallocated on the card"})
+        # Where the model's WEIGHTS end up, which the card bar above cannot show: anything
+        # offloaded is not on the card at all, so it has no place in a bar scaled to the card.
+        # Its own bar, its own denominator (the model), stated as such - two scales in one bar
+        # would be the chart equivalent of a second y-axis.
+        #
+        # This is the number that answers "have I left VRAM". For a MoE it is specifically the
+        # experts that move: attention stays resident, so counting layers would understate it,
+        # which is why gpu_pct is measured in bytes.
+        _weights_total_gb = file_size / (1024 ** 3)
+        _weights_gpu_gb = float(_rec_row.model_gb)
+        _weights_host_gb = max(0.0, _weights_total_gb - _weights_gpu_gb)
+        weights_split = None
+        if _weights_total_gb > 0 and _weights_host_gb > 0.05:
+            weights_split = {
+                "total_gb": _weights_total_gb,
+                "gpu_gb": _weights_gpu_gb,
+                "host_gb": _weights_host_gb,
+                "gpu_pct": 100.0 * _weights_gpu_gb / _weights_total_gb,
+                "host_pct": 100.0 * _weights_host_gb / _weights_total_gb,
+                "is_moe": bool(_is_moe_model),
+                "offload_kind": _rec_row.offload_kind,
+                "n_cpu_moe": _rec_row.n_cpu_moe,
+            }
         vram_breakdown = {
             "total_gb": _total, "used_gb": _used, "free_gb": _free,
             "backend": rec.recommended_backend, "ctx": rec.recommended_ctx,
             "total_ctx": _rec_row.total_ctx, "segments": _segments,
+            "weights_split": weights_split,
         }
     all_ctx = sorted({r.ctx for p in rec.plans for r in p.rows})
     # pick a compact set: some small, some near the max/native

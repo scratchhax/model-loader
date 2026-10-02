@@ -473,6 +473,56 @@
       {% endfor %}
     </div>
 
+    {# ---- the model's own weights: on the card vs in host RAM ----
+       A SECOND bar with a SECOND denominator, drawn separately and labelled as such. Offloaded
+       weights are not on the card, so they cannot appear in the card bar above without making
+       it lie; putting two scales in one bar is the chart equivalent of a second y-axis.
+       Only drawn when something is actually offloaded - with everything resident it would be a
+       full bar saying nothing.
+
+       This is the readout that answers "have I left VRAM", which llama.cpp will not tell you:
+       at its default verbosity it prints no per-device buffer sizes, only a one-line warning
+       that CPU tensor overrides exist, with no amount attached. For a MoE it is the experts
+       that move while attention stays resident, which is why the share is measured in bytes -
+       counting layers would badly understate it. #}
+    {% if vb.weights_split %}
+    {% set ws = vb.weights_split %}
+    <div class="mt-3 rounded-lg border border-amber-300/60 dark:border-amber-900/50 bg-amber-50/50 dark:bg-amber-950/20 px-2.5 py-2">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-3 text-[11px]">
+        <span class="font-medium text-slate-700 dark:text-slate-200">
+          {% if ws.is_moe %}Experts spill to host RAM{% else %}Model spills to host RAM{% endif %}
+        </span>
+        <span class="tabular-nums text-slate-600 dark:text-slate-300">
+          {{ '%.1f' % ws.gpu_gb }} GB on GPU &middot; {{ '%.1f' % ws.host_gb }} GB in host RAM
+          <span class="text-slate-500 dark:text-slate-400">of {{ '%.1f' % ws.total_gb }} GB</span>
+        </span>
+      </div>
+      <div class="mt-1.5 flex h-2 w-full gap-[2px] rounded-r-[4px] bg-slate-200 dark:bg-slate-800">
+        <div class="h-full bg-sky-600" style="width: {{ '%.3f' % ws.gpu_pct }}%"
+             title="{{ '%.2f' % ws.gpu_gb }} GB of weights resident on the GPU ({{ '%.0f' % ws.gpu_pct }}%)"></div>
+        <div class="h-full rounded-r-[4px] bg-rose-600" style="width: {{ '%.3f' % ws.host_pct }}%"
+             title="{{ '%.2f' % ws.host_gb }} GB of weights in host RAM ({{ '%.0f' % ws.host_pct }}%) — every token that needs these reads them over the memory bus"></div>
+      </div>
+      <p class="mt-1.5 text-[10px] leading-snug text-slate-600 dark:text-slate-400">
+        {# On the --fit path the SPLIT is a prediction and the placement is llama.cpp's, so
+           naming an n-cpu-moe here would present our arithmetic as a setting. The table below
+           suppresses the same figure for the same reason. #}
+        {%- if 'fit' in rec.values %}
+        Roughly {{ '%.0f' % ws.host_pct }}% of the weights will sit in host RAM. The split is
+        autoconfig's estimate, not a setting: <span class="font-mono">--fit</span> places the
+        tensors and may land somewhere near this.
+        {%- else %}
+        {{ '%.0f' % ws.host_pct }}% of the weights sit in host RAM
+        {%- if ws.offload_kind == 'cpu-moe' %} (all experts, <span class="font-mono">cpu-moe</span>)
+        {%- elif ws.offload_kind == 'n-cpu-moe' %} (<span class="font-mono">n-cpu-moe = {{ ws.n_cpu_moe }}</span>)
+        {%- elif ws.offload_kind == 'ngl' %} ({{ ws.n_cpu_moe }} whole layers){% endif %}.
+        {%- endif %}
+        Those reads run at system-memory speed rather than VRAM speed, which is the dominant
+        cost once a model stops fitting, and llama.cpp does not report it.
+      </p>
+    </div>
+    {% endif %}
+
     <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-3">
       {% for s in vb.segments %}
       <div class="flex items-baseline gap-1.5" title="{{ s.note }}">
