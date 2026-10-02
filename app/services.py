@@ -40,6 +40,10 @@ class ModelShape:
     arch: str = ""
     expert_count: int = 0
     expert_used: int = 0
+    # True when the weights carry their own MTP layers and llama.cpp can draft against the
+    # target file with no separate head. Read from {arch}.nextn_predict_layers, the same key
+    # autoconfig treats as load-or-fatal for MTP.
+    internal_mtp: bool = False
 
     @property
     def known(self) -> bool:
@@ -86,7 +90,8 @@ def model_shape(path: Path) -> ModelShape:
             return 0
 
     return ModelShape(arch=arch, expert_count=_int("expert_count"),
-                      expert_used=_int("expert_used_count"))
+                      expert_used=_int("expert_used_count"),
+                      internal_mtp=_int("nextn_predict_layers") > 0)
 
 @dataclass
 class GgufEntry:

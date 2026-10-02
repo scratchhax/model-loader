@@ -1193,6 +1193,46 @@ def downloads_clear(request: Request) -> HTMLResponse:
 
 # ---------- models.ini ----------
 
+def _section_caps(sections: list) -> dict[str, dict]:
+    """{section name: capability facts} for the chips on the section cards.
+
+    Everything is derived locally — shape from the GGUF header, modalities from the section's
+    own projector, speculation from the saved profile plus the heads that exist — so the ini
+    page says what the CONFIGured model can do even when OpenWebUI (whose records drive the
+    models list) has never seen it. Header reads are the cached kind; this is cheap per render.
+    """
+    caps: dict[str, dict] = {}
+    for s in sections:
+        if not s.matched_file:
+            continue
+        vals = dict(s.items)
+        shape = services.model_shape(settings.models_dir / s.matched_file)
+        mmproj = (vals.get("mmproj") or "").strip()
+        mods = services.projector_modalities(mmproj) if mmproj else frozenset()
+        subdir = s.matched_file.split("/", 1)[0] if "/" in s.matched_file else ""
+        # A draft head counts when it is named by the section, sits beside these weights, or
+        # is baked into them (MTP layers) - the same three ways autoconfig resolves one.
+        head_rel = (vals.get("spec-draft-model") or "").strip()
+        head_ext = bool(head_rel) or bool(autoconfig._find_mtp(settings.models_dir, s.name, subdir))
+        head_avail = head_ext or shape.internal_mtp
+        prof_key = autoconfig.match_spec_profile(vals)
+        prof = autoconfig.SPEC_PROFILE_BY_KEY.get(prof_key)
+        if prof_key == "custom":
+            drafts = bool((vals.get("spec-type") or "").strip())
+        else:
+            drafts = bool(prof and prof.spec_type and prof.needs_head)
+        spec_on = head_avail and drafts
+        mtp_mode = shape.internal_mtp or bool(prof and "mtp" in (prof.spec_type or ""))
+        caps[s.name] = {
+            "shape": shape if shape.known else None,
+            "mods": mods,
+            "proj_unknown": bool(mmproj) and not mods,
+            "spec": ("mtp" if mtp_mode else "head") if spec_on else "",
+            "head_idle": head_avail and not spec_on,
+        }
+    return caps
+
+
 def _config_context(request: Request, flash: dict | None = None) -> dict:
     sections = ini.list_sections()
     # Client snippets need the address the browser used to reach us (not the docker-internal
@@ -1208,6 +1248,7 @@ def _config_context(request: Request, flash: dict | None = None) -> dict:
     return {
         "request": request,
         "sections": sections,
+        "caps": _section_caps(sections),
         "unregistered": ini.unregistered_gguf_stems(),
         "raw": ini.raw_text(),
         "backups": ini.list_backups(),

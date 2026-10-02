@@ -1,0 +1,50 @@
+{% from "_icons.html" import icon %}
+{#
+  Capability chips, shared by the models list and the models.ini section cards so a model
+  reads the same on both pages. Identity never rests on colour alone: every chip carries a
+  tooltip naming the capability and where it comes from.
+
+  Usage: {{ caps_chips(shape, mods) }} plus any of:
+    spec          - '' | 'head' | 'mtp' : speculation is CONFIGURED and its head loads
+    head_idle     - a draft/MTP head exists but the profile is off; shown dimmed, because
+                    the option is real but inactive
+    proj_unknown  - a projector exists whose modality could not be read from metadata
+    proj_name     - filename for the proj_unknown tooltip
+ #}
+{% macro caps_chips(shape=None, mods=(), spec='', head_idle=False, proj_unknown=False, proj_name='') %}
+{% if shape and shape.is_moe %}
+<span class="rounded bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300 px-1.5 py-0.5 font-mono"
+      title="Mixture of Experts ({{ shape.arch }}): {{ shape.expert_count }} experts, {{ shape.expert_used }} routed per token. Only the routed experts are read each token, so spilling experts to system RAM with --cpu-moe / --n-cpu-moe costs far less than offloading layers of a dense model.">{{ shape.label }}</span>
+{% elif shape %}
+<span class="rounded bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 px-1.5 py-0.5 font-mono"
+      title="Dense ({{ shape.arch }}): every weight is read for every token, so any layer offloaded to system RAM is paid on every token. --cpu-moe and --n-cpu-moe do nothing on this model.">dense</span>
+{% endif %}
+{% if 'vision' in mods %}
+<span class="inline-flex items-center rounded px-1.5 py-0.5 bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+      title="Images — the projector declares clip.vision.*, and OpenWebUI is told so, which is what makes its image-upload control appear for this model.">{{ icon('image', 12) }}</span>
+{% endif %}
+{% if 'audio' in mods %}
+<span class="inline-flex items-center rounded px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+      title="Audio — the projector declares clip.audio.*. OpenWebUI has no audio capability flag, so this is shown here but not synced to it.">{{ icon('mic', 12) }}</span>
+{% endif %}
+{% if proj_unknown %}
+<span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+      title="Has a projector{{ ' (' ~ proj_name ~ ')' if proj_name else '' }} whose modality could not be read from its metadata.">{{ icon('layers-3', 12) }}</span>
+{% endif %}
+{% if spec == 'mtp' %}
+<span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300 font-mono text-[10px]"
+      title="Speculative decoding via MTP: the model carries its own multi-token-prediction layers and drafts with them, needing no separate head. A throughput trade rather than a free win — with a poor acceptance rate it is slower than not using it.">
+  {{ icon('zap', 12) }}MTP
+</span>
+{% elif spec == 'head' %}
+<span class="inline-flex items-center rounded px-1.5 py-0.5 bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+      title="Speculative decoding is configured: a draft head predicts ahead and the main model verifies. A throughput trade rather than a free win — with a poor acceptance rate it is slower than not using it. Benchmark before relying on it.">
+  {{ icon('zap', 12) }}
+</span>
+{% elif head_idle %}
+<span class="inline-flex items-center rounded px-1.5 py-0.5 text-slate-400 dark:text-slate-500 opacity-60"
+      title="A draft head is available for this model, but speculation is off.">
+  {{ icon('zap', 12) }}
+</span>
+{% endif %}
+{% endmacro %}

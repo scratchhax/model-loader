@@ -1,14 +1,24 @@
-{# expects: s (SectionView) #}
+{# expects: s (SectionView), caps (optional {name: {...}} from _section_caps) #}
+{% from "_caps_chips.html" import caps_chips %}
+{% set _cap = (caps or {}).get(s.name) %}
 <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4"
      x-data="{ show: false, client: false }">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <span class="font-mono text-sm font-medium truncate">[{{ s.name }}]</span>
         {% if s.has_file %}
         <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">file present</span>
         {% else %}
         <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" title="expected {{ s.name }}.gguf in models dir">no matching GGUF</span>
+        {% endif %}
+        {% if _cap %}
+        {# The same capability chips as the models page — derived here from the section's
+           own file, mmproj and saved profile, so this page says what the config means even
+           with the model nowhere loaded. #}
+        {% set _mmproj = (dict(s.items).get('mmproj') or '').split('/') | last %}
+        {{ caps_chips(_cap.shape, _cap.mods, spec=_cap.spec, head_idle=_cap.head_idle,
+                      proj_unknown=_cap.proj_unknown, proj_name=_mmproj) }}
         {% endif %}
       </div>
       {% if s.items %}
