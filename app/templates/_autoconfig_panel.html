@@ -283,6 +283,12 @@
           {% if 'fit' in rec.values %}
           <div class="text-right"><span class="text-slate-400">KV</span> {{ '%.1f' % p.kv_gb }} GB</div>
           <div class="col-span-2 mt-0.5 text-slate-400">placement chosen by llama.cpp</div>
+          {% elif rec.ctx_only_presets %}
+          {# Fully resident at every one of these, so the layer count is the same number three
+             times and the speed estimate is 100% three times. Neither separates them. What
+             does is the KV cost, and therefore the VRAM each one leaves alone. #}
+          <div class="text-right"><span class="text-slate-400">KV</span> {{ '%.1f' % p.kv_gb }} GB</div>
+          <div class="col-span-2 mt-0.5 text-slate-400">all {{ p.total_layers }} layers resident</div>
           {% else %}
           <div class="text-right"><span class="text-slate-400">GPU</span> {{ p.gpu_layers }}/{{ p.total_layers }}L</div>
           <div>
@@ -376,9 +382,8 @@
     <p class="mt-2 text-[11px] rounded-md bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 px-2 py-1.5">
       {% if rec.fits_full_gpu %}
         Fits entirely on the GPU at its full context of
-        <span class="font-mono">{{ format_ctx(rec.native_ctx) }}</span> with all {{ only.total_layers }} layers resident.
-        Nothing to trade: offloading layers only buys context, and there is none left to buy —
-        Balanced and Long context would be identical to Fast.
+        <span class="font-mono">{{ format_ctx(rec.native_ctx) }}</span> with all {{ only.total_layers }} layers resident,
+        and the offered contexts are too close together to make distinct choices of.
       {% else %}
         Only {{ rec.presets | length }} distinct tradeoff{{ 's' if rec.presets | length != 1 else '' }}
         exist{{ '' if rec.presets | length != 1 else 's' }} for this model, so Balanced would be identical
@@ -411,6 +416,9 @@
         Dense model — context is bought by moving whole layers off the GPU (<span class="font-mono">ngl</span>);
         those layers stay in RAM and every token traverses them on the CPU, so the speed cost is steep.
         Speed % is an ordering hint only — benchmark before trusting it.
+      {% elif rec.ctx_only_presets %}
+        Every option here is fully resident, so none of them is faster than another — what
+        differs is how much VRAM the KV cache takes, and how much the card has left.
       {% else %}
         Speed % is a rough relative estimate (share of layers with experts on GPU).
       {% endif %}
