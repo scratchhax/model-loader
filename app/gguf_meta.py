@@ -271,6 +271,14 @@ def summarize(raw: dict[str, Any]) -> dict[str, Any]:
             "sliding_window_pattern": a("attention.sliding_window_pattern"),
             "ssm_state_size": _scalar_int(a("ssm.state_size")),
             "ssm_inner_size": _scalar_int(a("ssm.inner_size")),
+            # Multi-token-prediction layers baked into the weights. Present and non-zero means
+            # llama.cpp can run `spec-type = draft-mtp` against this file with no separate draft
+            # head; absent means asking for MTP is a FATAL load error ("context type MTP
+            # requested but model doesn't contain MTP layers"), so this is not cosmetic.
+            # Measured: the three MTP-capable Qwen3.5 quants here all report 1 and carry 65
+            # blocks, while the one that cannot reports nothing and carries 64 - the extra
+            # block IS the MTP layer.
+            "nextn_predict_layers": _scalar_int(a("nextn_predict_layers")),
         },
         "tokenizer": {
             "model": raw.get("tokenizer.ggml.model"),

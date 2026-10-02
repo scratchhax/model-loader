@@ -1501,15 +1501,22 @@ def analyze(*,
     # brand-new section gets a conservative default.
     _saved_spec = match_spec_profile(current_section)
     _spec_key = (spec_profile or "").strip()
+    # A model can carry its own MTP layers, in which case llama.cpp drafts against the target
+    # file and needs no separate head at all: the log says "creating MTP draft context against
+    # the target model" and nothing extra is loaded. `nextn_predict_layers` is how that is
+    # declared, and its absence is not cosmetic - asking for MTP without it is a FATAL load
+    # error ("context type MTP requested but model doesn't contain MTP layers"), which is why
+    # this is checked rather than assumed from the file names.
+    _internal_mtp = int(m.get("nextn_predict_layers") or 0) > 0
     if _spec_key not in SPEC_PROFILE_BY_KEY and _spec_key != "custom":
-        # No explicit pick. Fall back to what is saved; a new section gets Balanced when a
-        # head was found beside the weights and Off when there is nothing to draft with.
-        _spec_key = _saved_spec or ("balanced" if mtp_rel else "off")
-    # A profile that needs a head but has none cannot run — llama-server would start and then
-    # fail to load the draft. Fall back rather than offering a configuration that cannot work.
+        # No explicit pick. Fall back to what is saved; a new section gets Balanced when it can
+        # draft at all - a head beside the weights or its own MTP layers - and Off otherwise.
+        _spec_key = _saved_spec or ("balanced" if (mtp_rel or _internal_mtp) else "off")
+    # A profile that needs to draft but has no way to cannot run — llama-server would start and
+    # then fail. Fall back rather than offering a configuration that cannot work.
     _resolved_head = (current_section or {}).get("spec-draft-model", "").strip() or mtp_rel
     _prof = SPEC_PROFILE_BY_KEY.get(_spec_key)
-    if _prof and _prof.needs_head and not _resolved_head:
+    if _prof and _prof.needs_head and not (_resolved_head or _internal_mtp):
         _prof = SPEC_PROFILE_BY_KEY["off"]
         _spec_key = "off"
 
@@ -1806,10 +1813,15 @@ def analyze(*,
             for _k in SPEC_PROFILE_KEYS:
                 values[_k] = _prof.knobs.get(_k, "")
             if _prof.spec_type and _prof.needs_head:
+                # Empty when the model has its own MTP layers: llama.cpp then drafts against the
+                # target file, which is both the cheaper path and the only one available when no
+                # head was shipped. Writing a head path we do not have would be a fatal load.
                 values["spec-draft-model"] = _resolved_head
                 # Without this the head lands on the CPU, and a draft evaluated on the CPU is
-                # slower than the main model it is meant to be racing ahead of.
-                values["spec-draft-ngl"] = (current_section or {}).get("spec-draft-ngl", "").strip() or "999"
+                # slower than the main model it is meant to be racing ahead of. Only meaningful
+                # when there IS a separate head; internal MTP has nothing to place.
+                values["spec-draft-ngl"] = ((current_section or {}).get(
+                    "spec-draft-ngl", "").strip() or "999") if _resolved_head else ""
             else:
                 # n-gram strategies have no model to place, and Off has nothing at all.
                 values["spec-draft-model"] = ""
