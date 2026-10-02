@@ -804,18 +804,79 @@ def vram_fit_chips(size_bytes: int) -> list[dict]:
 
 
 @dataclass
-class InferenceSpeed:
-    """How fast the loaded model is working right now, for the card's speedometer."""
-    model: str = ""
+class SlotSpeed:
+    """One slot's own figures. There is no fixed number of these - see slot_density()."""
+    index: int = 0
     state: str = "idle"        # "generating" | "prefill" | "idle"
-    gen_tps: float = 0.0       # tokens/s out. Rolling 3s figure where llama offers one.
+    gen_tps: float = 0.0       # this slot's own rate, not a share of the total
+    decoded: int = 0           # tokens this slot has produced for its current task
+    ctx_used: int = 0          # tokens held by this slot
+    ctx_total: int = 0         # this slot's share of the KV pool (ctx-size / parallel)
+    ctx_cached: int = 0        # of ctx_used, how many came from cache
+    prefill_pct: int = 0       # progress through this slot's prompt, 0-100
+    task_id: int | None = None
+
+    @property
+    def ctx_pct(self) -> int:
+        """How full this slot is, for the strip's bar. 0 when the budget is unknown."""
+        if self.ctx_total <= 0:
+            return 0
+        return max(0, min(100, int(round(100.0 * self.ctx_used / self.ctx_total))))
+
+
+@dataclass
+class InferenceSpeed:
+    """How fast the loaded model is working right now, for the card's speedometer.
+
+    The aggregate fields describe the MACHINE: gen_tps is the sum over generating slots, and
+    ctx_used/ctx_total describe the whole KV pool. With parallel = 1, which is most sections,
+    that is identical to the single slot's own figures. With more, reporting one slot's rate as
+    though it were the machine's was simply wrong - measured on a parallel = 3 model, two slots
+    generated at 38.5 and 27.4 tok/s simultaneously (a persistent 40% gap, because speculative
+    decoding accepts more drafts on code than on prose), so no single slot's number described
+    either the conversation you were watching or the box. Per-slot detail lives in `slots`.
+    """
+    model: str = ""
+    state: str = "idle"        # "generating" | "prefill" | "idle" - busiest slot wins
+    gen_tps: float = 0.0       # tokens/s out, summed over generating slots
     gen_tokens: int = 0        # tokens produced in the run these rates came from
     prefill_tps: float = 0.0   # tokens/s in
     prefill_pct: int = 0       # progress through the current prompt, 0-100
-    ctx_used: int = 0          # tokens of the current request
-    ctx_total: int = 0         # the slot's ctx-size
+    ctx_used: int = 0          # tokens held across all slots
+    ctx_total: int = 0         # the whole KV pool: per-slot ctx x slot count
     ctx_cached: int = 0        # of ctx_used, how many came from cache instead of being re-read
     live: bool = False         # rates describe work happening NOW, not the last run
+    slots: list = field(default_factory=list)   # list[SlotSpeed], one per live slot
+
+
+def slot_density(n: int) -> str:
+    """How much room each slot row gets, chosen from the slot count alone.
+
+    The strip has to survive `parallel = 8` without pushing the hero off the page, and a fixed
+    row height cannot do that: 8 comfortable rows measured 128px, far more than the 24px
+    sparkline they sit beside. So rows shrink and labels abbreviate as the count grows, and
+    slot_columns() wraps them - every slot stays visible at any count, nothing truncates or
+    scrolls. 8 slots land at 4 rows of 16px, which is about the height of one readout.
+    """
+    if n <= 4:
+        return "roomy"      # ~22px rows, "433 / 128,768"
+    if n <= 8:
+        return "tight"      # ~16px rows, "34%"
+    return "dense"          # ~13px rows, "34%"
+
+
+def slot_columns(n: int) -> int:
+    """How many columns to wrap the slot strip into, so its HEIGHT stays roughly flat.
+
+    Without this the strip grows linearly and a future parallel = 16 would be 208px of hero.
+    Wrapping keeps it between 4 and 6 rows tall at every count a homelab will realistically
+    use: 8 slots become 2 x 4, 16 become 3 x 6.
+    """
+    if n <= 4:
+        return 1
+    if n <= 12:
+        return 2
+    return 3
 
 
 # llama-server prints these at its default log level, every ~3 s while a slot works. There is no
@@ -851,8 +912,79 @@ _GEN_EMA_ALPHA = 0.4       # smoothing for the token-delta rate; raw 500 ms delt
 # (when, token count, task) of the previous sample, so a rate can be derived from how fast the
 # slot's token count is moving. llama only logs a generation timing line every ~3 s, which left
 # the first seconds of a reply looking like it was still reading the prompt.
+# Keyed "container#slot", never by container alone, so the slot count is never baked in: a
+# section can go from parallel = 1 to 8 and back and these just grow and shrink with it.
+# _prune_slot_state drops keys for slots that no longer exist, so a step down leaves nothing
+# behind to be read as a live slot later.
 _speed_prev: dict[str, tuple[float, int, int | None, bool]] = {}
-_gen_ema: dict[str, float] = {}      # smoothed token-delta rate, per backend
+_gen_ema: dict[str, float] = {}      # smoothed token-delta rate, per slot
+
+
+def _slot_key(container_name: str, index: int) -> str:
+    return f"{container_name}#{index}"
+
+
+def _slot_speed(container_name: str, s: dict, r: dict, now: float) -> "SlotSpeed":
+    """One slot's figures, and its own EMA state. Called once per slot per sample.
+
+    Each slot keeps a separate smoother because their rates genuinely differ: measured on a
+    parallel = 3 section, two slots decoding 400 tokens each in the same batch held 38.5 and
+    27.4 tok/s for seven seconds straight. Speculative decoding is why - the draft head is
+    accepted far more often on code than on prose - so one shared EMA would blur a real signal.
+    """
+    index = int(s.get("id") or 0)
+    key = _slot_key(container_name, index)
+    ctx_used = int(s.get("n_prompt_tokens") or 0)
+    ctx_total = int(s.get("n_ctx") or 0)
+    cached_tok = int(s.get("n_prompt_tokens_cache") or 0)
+    processed = int(s.get("n_prompt_tokens_processed") or 0)
+    task_id = s.get("id_task")
+    task_id = int(task_id) if isinstance(task_id, (int, float)) else None
+    nt = s.get("next_token")
+    nt0 = nt[0] if isinstance(nt, list) and nt and isinstance(nt[0], dict) else {}
+    decoded = int(nt0.get("n_decoded") or 0)
+
+    if not s.get("is_processing"):
+        # A finished run must not smooth into the next one on this slot.
+        _speed_prev.pop(key, None)
+        _gen_ema.pop(key, None)
+        return SlotSpeed(index=index, state="idle", ctx_used=ctx_used,
+                         ctx_total=ctx_total, ctx_cached=cached_tok)
+
+    # One decoded token is the switch out of prefill. See the n_prompt_tokens note below.
+    state = "generating" if decoded else "prefill"
+    prefill_pct = 0
+    if state == "prefill" and ctx_used:
+        prefill_pct = min(100, int(round(100.0 * (cached_tok + processed) / ctx_used)))
+
+    gen_tps = 0.0
+    prev = _speed_prev.get(key)
+    if state == "generating" and prev and prev[2] == task_id and prev[3]:
+        dt, dn = now - prev[0], decoded - prev[1]
+        if 0.25 < dt < 10.0 and dn > 0:
+            raw = dn / dt
+            last = _gen_ema.get(key)
+            gen_tps = (raw if last is None
+                       else _GEN_EMA_ALPHA * raw + (1 - _GEN_EMA_ALPHA) * last)
+            _gen_ema[key] = gen_tps
+    elif state == "generating" and r.get("open_task") == task_id:
+        # First generating sample for this task, so there is no delta yet. The log's figure
+        # describes only the newest open task, so at most one slot can borrow it.
+        gen_tps = r["cur_gen_tps"]
+    _speed_prev[key] = (now, decoded, task_id, state == "generating")
+
+    return SlotSpeed(index=index, state=state, gen_tps=gen_tps, decoded=decoded,
+                     ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=cached_tok,
+                     prefill_pct=prefill_pct, task_id=task_id)
+
+
+def _prune_slot_state(container_name: str, live: set[int]) -> None:
+    """Forget per-slot state for slots this backend no longer has."""
+    prefix = f"{container_name}#"
+    keep = {_slot_key(container_name, i) for i in live}
+    for store in (_speed_prev, _gen_ema):
+        for k in [k for k in store if k.startswith(prefix) and k not in keep]:
+            del store[k]
 
 # /slots is the ONLY llama endpoint this app must not poll while a model is idle. It is served as
 # a task on the server's own queue, which is the same queue the idle detector watches, so polling
@@ -869,8 +1001,9 @@ _PROPS_TTL = 60.0                    # n_ctx and slot count only change when a m
 # under one container, and a 128k context read from the model before the swap must not be shown
 # against the one after it.
 _props_cache: dict[str, tuple[float, dict]] = {}
-# Last context figures seen while busy, so the readout survives going idle without a /slots read.
-_last_ctx: dict[str, tuple[int, int]] = {}
+# Last per-slot context figures seen while busy, so the strip survives going idle without a
+# /slots read. One (ctx_used, ctx_total) per slot, in index order; the length IS the slot count.
+_last_slots: dict[str, list[tuple[int, int]]] = {}
 # A task the log still calls open but /slots has reported finished. Remembering it stops a
 # missing release line - a crash, or a tail that scrolled - from polling /slots forever.
 _settled_task: dict[str, int] = {}
@@ -897,30 +1030,31 @@ def _record_tps(container_name: str, value: float) -> None:
         del hist[:len(hist) - _TPS_HISTORY_MAX]
 
 
-async def _slot_state(container_name: str, internal_port: int, model_id: str) -> dict:
-    """The loaded model's working slot, falling back to slot 0, or {} if it cannot be read.
+async def _slot_states(container_name: str, internal_port: int, model_id: str) -> list[dict]:
+    """Every slot the loaded model has, in index order, or [] if they cannot be read.
 
-    Slot 0 is not the only slot that works. A section with `parallel = 3` spreads requests over
-    all three, and reading slots[0] unconditionally reported an idle slot for every request that
-    landed anywhere else - measured at 38% of tasks (5,304 of 13,922) on Qwen3.8-27B-UD-Q4_K_M,
-    each one a gap in the speedometer and a zero in the history. The busy slot is the one worth
-    reporting; when none is busy, slot 0 is as good as any for the idle readout.
+    All of them, not just the working one: one response already carries the lot, so reporting
+    per-slot detail costs no extra HTTP. It used to return slots[0] unconditionally, which
+    reported an idle slot for every request that landed anywhere else - measured at 38% of tasks
+    (5,304 of 13,922) on Qwen3.8-27B-UD-Q4_K_M, each one a gap in the speedometer and a zero in
+    the history. The caller no longer has to pick one at all.
     """
     url = f"http://{container_name}:{internal_port}/slots"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, read=2.0)) as client:
             r = await client.get(url, params={"model": model_id})
         if r.status_code != 200:
-            return {}
+            return []
         slots = r.json()
-        if not (isinstance(slots, list) and slots):
-            return {}
-        for s in slots:
-            if isinstance(s, dict) and s.get("is_processing"):
-                return s
-        return slots[0] if isinstance(slots[0], dict) else {}
+        if not isinstance(slots, list):
+            return []
+        out = [s for s in slots if isinstance(s, dict)]
+        # Index order, because the strip renders in this order and llama is not required to
+        # return them sorted. Slots without an id sort last rather than crashing the sort.
+        out.sort(key=lambda s: s.get("id") if isinstance(s.get("id"), int) else 1 << 30)
+        return out
     except (httpx.HTTPError, ValueError, KeyError, IndexError):
-        return {}
+        return []
 
 
 async def _props_state(container_name: str, internal_port: int, model_id: str) -> dict:
@@ -1057,7 +1191,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
 
     # Only ask /slots when a task is actually in flight. An idle model must be left alone or it
     # can never sleep, and asking would wake it outright.
-    slot: dict = {}
+    raw_slots: list[dict] = []
     open_task = r["open_task"]
     if open_task is None:
         # Nothing in flight. Drop any settled-task marker here rather than letting it persist:
@@ -1065,85 +1199,64 @@ async def inference_speed(container_name: str, internal_port: int | None,
         # previous life could collide with a genuine new task and silence one request's readout.
         _settled_task.pop(container_name, None)
     elif _settled_task.get(container_name) != open_task:
-        slot = await _slot_state(container_name, internal_port, model_id)
-        if not slot.get("is_processing"):
+        raw_slots = await _slot_states(container_name, internal_port, model_id)
+        if not any(s.get("is_processing") for s in raw_slots):
             # /slots is authoritative. Record the disagreement so a release line that never
             # arrived does not keep this backend awake for the rest of the process's life.
             _settled_task[container_name] = open_task
-            slot = {}
-    busy = bool(slot.get("is_processing"))
-    task_id = slot.get("id_task")
-    task_id = int(task_id) if isinstance(task_id, (int, float)) else None
-
-    ctx_used = int(slot.get("n_prompt_tokens") or 0)
-    ctx_total = int(slot.get("n_ctx") or 0)
-    processed = int(slot.get("n_prompt_tokens_processed") or 0)
-    cached_tok = int(slot.get("n_prompt_tokens_cache") or 0)
-    if busy:
-        _last_ctx[f"{container_name}/{model_id}"] = (ctx_used, ctx_total)
-    else:
-        # Idle, and /slots was deliberately not read. The last figures seen while busy are the
-        # honest ones to show: that KV cache is still resident, so it really is the context in
-        # use. ctx_total comes from /props, which costs the sleep timer nothing.
-        ctx_used, ctx_total = _last_ctx.get(f"{container_name}/{model_id}", (0, 0))
-        if not ctx_total:
-            ctx_total = int((await _props_state(
-                container_name, internal_port, model_id)).get("n_ctx") or 0)
-    # Tokens decoded so far for the task in this slot, and the only honest "has generation
-    # started" signal. n_prompt_tokens USED to be the prompt length; in current builds it counts
-    # the prompt plus everything decoded since, so a progress fraction built from it FALLS as the
-    # reply grows (measured 49% -> 5% across one generation) and never reaches the 100% that used
-    # to mark the switch out of prefill. That pinned the state at "prefill" for whole replies,
-    # which recorded a zero every sample and left the sparkline flat on the floor. It is also
-    # inflated by speculative drafts, by 3 tokens where this was measured; n_decoded is not.
-    _nt = slot.get("next_token")
-    _nt0 = _nt[0] if isinstance(_nt, list) and _nt and isinstance(_nt[0], dict) else {}
-    decoded = int(_nt0.get("n_decoded") or 0)
+            raw_slots = []
 
     now = time.time()
-    prev = _speed_prev.get(container_name)
+    ctx_key = f"{container_name}/{model_id}"
+    slots: list[SlotSpeed] = []
 
-    if busy:
-        # A fresh task always reads its prompt first, so until a token has actually been decoded
-        # prefill is the truthful state - and its rates stay empty rather than borrowing the
-        # previous request's. One decoded token is the switch, and it needs no timing line, so
-        # the panel no longer leans on the log for the thing the log supplies worst.
-        prefill_tps, prefill_pct = r["cur_pp_tps"], r["cur_pp_pct"]
-        state = "generating" if (decoded or r["cur_gen_tps"]) else "prefill"
-        if not prefill_pct and ctx_used and state == "prefill":
-            # Only meaningful before generation starts, while n_prompt_tokens is still just the
-            # prompt. Once decoding begins the denominator grows and the fraction lies.
-            prefill_pct = min(100, int(round(100.0 * (cached_tok + processed) / ctx_used)))
-        gen_tps = r["cur_gen_tps"]
-        gen_tokens = decoded or r["cur_gen_tokens"]
-        # Prefer the live delta over llama's logged figure. Both are real measurements, but the
-        # log's is a 3s rolling average written every ~3s, so at a 500ms poll it shows the same
-        # digits six times in a row and the panel looks frozen mid-generation.
-        if state == "generating" and prev and prev[2] == task_id and prev[3]:
-            # n_decoded climbs by one per generated token, so its movement between two polls is
-            # a live rate - available at once, where the log's is up to 3 s behind. Only valid
-            # when the PREVIOUS sample was already generating: on the first generating sample
-            # n_decoded has already jumped from zero to whatever landed inside that window,
-            # which would read as a huge rate.
-            dt, dn = now - prev[0], decoded - prev[1]
-            if 0.25 < dt < 10.0 and dn > 0:
-                raw = dn / dt
-                # Smooth against the previous displayed figure: at a 500 ms poll a couple of
-                # tokens either way is 4 tok/s of noise on a number people watch.
-                last = _gen_ema.get(container_name)
-                gen_tps = raw if last is None else (_GEN_EMA_ALPHA * raw
-                                                    + (1 - _GEN_EMA_ALPHA) * last)
-                _gen_ema[container_name] = gen_tps
+    if raw_slots:
+        _prune_slot_state(container_name, {int(s.get("id") or 0) for s in raw_slots})
+        slots = [_slot_speed(container_name, s, r, now) for s in raw_slots]
+        _last_slots[ctx_key] = [(sl.ctx_used, sl.ctx_total) for sl in slots]
     else:
-        state = "idle"
+        # Idle, and /slots was deliberately not read. Rebuild the strip from the last busy
+        # sample - that KV is still resident, so the figures are real - or from /props when
+        # there is no history yet. /props carries total_slots, so even a freshly started process
+        # renders the right NUMBER of idle slots without touching /slots.
+        remembered = _last_slots.get(ctx_key)
+        if remembered:
+            slots = [SlotSpeed(index=i, state="idle", ctx_used=u, ctx_total=t)
+                     for i, (u, t) in enumerate(remembered)]
+        else:
+            p = await _props_state(container_name, internal_port, model_id)
+            per_slot = int(p.get("n_ctx") or 0)
+            count = max(1, int(p.get("total_slots") or 1))
+            slots = [SlotSpeed(index=i, state="idle", ctx_total=per_slot)
+                     for i in range(count)]
+        _prune_slot_state(container_name, set())
+
+    generating = [sl for sl in slots if sl.state == "generating"]
+    prefilling = [sl for sl in slots if sl.state == "prefill"]
+    busy = bool(generating or prefilling)
+    state = "generating" if generating else ("prefill" if prefilling else "idle")
+
+    # The machine's rate, not one slot's. Summing is the honest aggregate: slots decode in the
+    # same batch, so their rates add up to what the box is actually producing.
+    gen_tps = sum(sl.gen_tps for sl in generating)
+    gen_tokens = sum(sl.decoded for sl in generating)
+    if state == "generating" and not gen_tps:
+        # First frame of a run, before any slot has two samples to difference.
+        gen_tps, gen_tokens = r["cur_gen_tps"], gen_tokens or r["cur_gen_tokens"]
+    if state == "idle":
         gen_tps, gen_tokens = r["last_gen_tps"], r["last_gen_tokens"]
         prefill_tps, prefill_pct = r["last_pp_tps"], 0
-
-    if busy:
-        _speed_prev[container_name] = (now, decoded, task_id, state == "generating")
     else:
-        _speed_prev.pop(container_name, None)
-        _gen_ema.pop(container_name, None)   # a finished run must not smooth into the next one
+        prefill_tps, prefill_pct = r["cur_pp_tps"], r["cur_pp_pct"]
+        if not prefill_pct and prefilling:
+            prefill_pct = max(sl.prefill_pct for sl in prefilling)
+
+    # Pool-wide context: every slot's share added up, against the whole --ctx-size pool. With
+    # parallel = 1 this is just the one slot, unchanged.
+    ctx_used = sum(sl.ctx_used for sl in slots)
+    ctx_cached = sum(sl.ctx_cached for sl in slots)
+    per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
+    ctx_total = per_slot_ctx * len(slots)
 
     # Idle samples are recorded as zero rather than skipped: the gaps between requests are part
     # of the shape, and a line drawn only from busy moments would imply continuous work.
@@ -1152,8 +1265,8 @@ async def inference_speed(container_name: str, internal_port: int | None,
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
         prefill_tps=prefill_tps, prefill_pct=prefill_pct,
-        ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=cached_tok,
-        live=busy,
+        ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
+        live=busy, slots=slots,
     )
     _speed_cache[container_name] = (time.time(), out)
     return out

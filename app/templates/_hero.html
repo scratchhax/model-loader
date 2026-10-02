@@ -132,5 +132,55 @@
       </div>
     </div>
     {% endif %}
+
+    {# ---- per-slot strip ----
+       Only drawn when there is more than one slot: with parallel = 1 it would just repeat the
+       readouts above. Row height and label verbosity come from slot_density(), which is driven
+       by the slot count alone, so parallel = 8 still fits beside the sparkline rather than
+       pushing the hero down the page. Every slot stays visible at any count - the rows shrink
+       instead of the strip scrolling or truncating.
+
+       Worth showing because the numbers genuinely diverge: measured on a parallel = 3 section,
+       two slots decoding in the same batch held 38.5 and 27.4 tok/s for seven seconds, and
+       their contexts ended at 439, 423 and 83 tokens. #}
+    {% if speed and speed.slots | length > 1 %}
+    {% set roomy = slot_density == 'roomy' %}
+    {% set dense = slot_density == 'dense' %}
+    {% set fs = 'text-[10px]' if roomy else 'text-[9px]' %}
+    {% set rowpad = 'py-1' if roomy else ('py-0.5' if not dense else '') %}
+    {% set per_slot_ctx = speed.slots[0].ctx_total %}
+    <div class="mt-3">
+      <div class="mb-1 flex items-baseline justify-between {{ fs }} uppercase tracking-wide text-slate-500">
+        <span>slots</span>
+        {% if per_slot_ctx %}
+        <span class="normal-case tracking-normal text-slate-600"
+              title="--ctx-size is the whole KV pool; each slot gets that divided by parallel, rounded up to a multiple of 128">
+          {{ speed.slots | length }} × {{ (per_slot_ctx / 1024) | round(0) | int }}k each
+        </span>
+        {% endif %}
+      </div>
+      <div class="grid gap-x-4" style="grid-template-columns: repeat({{ slot_columns }}, minmax(0, 1fr));">
+      {% for s in speed.slots %}
+      {% set tint = 'emerald' if s.state == 'generating' else ('sky' if s.state == 'prefill' else 'slate') %}
+      <div class="flex items-center gap-2 {{ rowpad }} {{ fs }} tabular-nums"
+           title="slot {{ s.index }} · {{ s.state }}{% if s.task_id is not none %} · task {{ s.task_id }}{% endif %} · {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens{% if s.gen_tps %} · {{ '%.1f' % s.gen_tps }} tok/s{% endif %}">
+        <span class="w-3 shrink-0 text-right text-slate-600">{{ s.index }}</span>
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if s.state != 'idle' else '700' }}"></span>
+        {% if not dense %}
+        <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
+        {% endif %}
+        <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-800">
+          <div class="h-full bg-{{ tint }}-500/70 transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
+        </div>
+        {% if roomy %}
+        <span class="w-24 shrink-0 text-right text-slate-500">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
+        {% else %}
+        <span class="w-8 shrink-0 text-right text-slate-500">{{ s.ctx_pct }}%</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
