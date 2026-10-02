@@ -133,6 +133,28 @@
     </div>
     {% endif %}
 
+    {# ---- experts / weights spill, one line ----
+       Sits under the context window because it is the other half of the same question: that
+       bar says how much of the window is in use, this says how much of the MODEL is actually
+       on the cards. Deliberately numbers only - the hero is glanced at, so the reasoning is in
+       the tooltip and the full treatment stays on the autoconfig panel, where someone is
+       reading on purpose. Measured, not predicted; see vram_live.breakdown. #}
+    {% if hero_weights_split %}
+    {% set hws = hero_weights_split %}
+    <div class="mt-1.5 flex items-center gap-2 text-[10px] tabular-nums"
+         title="{{ '%.1f' % hws.gpu_gb }} GB of this model's {{ '%.1f' % hws.total_gb }} GB is resident on the GPUs and {{ '%.1f' % hws.host_gb }} GB is in host RAM ({{ '%.0f' % hws.host_pct }}%). {% if hws.is_moe %}For a MoE it is the experts that move; attention stays resident.{% endif %} Those reads run at system-memory speed rather than VRAM speed, which is the dominant cost once a model stops fitting. Measured from what the driver reports for the running process, not predicted — llama.cpp does not report it at all.">
+      <span class="shrink-0 text-slate-500">{% if hws.is_moe %}experts{% else %}weights{% endif %}</span>
+      <span class="flex h-1 min-w-0 flex-1 gap-[2px] overflow-hidden rounded-full bg-slate-800">
+        {# sky-600/rose-600, not the -500 the context bar above uses: on this dark surface
+           sky-500 sits at L 0.685, outside the 0.48-0.67 band. The -600 pair passes every
+           check here (worst adjacent dE 20.9 protan, 33.6 normal vision). #}
+        <span class="h-full bg-sky-600" style="width: {{ '%.3f' % hws.gpu_pct }}%"></span>
+        <span class="h-full bg-rose-600" style="width: {{ '%.3f' % hws.host_pct }}%"></span>
+      </span>
+      <span class="shrink-0 text-slate-400">{{ '%.0f' % hws.host_pct }}% in host RAM</span>
+    </div>
+    {% endif %}
+
     {# ---- per-slot strip ----
        Only drawn when there is more than one slot: with parallel = 1 it would just repeat the
        readouts above. Row height and label verbosity come from slot_density(), which is driven

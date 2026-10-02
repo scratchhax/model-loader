@@ -245,6 +245,17 @@ async def _hero_context() -> dict:
     vram_used = st.gpu.vram_used_gb if (st.ok and st.gpu) else None
     vram_total = st.gpu.vram_total_gb if (st.ok and st.gpu) else 0.0
 
+    # How much of this model is NOT on the cards, for the one-line readout under the context
+    # bar. Only the numbers: the hero is glanced at, so the reasoning lives in the line's
+    # tooltip and the full treatment stays on the autoconfig panel, where someone is reading
+    # deliberately. None whenever nothing is offloaded, which is the common case.
+    hero_weights_split = None
+    try:
+        if st.ok and st.gpu:
+            hero_weights_split = (vram_live.breakdown(b.name, st.gpu) or {}).get("weights_split")
+    except Exception:  # noqa: BLE001 - a missing line must never cost the hero
+        hero_weights_split = None
+
     # The sparkline is scaled to the peak in its own window, and that peak is printed beside it.
     # A fixed scale cannot work here: 27 tok/s is a busy dense model and a slow MoE one, so the
     # only honest options are a stated scale or a meaningless one.
@@ -258,7 +269,8 @@ async def _hero_context() -> dict:
             # Drive the per-slot strip's row height and column wrap. Computed here rather than
             # in the template so the thresholds sit with the dataclass they describe.
             "slot_density": services.slot_density(len(sp.slots) if sp else 0),
-            "slot_columns": services.slot_columns(len(sp.slots) if sp else 0)}
+            "slot_columns": services.slot_columns(len(sp.slots) if sp else 0),
+            "hero_weights_split": hero_weights_split}
 
 
 def _solo_backend() -> str:
@@ -321,8 +333,7 @@ def _gpu_strip_context() -> dict:
                     "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
                 }
         break
-    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
-            "pooled_vb": pooled_vb}
+    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns}
 
 
 @app.get("/", response_class=HTMLResponse)
