@@ -46,7 +46,7 @@
        breakdown (vram_live) instead of a single fill: the segments are what the loaded model
        actually costs, the free track is measured, and every segment names itself and its
        value in the title since a per-card row has no room for a legend. #}
-    {% set vb, vb_compact, vb_hot = card_breakdowns.get(c.index) if card_breakdowns else None, True, hot %}
+    {% set vb, vb_compact, vb_hot, vb_legend = card_breakdowns.get(c.index) if card_breakdowns else None, True, hot, True %}
     {% if vb %}
       {% include "_vram_breakdown.html" %}
     {% else %}
@@ -93,15 +93,16 @@
   </div>
   {% endfor %}
 
-  {# The same pooled meter the container card draws, once, under the per-card rows. The rows
-     above answer "is this card full"; this answers "full of what" - the per-card bars have to
-     collapse weights, KV and compute into one apportioned segment because llama does not
-     report which card holds which layer, while pooled they are separable. Full width here, so
-     it gets the legend and the host-RAM spill bar the compact rows have no room for. #}
-  {% if pooled_vb %}
-  <div class="mt-3 border-t border-slate-800 pt-3">
-    {% set vb, vb_compact, vb_hot = pooled_vb, False, False %}
-    {% include "_vram_breakdown.html" %}
+  {# The spill gets its own card rather than riding along inside a GPU card. It is not a
+     property of either card - it is the model's, and its denominator is the model, not the
+     32 GB the card bars are drawn against. Nesting a second scale inside one of them would
+     invite exactly the misreading the separate denominator exists to prevent. #}
+  {% if pooled_vb and pooled_vb.weights_split %}
+  {# No wrapper box: the partial already draws its own bordered card, and nesting it inside
+     another produced a double border. #}
+  <div class="mt-3">
+    {% set vb = pooled_vb %}
+    {% include "_vram_weights_split.html" %}
   </div>
   {% endif %}
 </div>
