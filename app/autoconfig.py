@@ -1091,13 +1091,30 @@ def _presets_from_frontier(frontier: list[tuple[int, int, float, float]], backen
     return out
 
 
-def _looks_like_draft(filename: str) -> bool:
+# No speculative draft head is anywhere near this big. The point of a head is that running it
+# is nearly free next to the target, so it is a low single-digit percentage of the model: the two
+# real ones here are 1.3 and 1.56 GiB, and upstream repos ship them at 60-170 MB. 4 GiB leaves
+# enormous headroom for a head belonging to some future 200B+ target while still excluding a
+# full-model quant. Only applied when a size is actually available - see _looks_like_draft.
+_MAX_DRAFT_BYTES = 4 * 1024 ** 3
+
+
+def _looks_like_draft(filename: str, size_bytes: int | None = None) -> bool:
     """Heuristic: is this GGUF a speculative-decoding draft head?
 
     Match on isolated tokens (`-draft-`, `-mtp-`, or the filename starting/ending with those)
     so we don't false-match main models that have "noMTP" or "nodraft" in their name — those
     are variants explicitly WITHOUT MTP support (e.g. `Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf`).
+
+    The name alone is not enough, which cost real VRAM. `-MTP-` also appears in the name of full
+    quants that INCLUDE the MTP layers rather than consisting of them, e.g.
+    `Qwen3.8-27B-TurboFCFusion-...-NEO-CODER-MAX-MTP-IQ2_M.gguf`, an 11.3 GiB model. Calling that
+    a head had it excluded from getting its own section AND picked as its own draft model, so the
+    same file loaded twice: 42.2 GiB of VRAM measured for 11.3 GiB of weights. Pass size_bytes
+    wherever the path is at hand and the size settles it.
     """
+    if size_bytes is not None and size_bytes >= _MAX_DRAFT_BYTES:
+        return False
     low = filename.lower()
     # Explicit "no MTP" or "no draft" variants — these are main models, not drafts
     for negation in ("nomtp", "no-mtp", "no_mtp", "nodraft", "no-draft", "no_draft"):
@@ -1111,6 +1128,14 @@ def _looks_like_draft(filename: str) -> bool:
     stem = low[:-5] if low.endswith(".gguf") else low
     parts = stem.replace("_", "-").split("-")
     return parts and (parts[0] in ("draft", "mtp") or parts[-1] in ("draft", "mtp"))
+
+
+def file_size_or_none(p: "Path") -> int | None:
+    """Size in bytes, or None when it cannot be read. Never raises at a call site."""
+    try:
+        return p.stat().st_size
+    except OSError:
+        return None
 
 
 def _find_mtp(models_dir: "Path | None", section_name: str, subdir: str = "") -> str:
@@ -1134,7 +1159,8 @@ def _find_mtp(models_dir: "Path | None", section_name: str, subdir: str = "") ->
             for p in sorted(folder.iterdir()):
                 if not (p.is_file() and p.suffix.lower() == ".gguf"):
                     continue
-                if "mmproj" in p.name.lower() or not _looks_like_draft(p.name):
+                if "mmproj" in p.name.lower() or not _looks_like_draft(
+                        p.name, file_size_or_none(p)):
                     continue
                 cands.append(p)
         except OSError:
@@ -1161,7 +1187,8 @@ def _find_mtp(models_dir: "Path | None", section_name: str, subdir: str = "") ->
     try:
         cands = [p for p in sorted(models_dir.iterdir())
                  if p.is_file() and p.suffix.lower() == ".gguf"
-                 and _looks_like_draft(p.name) and "mmproj" not in p.name.lower()
+                 and _looks_like_draft(p.name, file_size_or_none(p))
+                 and "mmproj" not in p.name.lower()
                  and stem_key in p.name.lower().replace("-", "").replace("_", "").replace(".", "")]
     except OSError:
         return ""

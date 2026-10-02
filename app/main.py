@@ -1220,6 +1220,37 @@ def config_section_new(request: Request, name: str = "") -> HTMLResponse:
     })
 
 
+def _pick_main_gguf(files: list[Path], section: str) -> Path:
+    """Which of a subdir's GGUFs is THIS section's model. Companions are already filtered out.
+
+    Not the first alphabetically. A folder routinely holds several quants of one model, and the
+    section name is what says which: `[...-Q8_0]` wants the Q8_0 file, not whichever sorts first.
+    Shards are grouped before choosing so the answer is always part 1, the shard carrying the
+    metadata and the only one llama-server should be handed.
+    """
+    groups: dict[str, list[tuple[int, Path]]] = {}
+    for q in files:
+        base, idx, _total = shard_key(q.name)
+        stem = base[:-5] if base.lower().endswith(".gguf") else base
+        groups.setdefault(stem, []).append((idx or 1, q))
+
+    def first_shard(stem: str) -> Path:
+        return min(groups[stem], key=lambda t: t[0])[1]
+
+    low = section.lower()
+    for stem in groups:
+        if stem.lower() == low:
+            return first_shard(stem)
+    for stem in groups:
+        if low.startswith(stem.lower()) or stem.lower().startswith(low):
+            return first_shard(stem)
+    # The section name matches nothing here, so fall back to the largest model present rather
+    # than to sort order. Size is a far better guess at "the main one" than the alphabet.
+    biggest = max(groups, key=lambda s: sum(
+        autoconfig.file_size_or_none(q) or 0 for _i, q in groups[s]))
+    return first_shard(biggest)
+
+
 def _resolve_section_gguf(name: str) -> tuple[Path | None, str, str | None]:
     """(gguf_path, model_rel, rel) for a section. rel is models-dir-relative, model_rel is
     the container-absolute /models/... path llama-server wants, or "" for flat layouts.
@@ -1238,12 +1269,20 @@ def _resolve_section_gguf(name: str) -> tuple[Path | None, str, str | None]:
         subdir_name = rel.split("/", 1)[0]
         subdir_path = settings.models_dir / subdir_name
         if subdir_path.is_dir():
-            # Prefer non-mmproj as the main GGUF (mmproj is the companion multimodal projector)
             gguf_files = sorted([q for q in subdir_path.iterdir() if q.is_file() and q.suffix.lower() == ".gguf"])
-            main_files = [q for q in gguf_files if "mmproj" not in q.name.lower()] or gguf_files
+            # Every companion, not just mmproj. This used to test `"mmproj" not in name` and
+            # then take main_files[0] - the alphabetically first survivor - which on a real
+            # folder picked ...-MAX-MTP-IQ2_M.gguf over ...-MAX-Q8_0.gguf because M sorts before
+            # Q. The section named ...-Q8_0 was therefore configured to run an 11.3 GiB IQ2_M
+            # quant while the 27.7 GiB Q8_0 beside it was never loaded. ini._is_companion
+            # already knew about draft heads; this was a third copy of the narrower mmproj-only
+            # test, and the one missed when the other two were unified.
+            main_files = [q for q in gguf_files
+                          if not ini._is_companion(q.name, autoconfig.file_size_or_none(q))
+                          ] or gguf_files
             if main_files:
-                # first shard has the metadata
-                return main_files[0], f"/models/{subdir_name}/{main_files[0].name}", rel
+                pick = _pick_main_gguf(main_files, name)
+                return pick, f"/models/{subdir_name}/{pick.name}", rel
         return None, "", rel
     if rel is not None:
         return settings.models_dir / rel, "", rel
