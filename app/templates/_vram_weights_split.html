@@ -32,7 +32,11 @@
         {# On the --fit path the SPLIT is a prediction and the placement is llama.cpp's, so
            naming an n-cpu-moe here would present our arithmetic as a setting. The table below
            suppresses the same figure for the same reason. #}
-        {%- if rec and 'fit' in (rec.values or {}) %}
+        {%- if ws.measured %}
+        {{ '%.0f' % ws.host_pct }}% of the weights are in host RAM right now. This is measured,
+        not predicted: the fixed costs are allocated at load and do not move, so whatever else
+        the device holds is weights, and the driver reports that per process.
+        {%- elif rec and 'fit' in (rec.values or {}) %}
         Roughly {{ '%.0f' % ws.host_pct }}% of the weights will sit in host RAM. The split is
         autoconfig's estimate, not a setting: <span class="font-mono">--fit</span> places the
         tensors and may land somewhere near this.
