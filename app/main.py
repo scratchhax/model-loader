@@ -289,6 +289,7 @@ def _gpu_strip_context() -> dict:
     cards: list = []
     history: dict[int, dict] = {}
     card_breakdowns: dict[int, dict] = {}
+    pooled_vb: dict | None = None
     solo = _solo_backend()
     for name in services._effective_container_names():
         st = hw.stats_for(name)
@@ -296,7 +297,14 @@ def _gpu_strip_context() -> dict:
             continue
         cards = st.gpu.cards
         if name == solo:
-            card_breakdowns = vram_live.per_card(vram_live.breakdown(name, st.gpu), cards)
+            # The pooled meter is kept as well as the per-card ones. A per-card row has no
+            # room for a legend, so it collapses weights, KV and compute into one apportioned
+            # segment - fine for "is this card full", useless for "how much of that is
+            # context". The pooled meter is where those are separable, because the fixed costs
+            # are known per card and only the PLACEMENT is not, so it is drawn once underneath
+            # with the full legend and the spill bar, exactly as the container card draws it.
+            pooled_vb = vram_live.breakdown(name, st.gpu)
+            card_breakdowns = vram_live.per_card(pooled_vb, cards)
         pts = hw.history_for(name)
         if pts:
             span_s = (pts[-1].ts - pts[0].ts) if len(pts) > 1 else 0.0
@@ -313,7 +321,8 @@ def _gpu_strip_context() -> dict:
                     "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
                 }
         break
-    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns}
+    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
+            "pooled_vb": pooled_vb}
 
 
 @app.get("/", response_class=HTMLResponse)

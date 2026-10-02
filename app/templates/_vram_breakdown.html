@@ -74,7 +74,12 @@
 {% if vb.weights_split %}{% include "_vram_weights_split.html" %}{% endif %}
 
 {% if not vb_compact %}
-<div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-3">
+{# Two columns, not three. The `sm:` breakpoint measures the VIEWPORT, but this partial
+   is drawn in containers of very different widths - the autoconfig panel is full width
+   while the GPU strip column is about 360px - so on a wide screen the strip was still
+   given three columns and "compute buffers" wrapped mid-label. Two fits the narrowest
+   place it appears, and costs the wide one a single extra row. #}
+<div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
   {% for s in vb.segments %}
   <div class="flex items-baseline gap-1.5" title="{{ s.note }}">
     <span class="mt-[3px] h-2 w-2 shrink-0 rounded-sm {{ seg_class[s.key] }}"></span>
