@@ -671,6 +671,9 @@ class Recommendation:
     # there is nothing to trade — offloading layers cannot buy context beyond native — so
     # the UI shows a single option instead of three chips that would all be identical.
     fits_full_gpu: bool = False
+    # The presets differ only by context: the model is fully resident at all of them, so
+    # the panel shows what actually separates them and drops the layer/speed columns.
+    ctx_only_presets: bool = False
     native_ctx: int = 0
     # Which preset (if any) the CURRENTLY SAVED ini section corresponds to. Selecting a chip
     # only previews a recommendation — nothing is written until Fill form + Save — so the UI
@@ -1157,6 +1160,49 @@ def _presets_from_frontier(frontier: list[tuple[int, int, float, float]], backen
 # enormous headroom for a head belonging to some future 200B+ target while still excluding a
 # full-model quant. Only applied when a size is actually available - see _looks_like_draft.
 _MAX_DRAFT_BYTES = 4 * 1024 ** 3
+
+
+def _presets_from_ctx_only(plan: "BackendPlan", layers: int) -> list[PresetOption]:
+    """Context choices for a model that fits entirely, where offload has nothing to trade.
+
+    The old rule stopped at "it all fits, so there is nothing to choose". That is true about
+    PLACEMENT and it was the wrong place to stop, because context is a dial in its own right:
+    a smaller one frees VRAM for whatever else wants the card, it shrinks the compute buffer -
+    which scales with CONTEXT, not with the model, and reaches 14.9 GB on a 27B at a 786K pool -
+    and models do not always behave better at their maximum. Offering only the largest context
+    that fits made the biggest choice the only choice.
+
+    Every option here is fully resident with no offload, so speed is not what separates them,
+    and the panel does not pretend otherwise: these are rendered by what actually differs,
+    which is context and the VRAM it costs.
+    """
+    rows = sorted((r for r in plan.rows if r.fits and not r.offload_kind and r.ctx > 0),
+                  key=lambda r: r.ctx)
+    if len(rows) < 2:
+        return []
+    top = rows[-1]
+
+    def below(frac: float):
+        """Largest offered context at or under a fraction of the maximum."""
+        c = [r for r in rows if r.ctx <= top.ctx * frac]
+        return c[-1] if c else None
+
+    picks: list = []
+    for key, label, icon, frac in (("fast", "Compact", "gauge", 0.125),
+                                   ("balanced", "Balanced", "cpu", 0.5)):
+        r = below(frac)
+        # Distinct from the full option and from each other, or the chip says nothing new.
+        if r is not None and r.ctx < top.ctx and all(r.ctx != p[1].ctx for p in picks):
+            picks.append(((key, label, icon), r))
+    picks.append((("long-ctx", "Full context", "layers-3"), top))
+
+    return [PresetOption(
+        key=k, label=lbl, icon=ic, backend=plan.name, ctx=r.ctx,
+        n_cpu_moe=0, offload_kind="", gpu_layers=layers, total_layers=layers,
+        gpu_gb=round(r.model_gb, 2), kv_gb=round(r.kv_gb, 2),
+        # Everything is resident at every one of these, so the ordering hint is flat on purpose.
+        speed_score=1.0, ngl=-1,
+    ) for (k, lbl, ic), r in picks]
 
 
 def _looks_like_draft(filename: str, size_bytes: int | None = None) -> bool:
@@ -1891,6 +1937,7 @@ def analyze(*,
     # can't hold every layer, or it can but not at native ctx — means a real speed/context
     # tradeoff exists and the user should get the choices.
     _fits_full_gpu = False
+    ctx_only_presets = False
     if recommended and rec_ctx > 0 and native_ctx > 0:
         _no_offload_ctx = max(
             (r.ctx for r in recommended.rows if r.fits and not r.offload_kind),
@@ -2007,6 +2054,27 @@ def analyze(*,
                     values["ngl"] = str(chosen.ngl)
                 # Same as the MoE branch: the table stays per-context rather than being
                 # recomputed at the chosen preset's offload level.
+
+        # Nothing to trade on the OFFLOAD axis, which is all the frontier searches, so it came
+        # back with one option or none. Offer the context axis instead - see
+        # _presets_from_ctx_only for why that is a real choice and not a cosmetic one.
+        if _fits_full_gpu and len(presets) < 3:
+            _ctx_presets = _presets_from_ctx_only(recommended, layers)
+            if len(_ctx_presets) >= 2:
+                presets = _ctx_presets
+                frontier_opts = []       # the slider maps offload points; there are none here
+                ctx_only_presets = True
+                # Default unchanged: the largest that fits, which is what this model already
+                # got before the smaller options existed. A context already saved for this
+                # section wins over that, so a deliberate choice is not quietly undone.
+                _saved_ctx = _preset_for_saved_ctx(presets, current_section, n_sessions)
+                _want = preset or (_saved_ctx.key if _saved_ctx else "long-ctx")
+                chosen = next((p for p in presets if p.key == _want), presets[-1])
+                active_preset = chosen.key
+                rec_ctx = chosen.ctx
+                off_kind, n_cm = "", 0
+                values["ctx-size"] = str(rec_ctx * n_sessions)
+
         if off_kind in ("cpu-moe", "n-cpu-moe"):
             # Placement is handed to llama.cpp's own fitter rather than pinned here.
             #
@@ -2469,6 +2537,7 @@ def analyze(*,
         presets=presets,
         frontier=frontier_opts,
         fits_full_gpu=_fits_full_gpu,
+        ctx_only_presets=ctx_only_presets,
         native_ctx=native_ctx,
         current_preset=_current_preset,
         has_unsaved=bool(current_diff),
