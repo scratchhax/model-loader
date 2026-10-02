@@ -926,9 +926,14 @@ async def _slot_state(container_name: str, internal_port: int, model_id: str) ->
 async def _props_state(container_name: str, internal_port: int, model_id: str) -> dict:
     """Static per-load facts: the real n_ctx, the slot count, and whether the model is asleep.
 
-    Safe to poll at any rate - see the note by _PROPS_TTL. This is also the only honest source
-    for the context size: /v1/models reports the REQUESTED --ctx-size from the child's argv
-    (386000 on Qwen3.8-27B-UD-Q4_K_M here) while --fit may have settled on far less (128768).
+    Safe to poll at any rate - see the note by _PROPS_TTL. It is also the right source for the
+    context a single conversation actually gets, which is NOT what /v1/models reports. The argv
+    there carries `--ctx-size`, the total KV pool; llama-server divides that pool by `parallel`
+    and rounds up to a multiple of 128 to get the per-slot context, which is what `n_ctx` means
+    here and what the slot objects report. On Qwen3.8-27B-UD-Q4_K_M, ctx-size 386000 with
+    parallel 3 gives 128768 (386000/3 = 128666.7, rounded up), and the load log says so outright:
+    "n_slots = 3, n_ctx_slot = 128768". Both numbers are real, they answer different questions,
+    so the panel compares per-slot usage against the per-slot total.
     """
     key = f"{container_name}/{model_id}"
     cached = _props_cache.get(key)
