@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import autoconfig, db, gguf_meta, ini
 from .config import settings
+from .utils import shard_key
 
 # Components are allocated at load, so they only change on respawn. A short TTL picks up a
 # respawn (new argv, new model) without re-reading GGUF metadata on every 1-2 s poll, and it
@@ -51,6 +52,37 @@ def _argv_int(argv: dict, *flags: str) -> int:
     return 0
 
 
+def kfd_process_vram_gb() -> float:
+    """Total VRAM held by the largest single GPU process, in GB, or 0.0 when unreadable.
+
+    The amdgpu kernel driver publishes exactly this per process and per card, which is the one
+    number llama.cpp will not tell you and the drivers' per-card totals cannot separate:
+
+        /sys/class/kfd/kfd/proc/<pid>/vram_<gpuid>   bytes, one file per card
+
+    Readable straight from this container - /sys is already mounted, no rocm-smi binary and no
+    docker exec needed - and it agrees with `rocm-smi --showpids` to the byte. PIDs there are
+    the host's and this process cannot map them to a container, but it does not need to: under
+    `--models-max 1` the router keeps one child resident, so the largest consumer IS the loaded
+    model. Taking the largest rather than the sum is what makes that safe - a second tenant on
+    the cards inflates the total but not the maximum.
+    """
+    root = Path("/sys/class/kfd/kfd/proc")
+    best = 0
+    try:
+        for proc in root.iterdir():
+            total = 0
+            for f in proc.glob("vram_*"):
+                try:
+                    total += int(f.read_text().strip() or 0)
+                except (OSError, ValueError):
+                    continue
+            best = max(best, total)
+    except OSError:
+        return 0.0
+    return best / (1024 ** 3)
+
+
 def _components(name: str, vendor: str, gpu_count: int) -> dict | None:
     """Static per-load VRAM components for what this backend has loaded, or None when any
     input needed for an honest estimate is missing or contradictory."""
@@ -67,6 +99,18 @@ def _components(name: str, vendor: str, gpu_count: int) -> dict | None:
         file_size = model.stat().st_size
     except OSError:
         return None
+    # Sum the whole shard set. The first shard of a split GGUF holds the metadata and almost no
+    # tensors - 11 MB of Flash-Next's 83.8 GB - so statting only the named file valued the
+    # weights at essentially nothing, and everything that was really weights fell into the
+    # "other" residual: 24.46 GB of a 31.9 GB card, 77%, which is the opposite of a breakdown.
+    _base, _idx, _parts = shard_key(model.name)
+    if _parts:
+        try:
+            file_size = sum(q.stat().st_size for q in model.parent.iterdir()
+                            if q.is_file() and q.suffix.lower() == ".gguf"
+                            and shard_key(q.name)[0] == _base)
+        except OSError:
+            pass
 
     # n-cpu-moe offloads a per-layer share of the experts, which cannot be costed from the
     # file alone (the expert weight fraction is not in the metadata). Say nothing rather
@@ -132,7 +176,11 @@ def _components(name: str, vendor: str, gpu_count: int) -> dict | None:
         return None
     return {"model_gb": model_gb, "kv_gb": kv_gb, "compute_gb": compute_gb,
             "reserve_gb": reserve_gb, "aux_gb": aux_gb,
-            "gpu_pct": gpu_pct, "ctx_total": ctx_total, "model_label": model.name}
+            "gpu_pct": gpu_pct, "ctx_total": ctx_total, "model_label": model.name,
+            # Raw weight bytes and the split multiplier, kept apart so the offloaded path can
+            # work backwards from measured VRAM to "how much of the model is actually here".
+            "model_total_gb": file_size / (1024 ** 3), "overhead_mul": overhead_mul,
+            "is_moe": bool(isinstance(g.get("experts"), int) and (g.get("experts") or 0) > 1)}
 
 
 def _cached_components(name: str, vendor: str, gpu_count: int) -> dict | None:
@@ -197,12 +245,48 @@ def breakdown(name: str, gpu) -> dict | None:
     if comps is None:
         return None
 
-    est = comps["model_gb"] + comps["kv_gb"] + comps["reserve_gb"] + comps["aux_gb"] + comps["compute_gb"]
-    # The allocation cannot exceed what the device measures for it. A wide overshoot means the
-    # model went to sleep, the respawn has not been re-ingested yet, or the geometry estimate
-    # is wrong — none of which a bar can distinguish from a truthful one, so show none.
+    fixed_gb = comps["kv_gb"] + comps["reserve_gb"] + comps["aux_gb"] + comps["compute_gb"]
+    est = comps["model_gb"] + fixed_gb
+
+    # The whole model cannot fit, so llama.cpp has put some of it in host RAM - and the argv
+    # does not say how much, because `--fit` decides that at load time and writes no ngl. This
+    # is precisely the case the meter exists for, so solve for the weights instead of bailing.
+    #
+    # It is sound because the unknown is only ever the PLACEMENT. The fixed costs are allocated
+    # at load from the context and the card count and do not move, so whatever else the device
+    # is holding is weights. Measurement supplies the one thing the config cannot, which is the
+    # opposite of guessing: nothing here is estimated that could have been measured.
     if est > total_gb * 1.02:
-        return None
+        resident_gb = kfd_process_vram_gb() or used_gb
+        weights_gb = resident_gb - fixed_gb
+        total_weights = comps["model_total_gb"]
+        if weights_gb <= 0.05 or total_weights <= 0:
+            return None
+        on_gpu_raw = weights_gb / (comps["overhead_mul"] or 1.0)
+        host_gb = total_weights - on_gpu_raw
+        # Under a twentieth of a gigabyte apart is the estimate being pessimistic about a model
+        # that did fit, not a spill worth drawing a second bar for.
+        if host_gb <= 0.05:
+            return None
+        gpu_pct = max(0, min(100, int(round(100.0 * on_gpu_raw / total_weights))))
+        free_gb = max(0.0, total_gb - used_gb)
+        return {
+            "total_gb": total_gb, "used_gb": used_gb, "free_gb": free_gb,
+            "subtitle": "%s @ %s, as loaded" % (comps["model_label"],
+                                                autoconfig.format_ctx(comps["ctx_total"])),
+            "segments": _segments(weights_gb, comps["kv_gb"],
+                                  comps["reserve_gb"] + comps["aux_gb"], comps["compute_gb"],
+                                  max(0.0, used_gb - resident_gb), free_gb, total_gb,
+                                  gpu_pct=gpu_pct, ctx_total=comps["ctx_total"]),
+            "weights_split": {
+                "total_gb": total_weights, "gpu_gb": on_gpu_raw, "host_gb": host_gb,
+                "gpu_pct": 100.0 * on_gpu_raw / total_weights,
+                "host_pct": 100.0 * host_gb / total_weights,
+                "is_moe": comps["is_moe"], "offload_kind": "", "n_cpu_moe": 0,
+                "measured": True,
+            },
+            "raw": dict(comps, scale=1.0, measured_resident_gb=resident_gb),
+        }
     scale = 1.0
     if est > used_gb:
         if used_gb < est * 0.85:
