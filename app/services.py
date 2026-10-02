@@ -830,6 +830,12 @@ _RE_TG = re.compile(r"n_gen\s*=\s*(\d+),\s*tg\s*=\s*([\d.]+) t/s"
 _RE_PP = re.compile(r"prompt processing, n_tokens\s*=\s*(\d+), progress\s*=\s*([\d.]+), "
                     r"t\s*=\s*[\d.]+ s / ([\d.]+) tokens per second")
 _RE_TASK = re.compile(r"task\s+(\d+)\s*\|")
+# Slot occupancy, straight from the log. A task is in flight between its launch line and its
+# release line, which is all that is needed to decide whether anything is running:
+#   ... I slot launch_slot_: id  2 | task 11269 | processing task, is_child = 0
+#   ... I slot      release: id  2 | task 11269 | stop processing: n_tokens = 83416, truncated = 0
+_RE_LAUNCH = re.compile(r"launch_slot_:\s*id\s+(\d+)\s*\|\s*task\s+(\d+)")
+_RE_RELEASE = re.compile(r"release:\s*id\s+(\d+)\s*\|\s*task\s+(\d+)")
 
 # One read per container per interval, shared by every caller in that window. The card polls
 # every 2 s and reading a log tail is the expensive half, so this keeps a burst of renders from
@@ -847,6 +853,27 @@ _GEN_EMA_ALPHA = 0.4       # smoothing for the token-delta rate; raw 500 ms delt
 # the first seconds of a reply looking like it was still reading the prompt.
 _speed_prev: dict[str, tuple[float, int, int | None, bool]] = {}
 _gen_ema: dict[str, float] = {}      # smoothed token-delta rate, per backend
+
+# /slots is the ONLY llama endpoint this app must not poll while a model is idle. It is served as
+# a task on the server's own queue, which is the same queue the idle detector watches, so polling
+# it both resets `--sleep-idle-seconds` and wakes an already-sleeping model. Measured on an
+# R9700 against a 20 s threshold: polling /slots every 500 ms held VRAM at 25.63 GiB for 45 s and
+# it never slept, and polling it once asleep took VRAM straight back from 22.51 to 25.61 GiB.
+# /health and /props both slept normally under the same polling, and /v1/models is router state
+# that is never proxied to the child, so those three are safe at any rate.
+#
+# So occupancy comes from the log instead, and /slots is touched only while a task is genuinely
+# in flight - at which point the model was never going to sleep anyway, so the poll is free.
+_PROPS_TTL = 60.0                    # n_ctx and slot count only change when a model reloads
+# Both of these are keyed by "container/model", not container alone: the router swaps models
+# under one container, and a 128k context read from the model before the swap must not be shown
+# against the one after it.
+_props_cache: dict[str, tuple[float, dict]] = {}
+# Last context figures seen while busy, so the readout survives going idle without a /slots read.
+_last_ctx: dict[str, tuple[int, int]] = {}
+# A task the log still calls open but /slots has reported finished. Remembering it stops a
+# missing release line - a crash, or a tail that scrolled - from polling /slots forever.
+_settled_task: dict[str, int] = {}
 
 # Rolling generation-speed history for the dashboard sparkline. 240 samples at the hero's 500 ms
 # poll is about two minutes, which is long enough to see a request start, run and finish.
@@ -896,19 +923,51 @@ async def _slot_state(container_name: str, internal_port: int, model_id: str) ->
         return {}
 
 
-def _rates_from_log(name: str, task_id: int | None) -> dict:
-    """Throughput from the current run's log tail, split by WHICH request it describes.
+async def _props_state(container_name: str, internal_port: int, model_id: str) -> dict:
+    """Static per-load facts: the real n_ctx, the slot count, and whether the model is asleep.
 
-    Every timing line names its task, and /slots reports the task a busy slot is working on. Tying
-    the two together is what makes the difference between "reading the prompt at 1,985 tok/s" and
-    a stale number from the request before it. An earlier version ignored the task id and reported
-    the previous run's rates - and its finished 100% progress bar - as if they were current.
+    Safe to poll at any rate - see the note by _PROPS_TTL. This is also the only honest source
+    for the context size: /v1/models reports the REQUESTED --ctx-size from the child's argv
+    (386000 on Qwen3.8-27B-UD-Q4_K_M here) while --fit may have settled on far less (128768).
+    """
+    key = f"{container_name}/{model_id}"
+    cached = _props_cache.get(key)
+    if cached and (time.time() - cached[0]) < _PROPS_TTL:
+        return cached[1]
+    out: dict = {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, read=2.0)) as client:
+            r = await client.get(f"http://{container_name}:{internal_port}/props",
+                                 params={"model": model_id})
+        if r.status_code == 200:
+            d = r.json()
+            gen = d.get("default_generation_settings") or {}
+            out = {"n_ctx": int(gen.get("n_ctx") or 0),
+                   "total_slots": int(d.get("total_slots") or 0),
+                   "is_sleeping": bool(d.get("is_sleeping"))}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        out = {}
+    _props_cache[key] = (time.time(), out)
+    return out
+
+
+def _rates_from_log(name: str) -> dict:
+    """Occupancy and throughput from the current run's log tail.
+
+    Two things come out of one read. `open_task` is the newest task that has a launch line and no
+    matching release, which is how this app knows whether anything is running WITHOUT asking
+    /slots and waking the model. And the rates, split by WHICH request they describe: every timing
+    line names its task, so tying them to the open task is the difference between "reading the
+    prompt at 1,985 tok/s" and a stale number from the request before it. An earlier version
+    ignored the task id and reported the previous run's rates - and its finished 100% progress
+    bar - as if they were current.
 
     Returns rates for the live task (cur_*) and, separately, the most recent of any task (last_*),
     which is what the card shows, dimmed, while the model sits idle.
     """
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
-           "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": ""}
+           "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
+           "open_task": None, "open_slot": None}
     # A wide tail, then the router's own chatter removed. It has to be both. While a slot
     # generates it logs a timing line only every ~3 s, so a long reply buries the
     # prompt-processing lines from the start of that same request; and in router mode llama.cpp
@@ -920,7 +979,30 @@ def _rates_from_log(name: str, task_id: int | None) -> dict:
     ok, text = container_logs(name, tail=1200, current_run_only=True)
     if not ok:
         return out
-    for line in reversed([ln for ln in text.splitlines() if "proxy_reques" not in ln]):
+    lines = [ln for ln in text.splitlines() if "proxy_reques" not in ln]
+
+    # Oldest first, pairing launches with releases per slot. Whatever is still unpaired at the end
+    # is in flight. Sound within one window: a release is always newer than its own launch, so a
+    # launch that is in the window can only be unpaired because the task really is still running.
+    # Release lines with no launch in the window are from before it and are simply ignored.
+    open_tasks: dict[int, int] = {}
+    for line in lines:
+        m = _RE_LAUNCH.search(line)
+        if m:
+            open_tasks[int(m.group(1))] = int(m.group(2))
+            continue
+        m = _RE_RELEASE.search(line)
+        if m:
+            slot_id, tid = int(m.group(1)), int(m.group(2))
+            if open_tasks.get(slot_id) == tid:
+                del open_tasks[slot_id]
+    if open_tasks:
+        # Several slots can run at once; the newest task is the one the panel follows.
+        slot_id = max(open_tasks, key=lambda s: open_tasks[s])
+        out["open_slot"], out["open_task"] = slot_id, open_tasks[slot_id]
+
+    task_id = out["open_task"]
+    for line in reversed(lines):
         m_task = _RE_TASK.search(line)
         if not m_task:
             continue
@@ -959,20 +1041,49 @@ async def inference_speed(container_name: str, internal_port: int | None,
         return cached[1]
 
     model_id = loaded_model.split(",")[0].strip()
-    slot = await _slot_state(container_name, internal_port, model_id)
-    busy = bool(slot.get("is_processing"))
-    task_id = slot.get("id_task")
-    task_id = int(task_id) if isinstance(task_id, (int, float)) else None
+
+    # The log read comes FIRST now, because it is what decides whether /slots may be touched.
     cached_rates = _rates_cache.get(container_name)
     if cached_rates and (time.time() - cached_rates[0]) < _RATES_TTL:
         r = cached_rates[1]
     else:
-        r = await asyncio.to_thread(_rates_from_log, container_name, task_id if busy else None)
+        r = await asyncio.to_thread(_rates_from_log, container_name)
         _rates_cache[container_name] = (time.time(), r)
 
+    # Only ask /slots when a task is actually in flight. An idle model must be left alone or it
+    # can never sleep, and asking would wake it outright.
+    slot: dict = {}
+    open_task = r["open_task"]
+    if open_task is None:
+        # Nothing in flight. Drop any settled-task marker here rather than letting it persist:
+        # task ids restart from 1 when the router reloads a child, so a marker left over from a
+        # previous life could collide with a genuine new task and silence one request's readout.
+        _settled_task.pop(container_name, None)
+    elif _settled_task.get(container_name) != open_task:
+        slot = await _slot_state(container_name, internal_port, model_id)
+        if not slot.get("is_processing"):
+            # /slots is authoritative. Record the disagreement so a release line that never
+            # arrived does not keep this backend awake for the rest of the process's life.
+            _settled_task[container_name] = open_task
+            slot = {}
+    busy = bool(slot.get("is_processing"))
+    task_id = slot.get("id_task")
+    task_id = int(task_id) if isinstance(task_id, (int, float)) else None
+
     ctx_used = int(slot.get("n_prompt_tokens") or 0)
+    ctx_total = int(slot.get("n_ctx") or 0)
     processed = int(slot.get("n_prompt_tokens_processed") or 0)
     cached_tok = int(slot.get("n_prompt_tokens_cache") or 0)
+    if busy:
+        _last_ctx[f"{container_name}/{model_id}"] = (ctx_used, ctx_total)
+    else:
+        # Idle, and /slots was deliberately not read. The last figures seen while busy are the
+        # honest ones to show: that KV cache is still resident, so it really is the context in
+        # use. ctx_total comes from /props, which costs the sleep timer nothing.
+        ctx_used, ctx_total = _last_ctx.get(f"{container_name}/{model_id}", (0, 0))
+        if not ctx_total:
+            ctx_total = int((await _props_state(
+                container_name, internal_port, model_id)).get("n_ctx") or 0)
     # Tokens decoded so far for the task in this slot, and the only honest "has generation
     # started" signal. n_prompt_tokens USED to be the prompt length; in current builds it counts
     # the prompt plus everything decoded since, so a progress fraction built from it FALLS as the
@@ -1036,7 +1147,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
         prefill_tps=prefill_tps, prefill_pct=prefill_pct,
-        ctx_used=ctx_used, ctx_total=int(slot.get("n_ctx") or 0), ctx_cached=cached_tok,
+        ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=cached_tok,
         live=busy,
     )
     _speed_cache[container_name] = (time.time(), out)
