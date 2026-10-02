@@ -1501,6 +1501,10 @@ def analyze(*,
     # brand-new section gets a conservative default.
     _saved_spec = match_spec_profile(current_section)
     _spec_key = (spec_profile or "").strip()
+    # An explicitly saved `ngl = 0` means this section runs on a CPU backend on purpose. Read it
+    # here and act on it at the end, once `values` exists. Only an explicit zero counts: an
+    # absent ngl is an unconfigured section, which autoconfig SHOULD size.
+    _cpu_pinned = ((current_section or {}).get("ngl") or "").strip() == "0"
     # A model can carry its own MTP layers, in which case llama.cpp drafts against the target
     # file and needs no separate head at all: the log says "creating MTP draft context against
     # the target model" and nothing extra is loaded. `nextn_predict_layers` is how that is
@@ -2355,6 +2359,38 @@ def analyze(*,
     # — the current section — and Save writes it straight back. The diff would promise
     # "n-cpu-moe: '6' -> unset" while nothing changed. Fill has to be told what to clear.
     displaced = sorted(k for k in _displaces if k not in values)
+
+    # A section pinned to the CPU is not autoconfig's to size. Everything above fits against
+    # VRAM, and callers drop backends reporting none (the _sized filter), so a CPU-only section
+    # gets planned as though it were headed for a GPU. Applying that is actively harmful rather
+    # than merely wrong: the three voice sections here are deliberately `ngl = 0` with an 8192
+    # context and `reasoning = off`, and autoconfig wanted ngl 999, ctx-size 262144 and
+    # reasoning on. That would break the Home Assistant voice pipeline, where reasoning on
+    # costs 330-940 chars of thinking before the model answers and the entire point of those
+    # sections is to leave the GPUs alone for llama.cpp.
+    #
+    # `ngl = 0` is an explicit statement of intent, honoured the same way a missing spec-type is
+    # treated as a deliberate opt-out rather than something to re-propose. The saved domain keys
+    # are echoed verbatim so Fill is a no-op instead of a regression, and the reason is stated.
+    if _cpu_pinned:
+        _keep_model = values.get("model", "")
+        values = {k: ((current_section or {}).get(k) or "").strip()
+                  for k in sorted(AUTOCONFIG_DOMAIN)}
+        values = {k: v for k, v in values.items() if v}
+        values["ngl"] = "0"
+        # `model` is outside AUTOCONFIG_DOMAIN (it is the section's identity, not a knob), so it
+        # has to be carried across explicitly or the panel reads as proposing to blank it.
+        if _keep_model:
+            values["model"] = _keep_model
+        minimal = dict(values)
+        displaced = []
+        current_diff = {}
+        quirks.append(
+            "`ngl = 0`, so this section is pinned to the CPU and autoconfig has left it alone. "
+            "The recommendations above are all sized against VRAM, which does not apply here: "
+            "applying them would move the model onto a GPU and change its context and reasoning "
+            "settings. Tune a CPU section by hand, or give `ngl` a GPU value first."
+        )
 
     # A key we set but never declared would escape both the diff and Fill's clearing, which is
     # how the "Save does nothing" bug worked. Make it visible instead of silent.

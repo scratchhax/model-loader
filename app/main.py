@@ -1482,8 +1482,19 @@ def _predicted_vram_gb(section: str) -> float | None:
 
 @app.get("/config/section/{name}/autoconfig", response_class=HTMLResponse)
 async def config_autoconfig(request: Request, name: str, preset: str = "",
-                            sessions: int = 1, spec: str = "", vision: str = "") -> HTMLResponse:
+                            sessions: int = 0, spec: str = "", vision: str = "") -> HTMLResponse:
     import json as _json
+    # 0 means the UI did not specify, so fall back to what is SAVED rather than to 1. Defaulting
+    # to 1 made every fresh open of the panel propose resetting a `parallel = 3` section to one
+    # slot, and Fill+Save would then quarter its per-conversation context without anyone
+    # choosing that - the same silent-downgrade trap _preset_for_saved_ctx exists to prevent for
+    # ctx-size. The panel's own buttons always pass sessions explicitly, so they still
+    # round-trip whatever is on screen.
+    if not sessions:
+        try:
+            sessions = int(str((ini.get_section(name) or {}).get("parallel") or "1").strip())
+        except (TypeError, ValueError):
+            sessions = 1
     sessions = max(1, min(int(sessions or 1), 8))
 
     gguf_path, model_rel, rel = _resolve_section_gguf(name)
