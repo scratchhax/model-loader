@@ -449,7 +449,17 @@ class FitRow:
                              # is how a table ends up approving a context that cannot load.
     total_gb: float          # model_gb + kv_gb + compute
     fits: bool
-    free_gb: float
+    free_gb: float           # what is left of the card after EVERYTHING below, the two
+                             # off-budget costs included. This was vram - total_gb, which
+                             # ignored reserve_gb and aux_gb and so overstated the headroom by
+                             # more than a gigabyte on a two-card box. The fit maths had always
+                             # charged them - see `budget` - only the report had not.
+    # The two costs taken off `budget` before any context is fitted, carried here so the panel
+    # can account for every byte of the card rather than drawing a bar that does not add up.
+    # Same reasoning as compute_gb above: an invisible cost is how a table ends up approving a
+    # context that cannot load.
+    reserve_gb: float = 0.0  # driver + runtime context, _RESERVE_PER_GPU per card
+    aux_gb: float = 0.0      # vision projector + its compute, draft head, vision ubatch extra
     offload_kind: str = ""   # "" | "cpu-moe" | "n-cpu-moe"
     n_cpu_moe: int = 0       # populated when offload_kind == "n-cpu-moe"
     gpu_pct: int = 100       # share of the model's WEIGHTS resident on the GPU, 0-100.
@@ -1663,12 +1673,16 @@ def analyze(*,
             # Reported totals include the compute buffer on every card, so the number in the
             # table is what the load will actually occupy rather than an optimistic subset.
             total = gpu_model_gb + kv_gb + comp_gb * gpu_count
+            _reserve = _RESERVE_PER_GPU * gpu_count
             rows.append(FitRow(
                 ctx=per_session_ctx, total_ctx=total_ctx,
                 model_gb=round(gpu_model_gb, 2), kv_gb=round(kv_gb, 2),
                 compute_gb=round(comp_gb * gpu_count, 2),
                 total_gb=round(total, 2), fits=fits,
-                free_gb=round(float(b["vram_gb"]) - total, 2),
+                # Charge the off-budget costs here too, so free_gb and the bar built from it
+                # describe the whole card. `budget` above already subtracted both.
+                free_gb=round(float(b["vram_gb"]) - total - _reserve - mmproj_vram_gb, 2),
+                reserve_gb=round(_reserve, 2), aux_gb=round(mmproj_vram_gb, 2),
                 offload_kind=offload_kind, n_cpu_moe=n_cm,
                 gpu_pct=(round(100.0 * gpu_model_gb / model_gb) if model_gb > 0 else 100),
             ))
