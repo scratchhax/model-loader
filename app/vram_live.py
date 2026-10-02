@@ -285,7 +285,8 @@ def breakdown(name: str, gpu) -> dict | None:
                 "is_moe": comps["is_moe"], "offload_kind": "", "n_cpu_moe": 0,
                 "measured": True,
             },
-            "raw": dict(comps, scale=1.0, measured_resident_gb=resident_gb),
+            "raw": dict(comps, scale=1.0, measured_resident_gb=resident_gb,
+                        drawn_model_gb=weights_gb),
         }
     scale = 1.0
     if est > used_gb:
@@ -305,7 +306,7 @@ def breakdown(name: str, gpu) -> dict | None:
         "subtitle": "%s @ %s, as loaded" % (comps["model_label"], autoconfig.format_ctx(comps["ctx_total"])),
         "segments": _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb,
                               total_gb, gpu_pct=comps["gpu_pct"], ctx_total=comps["ctx_total"]),
-        "raw": dict(comps, scale=scale),
+        "raw": dict(comps, scale=scale, drawn_model_gb=model_gb),
     }
 
 
@@ -373,13 +374,25 @@ def ram_breakdown(name: str, cont) -> dict | None:
 def per_card(vb: dict, cards: list) -> dict[int, dict]:
     """Split a pooled breakdown into per-card meters, keyed by card index.
 
-    Known exactly per card: the driver reserve (one per card) and the non-split extras, which
-    land on the main GPU. What is not known is where llama placed each layer — the sampler
-    sees usage, not placement — so the weights+KV+compute pool is apportioned across the
-    cards by their measured usage and drawn as ONE combined segment per card. Naming it
-    "weights + KV + compute" is honest about what it is; inventing a per-card split the
-    device never reported is not. Each card's segments still sum to that card, and the free
-    share stays measured rather than modelled.
+    Three of the four costs are known per card and only one is not, so they are itemised
+    rather than lumped:
+
+      reserve  - one driver/runtime context per card, exact
+      aux      - projector and draft head, which pin to the main GPU, exact
+      compute  - graph scratch, allocated IDENTICALLY on every card by construction
+                 (compute_gb is a per-card figure multiplied by the card count), so dividing
+                 it back out is exact, not apportioned
+      weights  - the only unknown: llama reports usage, not which card holds which layer
+      KV       -
+
+    Weights and KV therefore share what is left of each card's measured usage, split by the
+    POOLED weights:KV ratio. That is an apportionment and is labelled as one, but it is a
+    defensible one: both scale with the number of layers a card holds, so a card with more
+    layers holds proportionally more of each. It beats the previous single
+    "weights + KV + compute" lump, which was honest but answered "is this card full" when the
+    question is "full of what".
+
+    Each card's segments still sum to that card, and the free share stays measured.
     """
     out: dict[int, dict] = {}
     if not vb or not cards:
@@ -388,19 +401,30 @@ def per_card(vb: dict, cards: list) -> dict[int, dict]:
         return {0: vb}
 
     raw = vb["raw"]
-    pool = (raw["model_gb"] + raw["kv_gb"] + raw["compute_gb"]) * raw["scale"]
-    fixed = []
+    n = len(cards)
+    scale = raw["scale"]
+    weights_pool = raw.get("drawn_model_gb", raw["model_gb"] * scale)
+    kv_pool = raw["kv_gb"] * scale
+    wk_pool = weights_pool + kv_pool
+    w_frac = (weights_pool / wk_pool) if wk_pool > 0 else 1.0
+    compute_each = raw["compute_gb"] * scale / n
+    fixed, overhead = [], []
     for i, c in enumerate(cards):
         # Card 0 also carries the projector/draft-head allocation; a card's own overhead can
         # never exceed what is measured on it.
-        want = raw["reserve_gb"] + (raw["aux_gb"] if i == 0 else 0.0)
-        fixed.append(min(want * raw["scale"], c.vram_used_gb))
+        want = raw["reserve_gb"] / n + (raw["aux_gb"] if i == 0 else 0.0)
+        ov = min(want * scale, c.vram_used_gb)
+        overhead.append(ov)
+        fixed.append(min(ov + compute_each, c.vram_used_gb))
     slack = [max(0.0, c.vram_used_gb - fixed[i]) for i, c in enumerate(cards)]
     slack_sum = sum(slack)
     for i, c in enumerate(cards):
-        share = slack[i] / slack_sum if slack_sum > 0 else 1.0 / len(cards)
-        alloc = min(pool * share, max(0.0, c.vram_used_gb - fixed[i]))
-        other_gb = max(0.0, c.vram_used_gb - fixed[i] - alloc)
+        share = slack[i] / slack_sum if slack_sum > 0 else 1.0 / n
+        alloc = min(wk_pool * share, max(0.0, c.vram_used_gb - fixed[i]))
+        model_gb = alloc * w_frac
+        kv_gb = alloc - model_gb
+        compute_gb = min(compute_each, max(0.0, c.vram_used_gb - overhead[i]))
+        other_gb = max(0.0, c.vram_used_gb - overhead[i] - compute_gb - alloc)
         free_gb = max(0.0, c.vram_total_gb - c.vram_used_gb)
         card_total = float(c.vram_total_gb or c.vram_used_gb)
         if card_total <= 0:
@@ -409,13 +433,20 @@ def per_card(vb: dict, cards: list) -> dict[int, dict]:
             "total_gb": card_total, "used_gb": c.vram_used_gb, "free_gb": free_gb,
             "subtitle": vb["subtitle"],
             "segments": [s for s in [
-                {"key": "model", "label": "weights + KV + compute", "gb": round(alloc, 2),
-                 "pct": 100.0 * alloc / card_total,
-                 "note": "this card's share of the layer-split allocation, apportioned by usage"},
-                {"key": "overhead", "label": "overhead", "gb": round(fixed[i], 2),
-                 "pct": 100.0 * fixed[i] / card_total,
+                {"key": "model", "label": "model weights", "gb": round(model_gb, 2),
+                 "pct": 100.0 * model_gb / card_total,
+                 "note": "this card's share of the layer-split weights, apportioned by usage: "
+                         "llama reports what a card holds, not which layers it holds"},
+                {"key": "ctx", "label": "context (KV)", "gb": round(kv_gb, 2),
+                 "pct": 100.0 * kv_gb / card_total,
+                 "note": "this card's share of the KV cache, apportioned the same way"},
+                {"key": "overhead", "label": "overhead", "gb": round(overhead[i], 2),
+                 "pct": 100.0 * overhead[i] / card_total,
                  "note": "driver and runtime context"
                          + (", plus the projector and draft head, which pin to this card" if i == 0 else "")},
+                {"key": "compute", "label": "compute buffers", "gb": round(compute_gb, 2),
+                 "pct": 100.0 * compute_gb / card_total,
+                 "note": "graph scratch, allocated identically on every card"},
                 {"key": "other", "label": "other", "gb": round(other_gb, 2),
                  "pct": 100.0 * other_gb / card_total,
                  "note": "in the measured total but not in the estimate"},

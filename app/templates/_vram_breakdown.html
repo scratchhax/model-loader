@@ -23,6 +23,9 @@
     vb_compact - true: bar only, for the GPU strip's per-card row (no header, no legend, and
                  free is left to the track showing through rather than drawn as a segment)
     vb_hot     - true in compact mode: tint the free track amber, the strip's near-full cue
+    vb_legend  - draw the legend even in compact mode. The per-card rows on the overview use
+                 this: the thin bar alone answers "is this card full", and the question people
+                 actually ask is "full of what"
 #}
 {% if vb %}
 {% set seg_class = {
@@ -71,9 +74,9 @@
    between the card bar and the legend because it belongs under the bar it explains. Only the
    recommendation carries weights_split today; a caller that knows a load is offloading could
    set it on a live breakdown too. #}
-{% if vb.weights_split %}{% include "_vram_weights_split.html" %}{% endif %}
+{% if vb.weights_split and not vb_compact %}{% include "_vram_weights_split.html" %}{% endif %}
 
-{% if not vb_compact %}
+{% if not vb_compact or vb_legend %}
 {# Two columns, not three. The `sm:` breakpoint measures the VIEWPORT, but this partial
    is drawn in containers of very different widths - the autoconfig panel is full width
    while the GPU strip column is about 360px - so on a wide screen the strip was still
