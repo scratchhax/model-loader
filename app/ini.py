@@ -413,7 +413,7 @@ class SectionView:
     client_snippets: list = field(default_factory=list)  # [{name, base_url, api_key, curl, openai_py, env, json}]
 
 
-def _is_companion(filename: str) -> bool:
+def _is_companion(filename: str, size_bytes: int | None = None) -> bool:
     """Return True for GGUFs that are companion artefacts, not standalone models.
     These are referenced from a main section (via `mmproj = ...`, `model-draft = ...`, etc.)
     and should not be offered as their own configurable ini sections.
@@ -421,13 +421,16 @@ def _is_companion(filename: str) -> bool:
     Covers:
       - mmproj files (multimodal projectors — vision, audio, etc.)
       - draft heads for speculative decoding (Qwen3 MTP, generic -draft-)
+
+    Pass size_bytes whenever the caller already has the path. A full quant whose name contains
+    `-MTP-` is a model, not a head, and only its size tells them apart - see _looks_like_draft.
     """
     n = filename.lower()
     if "mmproj" in n:
         return True
     # Import lazily to avoid circular: autoconfig imports ini for ALL_KNOWN_KEYS.
     from .autoconfig import _looks_like_draft
-    return _looks_like_draft(filename)
+    return _looks_like_draft(filename, size_bytes)
 
 
 def _stems_present() -> dict[str, str]:
@@ -439,7 +442,8 @@ def _stems_present() -> dict[str, str]:
     try:
         for p in root.iterdir():
             if p.is_file() and p.suffix.lower() == ".gguf":
-                if _is_companion(p.name):
+                from .autoconfig import file_size_or_none
+                if _is_companion(p.name, file_size_or_none(p)):
                     continue
                 base, _, _ = _sk(p.name)
                 stem = base[:-5] if base.lower().endswith(".gguf") else base
@@ -451,7 +455,8 @@ def _stems_present() -> dict[str, str]:
                     continue
                 for sp in kids:
                     if sp.is_file() and sp.suffix.lower() == ".gguf":
-                        if _is_companion(sp.name):
+                        from .autoconfig import file_size_or_none
+                        if _is_companion(sp.name, file_size_or_none(sp)):
                             continue
                         base, _, _ = _sk(sp.name)
                         stem = base[:-5] if base.lower().endswith(".gguf") else base
