@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
 from . import telemetry
-from . import bench, db, gguf_meta, hf, hw, ini, services
+from . import bench, db, gguf_meta, hf, hw, ini, services, vram_live
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -261,20 +261,42 @@ async def _hero_context() -> dict:
             "slot_columns": services.slot_columns(len(sp.slots) if sp else 0)}
 
 
+def _solo_backend() -> str:
+    """The single running backend that sees GPUs, or "" when zero or several do.
+
+    The live VRAM breakdown estimates the components of ONE backend's load against the card,
+    so several GPU-bearing backends means the residual segment would silently absorb the
+    second one's model - the meter falls back to the plain measured bar instead. Backends
+    without GPU cards (a CPU build, a voice pipeline) cannot put anything on the device, so
+    they do not break sole ownership, and the "other" residual would catch them if they did.
+    """
+    gpu_backends = [n for n in services._effective_container_names()
+                    if (st := hw.stats_for(n)).ok and st.gpu and st.gpu.cards]
+    return gpu_backends[0] if len(gpu_backends) == 1 else ""
+
+
 def _gpu_strip_context() -> dict:
     """Per-card stats plus per-card sparklines, for whichever backend has GPUs.
 
     Per card on purpose: llama.cpp places each layer on one device, and the allocations that are
     not layer-split all land on the main GPU, so a pooled bar can read comfortable while one card
     is full.
+
+    When exactly one backend owns the cards, each card's bar is additionally split into the
+    live part-to-whole breakdown (vram_live) - the same meter the autoconfig panel draws for
+    the recommendation, built here from what was ACTUALLY loaded against measured usage.
     """
     cards: list = []
     history: dict[int, dict] = {}
+    card_breakdowns: dict[int, dict] = {}
+    solo = _solo_backend()
     for name in services._effective_container_names():
         st = hw.stats_for(name)
         if not (st.ok and st.gpu and st.gpu.cards):
             continue
         cards = st.gpu.cards
+        if name == solo:
+            card_breakdowns = vram_live.per_card(vram_live.breakdown(name, st.gpu), cards)
         pts = hw.history_for(name)
         if pts:
             span_s = (pts[-1].ts - pts[0].ts) if len(pts) > 1 else 0.0
@@ -291,7 +313,7 @@ def _gpu_strip_context() -> dict:
                     "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
                 }
         break
-    return {"cards": cards, "gpu_history": history}
+    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1665,6 +1687,9 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
             "backend": rec.recommended_backend, "ctx": rec.recommended_ctx,
             "total_ctx": _rec_row.total_ctx, "segments": _segments,
             "weights_split": weights_split,
+            "subtitle": "%s at %s%s" % (
+                rec.recommended_backend, autoconfig.format_ctx(rec.recommended_ctx),
+                " \u00d7 %d" % rec.n_sessions if rec.n_sessions > 1 else ""),
         }
     all_ctx = sorted({r.ctx for p in rec.plans for r in p.rows})
     # pick a compact set: some small, some near the max/native
@@ -1923,9 +1948,24 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     # Throughput rides along with the rest of the 2 s poll rather than having its own timer:
     # one refresh, one consistent picture, and no second interval to reason about.
     speed = await services.inference_speed(name, b.internal_port, b.loaded_model)
+    # Live "where the VRAM goes" meter, from what this backend actually loaded against
+    # measured usage. Only when this backend owns the cards alone (see _solo_backend);
+    # None otherwise, and the card draws no meter. A backend with no GPU gets the RAM
+    # variant instead: the whole is its own process footprint, not a shared device, so
+    # there is no sole-ownership question to fail.
+    st = _stats_by_name().get(name)
+    vram_breakdown = None
+    vb_heading = None
+    if st and st.ok:
+        if st.gpu and _solo_backend() == name:
+            vram_breakdown = vram_live.breakdown(name, st.gpu)
+        elif not st.gpu and st.container:
+            vram_breakdown = vram_live.ram_breakdown(name, st.container)
+            if vram_breakdown:
+                vb_heading = "Where the RAM goes"
     return templates.TemplateResponse("_container_dashboard.html", {
         "request": request, "b": b, "stats": _stats_by_name(), "perf": _perf_by_name(),
-        "speed": speed,
+        "speed": speed, "vram_breakdown": vram_breakdown, "vb_heading": vb_heading,
     })
 
 

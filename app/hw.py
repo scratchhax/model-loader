@@ -72,6 +72,12 @@ class ContainerRuntimeStats:
     cpu_pct: float
     mem_used_gb: float
     mem_limit_gb: float
+    # For backends whose model does not live on a GPU: the model is mmap'd, so container RSS
+    # (which subtracts cache, correctly for its own purposes) reads megabytes for a model
+    # measured in tens of gigabytes. These two come from /proc inside the container and are
+    # what the live RAM meter needs. 0 when no process holds the loaded model.
+    proc_rss_gb: float = 0.0        # RSS of the llama-server process that loaded the model
+    model_resident_gb: float = 0.0  # resident share of the GGUF's own mmap (part of the RSS)
 
 
 @dataclass
@@ -427,6 +433,53 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
     )
 
 
+def _model_proc_mem(container) -> tuple[float, float]:
+    """(process RSS GiB, resident share of the model file's mmap GiB), or (0.0, 0.0).
+
+    The CPU meter needs exactly these two numbers and nothing else carries them. llama.cpp
+    mmaps GGUFs by default, so the weights live in the page cache: container RSS reads
+    megabytes for a model measured in tens of gigabytes, and there is no GPU to charge them
+    to. /proc is the only view that separates the model's own resident pages (file-backed,
+    evictable, shared with anyone else mapping the same file) from the process's anonymous
+    memory (KV, compute buffers, allocator).
+
+    The process is found by matching the model PATH in its cmdline rather than by pgrep on
+    a name: the router's children each carry the path they loaded, the router itself does
+    not, and the image's process layout is not something to assume. smaps sums the Rss of
+    every mapping of that exact path; several matches are summed (an identical model in two
+    respawns is not a thing, but two instances of it is).
+    """
+    from . import db  # late import: db is sqlite-only, but hw must not grow a dependency on it at load
+    path = (db.latest_server_config(container.name).get("model_path") or "").strip()
+    if not path or not path.startswith("/"):
+        return 0.0, 0.0
+    q = path.replace("'", "'\\''")
+    cmd = """m='%s'; rss=0; mm=0; \
+for d in /proc/[0-9]*; do \
+if tr '\\0' '\\n' < "$d/cmdline" 2>/dev/null | grep -qxF -- "$m"; then \
+r=$(awk '/^Rss:/{s+=$2}END{print s+0}' "$d/smaps_rollup" 2>/dev/null) || r=; \
+[ -n "$r" ] || continue; \
+f=$(awk -v m="$m" '/^[0-9a-f]/{cur=0;n="";for(i=6;i<=NF;i++)n=n (i>6?" ":"") $i;if(n==m)cur=1}/^Rss:/{if(cur)t+=$2+0}END{print t+0}' "$d/smaps" 2>/dev/null) || f=0; \
+rss=$((rss + r)); mm=$((mm + f)); \
+fi; done; \
+[ "$rss" -gt 0 ] && echo "$rss $mm" """ % q
+    try:
+        # sh -c, not the bare string: the SDK shlex-splits strings and execs them with no
+        # shell, which turns redirections and $() into argv and dies at 127.
+        r = container.exec_run(["sh", "-c", cmd], demux=False)
+    except DockerException:
+        return 0.0, 0.0
+    if r.exit_code != 0:
+        return 0.0, 0.0
+    try:
+        rss_kb, mm_kb = r.output.decode(errors="replace").split()[-2:]
+        rss = round(int(rss_kb) / (1024 ** 2), 2)
+        mm = round(int(mm_kb) / (1024 ** 2), 2)
+        return (rss, min(mm, rss))
+    except (ValueError, IndexError):
+        return 0.0, 0.0
+
+
 def _read_container_runtime(container) -> ContainerRuntimeStats | None:
     try:
         s = container.stats(stream=False)
@@ -446,11 +499,16 @@ def _read_container_runtime(container) -> ContainerRuntimeStats | None:
         cache_bytes = int(stats_sub.get("cache") or stats_sub.get("inactive_file") or 0)
         mem_used = max(0, int(mem.get("usage", 0)) - cache_bytes)
         mem_limit = int(mem.get("limit") or 0)
-        return ContainerRuntimeStats(
+        out = ContainerRuntimeStats(
             cpu_pct=round(cpu_pct, 1),
             mem_used_gb=round(mem_used / (1024 ** 3), 2),
             mem_limit_gb=round(mem_limit / (1024 ** 3), 1) if mem_limit else 0.0,
         )
+        # The /proc probe rides this thread rather than the 1 s GPU tick: it is only read for
+        # the RAM meter, and nothing needs a model's resident-set at 1 Hz. Cheap either way -
+        # a handful of file reads per matching pid, no tool call.
+        out.proc_rss_gb, out.model_resident_gb = _model_proc_mem(container)
+        return out
     except (KeyError, TypeError, ZeroDivisionError, ValueError):
         return None
 

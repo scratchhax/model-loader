@@ -41,11 +41,20 @@
       </div>
     </div>
 
-    {# VRAM bar. Amber past 92% because that is roughly where a further context bump stops fitting. #}
+    {# VRAM bar. Amber past 92% because that is roughly where a further context bump stops
+       fitting. When exactly one backend owns the cards, the bar is the live part-to-whole
+       breakdown (vram_live) instead of a single fill: the segments are what the loaded model
+       actually costs, the free track is measured, and every segment names itself and its
+       value in the title since a per-card row has no room for a legend. #}
+    {% set vb, vb_compact, vb_hot = card_breakdowns.get(c.index) if card_breakdowns else None, True, hot %}
+    {% if vb %}
+      {% include "_vram_breakdown.html" %}
+    {% else %}
     <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
       <div class="h-full transition-all duration-700 ease-out {% if hot %}bg-amber-400{% else %}bg-gradient-to-r from-sky-500 to-indigo-500{% endif %}"
            style="width: {{ pct }}%"></div>
     </div>
+    {% endif %}
 
     {% set hist = gpu_history.get(c.index) if gpu_history else None %}
     {% if hist %}

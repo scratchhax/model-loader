@@ -1,0 +1,87 @@
+{% from "_icons.html" import icon %}
+{#
+  Part-to-whole VRAM meter, shared by the autoconfig panel, the container cards and the GPU
+  strip so the palette is validated once and drawn identically everywhere.
+
+  Segment order is weights -> context -> overhead -> compute on purpose: it keeps emerald and
+  amber apart, the one adjacent pair the palette validator flags as weak for protanopia. The
+  four hues are sky-600 / emerald-600 / violet-600 / amber-600, which pass the lightness band,
+  chroma floor, CVD separation (worst adjacent dE 16.1), normal-vision floor and 3:1 surface
+  contrast against BOTH the light and dark panel surfaces - the dark steps are validated, not
+  flipped. Free is a neutral track, not a category, so it is exempt from the chroma floor;
+  "other" is the same argument - a residual bucket, neutral slate, one step above the track.
+
+  Identity never rests on colour: every segment is named with its value in the legend, so the
+  bar is readable in greyscale and by a colourblind reader. Values live in the legend rather
+  than inside the segments because an interior segment can be 1.5% of the width and an inline
+  label would be clipped. In compact mode there is no legend room, so every segment carries
+  its name and value in the title attribute instead. Text wears text tokens throughout; the
+  swatch beside it carries the colour.
+
+  Expects:
+    vb         - {total_gb, used_gb, free_gb, subtitle, segments: [{key, label, gb, pct, note}]}
+    vb_compact - true: bar only, for the GPU strip's per-card row (no header, no legend, and
+                 free is left to the track showing through rather than drawn as a segment)
+    vb_hot     - true in compact mode: tint the free track amber, the strip's near-full cue
+#}
+{% if vb %}
+{% set seg_class = {
+     'model':    'bg-sky-600',
+     'ctx':      'bg-emerald-600',
+     'overhead': 'bg-violet-600',
+     'compute':  'bg-amber-600',
+     'other':    'bg-slate-400 dark:bg-slate-500',
+     'free':     'bg-slate-300 dark:bg-slate-700',
+   } %}
+{% set vb_segments = vb.segments | rejectattr('key', 'equalto', 'free') | list if vb_compact else vb.segments %}
+{% if not vb_compact %}
+<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+  <h4 class="text-xs font-semibold inline-flex items-center gap-1.5">
+    {# true arg to default: the route passes vb_heading=None for the GPU meter, and an
+       explicit None is a value, not an absent variable. #}
+    {{ icon('cpu', 13) }} {{ vb_heading | default('Where the VRAM goes', true) }}
+    {% if vb.subtitle %}
+    <span class="font-normal text-slate-500 dark:text-slate-400">{{ vb.subtitle }}</span>
+    {% endif %}
+  </h4>
+  <div class="text-xs tabular-nums">
+    <span class="font-semibold">{{ '%.1f' % vb.used_gb }} GB</span>
+    <span class="text-slate-500 dark:text-slate-400">
+      of {{ '%.1f' % vb.total_gb }} GB &middot; {{ '%.1f' % vb.free_gb }} GB free
+    </span>
+  </div>
+</div>
+{% endif %}
+
+{# The 2px gaps are the surface showing through, which is what separates touching segments.
+   Square at the left, where the bar starts; 4px on the last segment's end. #}
+{% if vb_compact %}
+<div class="mt-2 flex h-2 w-full gap-[2px] overflow-hidden rounded-full {% if vb_hot %}bg-amber-950{% else %}bg-slate-800{% endif %}">
+{% else %}
+<div class="mt-1.5 flex h-5 w-full gap-[2px] rounded-r-[4px] bg-slate-200 dark:bg-slate-800">
+{% endif %}
+  {% for s in vb_segments %}
+  <div class="h-full {{ seg_class[s.key] }} {% if loop.last and not vb_compact %}rounded-r-[4px]{% endif %}"
+       style="width: {{ '%.3f' % s.pct }}%"
+       title="{{ s.label }}: {{ '%.2f' % s.gb }} GB ({{ '%.1f' % s.pct }}% of {{ '%.1f' % vb.total_gb }} GB) — {{ s.note }}"></div>
+  {% endfor %}
+</div>
+
+{# The weights-split spill bar (from PR #10): a second bar with a second denominator, drawn
+   between the card bar and the legend because it belongs under the bar it explains. Only the
+   recommendation carries weights_split today; a caller that knows a load is offloading could
+   set it on a live breakdown too. #}
+{% if vb.weights_split %}{% include "_vram_weights_split.html" %}{% endif %}
+
+{% if not vb_compact %}
+<div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-3">
+  {% for s in vb.segments %}
+  <div class="flex items-baseline gap-1.5" title="{{ s.note }}">
+    <span class="mt-[3px] h-2 w-2 shrink-0 rounded-sm {{ seg_class[s.key] }}"></span>
+    <span class="text-slate-600 dark:text-slate-300">{{ s.label }}</span>
+    <span class="ml-auto tabular-nums text-slate-500 dark:text-slate-400">{{ '%.2f' % s.gb }} GB</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endif %}

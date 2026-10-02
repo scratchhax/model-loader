@@ -435,6 +435,56 @@ def parse_baseline(cmd_args: list[str]) -> dict[str, str]:
     return out
 
 
+def model_geometry(summary: dict) -> dict:
+    """The KV-sizing facts carried in a GGUF summary, extracted once per model.
+
+    Bundled so the live meter (vram_live) is computed from exactly the same numbers as the
+    recommendation: an estimate re-derived by hand is how two views of one model start
+    disagreeing about what its context costs.
+    """
+    arch = (summary.get("arch") or "").lower()
+    m = summary.get("model") or {}
+    layers = int(m.get("block_count") or 0)
+    heads = int(m.get("attention_head_count") or 1)
+    embed = int(m.get("embedding_length") or 0)
+    head_dim = embed // heads if heads > 0 else 0
+    kv_heads = _kv_first_int(m.get("attention_head_count_kv"), default=heads)
+    native_ctx = int(m.get("context_length") or 0)
+    key_length = int(m.get("key_length")) if isinstance(m.get("key_length"), int) else None
+    value_length = int(m.get("value_length")) if isinstance(m.get("value_length"), int) else None
+    full_attention_interval = int(m.get("full_attention_interval")) if isinstance(m.get("full_attention_interval"), int) else None
+    ssm_state_size = int(m.get("ssm_state_size")) if isinstance(m.get("ssm_state_size"), int) else None
+    # Sliding-window attention parameters travel together and are threaded through every
+    # kv_cache_bytes call as one bundle. Absent for models that declare none, in which case
+    # kv_cache_bytes falls back to its previous behaviour.
+    swa = {
+        "sliding_window": m.get("sliding_window") if isinstance(m.get("sliding_window"), int) else None,
+        "sliding_window_pattern": m.get("sliding_window_pattern"),
+        "key_length_swa": m.get("key_length_swa") if isinstance(m.get("key_length_swa"), int) else None,
+        "value_length_swa": m.get("value_length_swa") if isinstance(m.get("value_length_swa"), int) else None,
+        "shared_kv_layers": m.get("shared_kv_layers") if isinstance(m.get("shared_kv_layers"), int) else None,
+        # Raw, not collapsed: which layers are global decides which head count applies.
+        "kv_heads_pattern": m.get("attention_head_count_kv"),
+    }
+    return {
+        "arch": arch, "m": m, "layers": layers, "heads": heads, "embed": embed,
+        "head_dim": head_dim, "kv_heads": kv_heads, "native_ctx": native_ctx,
+        "experts": m.get("expert_count"),
+        "key_length": key_length, "value_length": value_length,
+        "full_attention_interval": full_attention_interval,
+        "ssm_state_size": ssm_state_size, "swa": swa,
+    }
+
+
+def kv_gb_for_geometry(g: dict, total_ctx: int, bytes_per: float) -> float:
+    """KV cache GB for one geometry at a total (pooled) context. Same call the fit maths makes."""
+    return kv_cache_bytes(g["arch"], total_ctx, g["layers"], g["kv_heads"], g["head_dim"],
+                          bytes_per,
+                          key_length=g["key_length"], value_length=g["value_length"],
+                          full_attention_interval=g["full_attention_interval"],
+                          ssm_state_size=g["ssm_state_size"], **g["swa"]) / (1024 ** 3)
+
+
 # ---- recommendation ----
 
 @dataclass
@@ -1332,32 +1382,16 @@ def analyze(*,
     # shrinks below usability for real chat, and llama-server continuous batching
     # overhead starts dominating.
     n_sessions = max(1, min(int(n_sessions or 1), 8))
-    arch = (summary.get("arch") or "").lower()
-    m = summary.get("model") or {}
-    layers = int(m.get("block_count") or 0)
-    heads = int(m.get("attention_head_count") or 1)
-    embed = int(m.get("embedding_length") or 0)
-    head_dim = embed // heads if heads > 0 else 0
-    kv_heads = _kv_first_int(m.get("attention_head_count_kv"), default=heads)
-    native_ctx = int(m.get("context_length") or 0)
-    experts = m.get("expert_count")
+    g = model_geometry(summary)
+    arch, m, layers, heads, embed = g["arch"], g["m"], g["layers"], g["heads"], g["embed"]
+    head_dim, kv_heads, native_ctx = g["head_dim"], g["kv_heads"], g["native_ctx"]
+    experts = g["experts"]
     # explicit K/V lengths + hybrid markers (Qwen 3.5, Zamba, etc.)
-    key_length = int(m.get("key_length")) if isinstance(m.get("key_length"), int) else None
-    value_length = int(m.get("value_length")) if isinstance(m.get("value_length"), int) else None
-    full_attention_interval = int(m.get("full_attention_interval")) if isinstance(m.get("full_attention_interval"), int) else None
-    ssm_state_size = int(m.get("ssm_state_size")) if isinstance(m.get("ssm_state_size"), int) else None
-    # Sliding-window attention parameters travel together and are threaded through every
-    # kv_cache_bytes call as one bundle. Absent for models that declare none, in which case
-    # kv_cache_bytes falls back to its previous behaviour.
-    _swa = {
-        "sliding_window": m.get("sliding_window") if isinstance(m.get("sliding_window"), int) else None,
-        "sliding_window_pattern": m.get("sliding_window_pattern"),
-        "key_length_swa": m.get("key_length_swa") if isinstance(m.get("key_length_swa"), int) else None,
-        "value_length_swa": m.get("value_length_swa") if isinstance(m.get("value_length_swa"), int) else None,
-        "shared_kv_layers": m.get("shared_kv_layers") if isinstance(m.get("shared_kv_layers"), int) else None,
-        # Raw, not collapsed: which layers are global decides which head count applies.
-        "kv_heads_pattern": m.get("attention_head_count_kv"),
-    }
+    key_length = g["key_length"]
+    value_length = g["value_length"]
+    full_attention_interval = g["full_attention_interval"]
+    ssm_state_size = g["ssm_state_size"]
+    _swa = g["swa"]
 
     # Model VRAM depends on whether we'll be layer-splitting across multiple GPUs.
     # We check per-backend below; use single-GPU overhead as the base and apply the split

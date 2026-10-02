@@ -477,6 +477,29 @@ def server_configs_for(instances: list[str]) -> dict[str, dict]:
     return out
 
 
+def latest_server_config(backend: str) -> dict:
+    """The newest spawn recorded for a backend: {instance, alias, model_path, argv}.
+
+    {} when telemetry has never seen this backend spawn. Rows persist across restarts, so a
+    caller treating the result as current should pair it with a liveness check - the live VRAM
+    meter does exactly that and falls back to the plain bar when the two disagree.
+    """
+    import json as _json
+    with _LOCK, _conn() as c:
+        r = c.execute(
+            "SELECT instance, alias, model_path, argv_json FROM server_config "
+            "WHERE backend = ? ORDER BY first_seen DESC, instance DESC LIMIT 1",
+            (backend,)).fetchone()
+    if not r:
+        return {}
+    try:
+        argv = _json.loads(r["argv_json"] or "{}")
+    except ValueError:
+        argv = {}
+    return {"instance": r["instance"], "alias": r["alias"] or "",
+            "model_path": r["model_path"] or "", "argv": argv if isinstance(argv, dict) else {}}
+
+
 # ---------------------------------------------------------------- benchmark
 
 def bench_create_run(backend: str, reps: int, max_tokens: int, started_at: float) -> int:
