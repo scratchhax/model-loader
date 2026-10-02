@@ -254,7 +254,11 @@ async def _hero_context() -> dict:
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
             "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
             "tps_spark": hw.sparkline(tps, tps_peak or None) if len(tps) > 2 else "",
-            "tps_peak": tps_peak, "tps_samples": len(tps)}
+            "tps_peak": tps_peak, "tps_samples": len(tps),
+            # Drive the per-slot strip's row height and column wrap. Computed here rather than
+            # in the template so the thresholds sit with the dataclass they describe.
+            "slot_density": services.slot_density(len(sp.slots) if sp else 0),
+            "slot_columns": services.slot_columns(len(sp.slots) if sp else 0)}
 
 
 def _gpu_strip_context() -> dict:
