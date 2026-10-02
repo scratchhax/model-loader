@@ -419,6 +419,72 @@
   </div>
   {% endif %}
 
+  {# ---- where the VRAM goes, for the recommended configuration ----
+     A part-to-whole meter of one card's worth of memory. It exists because every cost here was
+     previously reachable only by hovering a cell in the table below, and the compute buffer in
+     particular was invisible for months - an invisible cost is how a table ends up approving a
+     context that cannot load.
+
+     Four segments plus free, which is inside the 6-segment limit for part-to-whole. Segment
+     order is weights -> context -> overhead -> compute on purpose: it keeps emerald and amber
+     apart, the one adjacent pair the palette validator flags as weak for protanopia. The four
+     hues are sky-600 / emerald-600 / violet-600 / amber-600, which pass the lightness band,
+     chroma floor, CVD separation (worst adjacent dE 16.1), normal-vision floor and 3:1 surface
+     contrast against BOTH the light and dark panel surfaces - the dark steps are validated, not
+     flipped. Free is a neutral track, not a category, so it is exempt from the chroma floor.
+
+     Identity never rests on colour: every segment is named with its value in the legend, so the
+     bar is readable in greyscale and by a colourblind reader. Values live in the legend rather
+     than inside the segments because an interior segment here can be 1.5% of the width and an
+     inline label would be clipped. Text wears text tokens throughout; the swatch beside it
+     carries the colour. #}
+  {% if vram_breakdown %}
+  {% set vb = vram_breakdown %}
+  {% set seg_class = {
+       'model':    'bg-sky-600',
+       'ctx':      'bg-emerald-600',
+       'overhead': 'bg-violet-600',
+       'compute':  'bg-amber-600',
+       'free':     'bg-slate-300 dark:bg-slate-700',
+     } %}
+  <div class="mt-4">
+    <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <h4 class="text-xs font-semibold inline-flex items-center gap-1.5">
+        {{ icon('cpu', 13) }} Where the VRAM goes
+        <span class="font-normal text-slate-500 dark:text-slate-400">
+          {{ vb.backend }} at {{ format_ctx(vb.ctx) }}{% if rec.n_sessions > 1 %} &times; {{ rec.n_sessions }}{% endif %}
+        </span>
+      </h4>
+      <div class="text-xs tabular-nums">
+        <span class="font-semibold">{{ '%.1f' % vb.used_gb }} GB</span>
+        <span class="text-slate-500 dark:text-slate-400">
+          of {{ '%.1f' % vb.total_gb }} GB &middot; {{ '%.1f' % vb.free_gb }} GB free
+        </span>
+      </div>
+    </div>
+
+    {# The 2px gaps are the surface showing through, which is what separates touching
+       segments. Square at the left, where the bar starts; 4px on the last segment's end. #}
+    <div class="mt-1.5 flex h-5 w-full gap-[2px] rounded-r-[4px] bg-slate-200 dark:bg-slate-800">
+      {% for s in vb.segments %}
+      <div class="h-full {{ seg_class[s.key] }} {% if loop.last %}rounded-r-[4px]{% endif %}"
+           style="width: {{ '%.3f' % s.pct }}%"
+           title="{{ s.label }}: {{ '%.2f' % s.gb }} GB ({{ '%.1f' % s.pct }}% of {{ '%.1f' % vb.total_gb }} GB) — {{ s.note }}"></div>
+      {% endfor %}
+    </div>
+
+    <div class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-3">
+      {% for s in vb.segments %}
+      <div class="flex items-baseline gap-1.5" title="{{ s.note }}">
+        <span class="mt-[3px] h-2 w-2 shrink-0 rounded-sm {{ seg_class[s.key] }}"></span>
+        <span class="text-slate-600 dark:text-slate-300">{{ s.label }}</span>
+        <span class="ml-auto tabular-nums text-slate-500 dark:text-slate-400">{{ '%.2f' % s.gb }} GB</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
   {# per-backend fit table #}
   <div class="mt-4 overflow-x-auto">
     <table class="w-full text-xs">
@@ -447,7 +513,11 @@
           {% for ctx in ctx_columns %}
             {% set row = plan_row_map[p.name].get(ctx) %}
             {% if row %}
-              {% set title = ('%.2f GB total (%.2f model + %.2f KV + %.2f compute) · free %.2f GB' % (row.total_gb, row.model_gb, row.kv_gb, row.compute_gb, row.free_gb)) %}
+              {# Every cost named, including the two that are charged to the budget before any
+                 context is fitted. `free` subtracts those now: it used to be card minus
+                 (model + KV + compute), which overstated the headroom by more than a gigabyte
+                 on a two-card box. #}
+              {% set title = ('%.2f GB total (%.2f model + %.2f KV + %.2f compute) + %.2f overhead · free %.2f GB of %.1f' % (row.total_gb, row.model_gb, row.kv_gb, row.compute_gb, row.reserve_gb + row.aux_gb, row.free_gb, p.vram_gb)) %}
               {# Colour encodes HOW MUCH of the model stays on the GPU, not merely whether it
                  fits. A tick alone hid the difference between a config that is fully resident
                  and one clinging on with a quarter of its weights, which is the difference

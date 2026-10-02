@@ -1595,6 +1595,47 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
 
     # Prepare per-plan row map for the template + which ctx columns to show
     plan_row_map = {p.name: {r.ctx: r for r in p.rows} for p in rec.plans}
+
+    # Where the recommended configuration's VRAM actually goes, split into the segments the
+    # panel draws. Built here rather than in the template so the bar shows the same figures the
+    # fit maths used instead of a re-derivation that could drift from them. Every byte of the
+    # card is accounted for, free space included, so the bar sums to the whole card - a
+    # breakdown that silently omits a cost is how the compute buffer stayed invisible for so
+    # long. Ordered weights -> context -> overhead -> compute: that order keeps the two hues
+    # the palette validator flags as a weak pair for protanopia from touching.
+    vram_breakdown = None
+    _rec_plan = next((p for p in rec.plans if p.name == rec.recommended_backend), None)
+    _rec_row = (plan_row_map.get(rec.recommended_backend) or {}).get(rec.recommended_ctx)
+    if _rec_plan and _rec_row and _rec_plan.vram_gb > 0 and _rec_row.fits:
+        _total = float(_rec_plan.vram_gb)
+        _parts = [
+            # Say the offloaded share outright. On a model larger than the card this segment is
+            # only the resident part - Flash-Next shows 51 GB here against an 84 GB file - and a
+            # reader comparing it to the file size has no way to tell that is correct.
+            ("model", "model weights", float(_rec_row.model_gb),
+             ("GPU-resident weights: %d%% of the model, the other %d%% streams from host RAM"
+              % (_rec_row.gpu_pct, 100 - _rec_row.gpu_pct)) if _rec_row.gpu_pct < 100
+             else "the whole model, resident on the GPU"),
+            ("ctx", "context (KV)", float(_rec_row.kv_gb),
+             "KV cache for %s tokens" % f"{_rec_row.total_ctx:,}"),
+            ("overhead", "overhead", float(_rec_row.reserve_gb) + float(_rec_row.aux_gb),
+             "driver and runtime context, plus any vision projector and draft head"),
+            ("compute", "compute buffers", float(_rec_row.compute_gb),
+             "per-card graph scratch, which grows with context"),
+        ]
+        _used = sum(v for _k, _l, v, _n in _parts)
+        _free = max(0.0, _total - _used)
+        _segments = [{"key": k, "label": lbl, "gb": v, "pct": 100.0 * v / _total, "note": note}
+                     for k, lbl, v, note in _parts if v > 0.005]
+        if _free > 0.005:
+            _segments.append({"key": "free", "label": "free", "gb": _free,
+                              "pct": 100.0 * _free / _total,
+                              "note": "unallocated on the card"})
+        vram_breakdown = {
+            "total_gb": _total, "used_gb": _used, "free_gb": _free,
+            "backend": rec.recommended_backend, "ctx": rec.recommended_ctx,
+            "total_ctx": _rec_row.total_ctx, "segments": _segments,
+        }
     all_ctx = sorted({r.ctx for p in rec.plans for r in p.rows})
     # pick a compact set: some small, some near the max/native
     interesting = set()
@@ -1619,6 +1660,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         "params": (summary.get("general") or {}).get("params"),
         "ctx_columns": ctx_columns,
         "plan_row_map": plan_row_map,
+        "vram_breakdown": vram_breakdown,
         "format_ctx": autoconfig.format_ctx,
         "vision_cost": vision_cost,
         # Carried on every link that re-renders this panel, so picking a preset or a session
