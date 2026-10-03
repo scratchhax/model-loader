@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 import docker
 import httpx
@@ -114,6 +115,38 @@ def split_quant(stem: str) -> tuple[str, str]:
     if not m:
         return stem, ""
     return stem[:m.start()], stem[m.start() + 1:]
+
+
+def canonical_families(families: "Iterable[str]") -> dict[str, str]:
+    """{family: the family it belongs under} once variants are folded onto their base.
+
+    Stripping the quant leaves one family per FINETUNE, which splits things that are plainly
+    the same model: Qwen3.8-Flash-Next, -GSQ-RCO and -Uncensored became three headings of one
+    file each. The useful heading is the base model, with its variants under it.
+
+    The rule is the files themselves, not a word list. A family folds onto a shorter one when
+    that shorter one is a token-boundary prefix of it AND is itself a family present on disk.
+    So -GSQ-RCO and -Uncensored join Qwen3.8-Flash-Next because that base is here, while
+    gemma-4-12b-it and gemma-4-E4B-it-qat stay apart because no "gemma-4" base is - and they
+    SHOULD stay apart, being different model sizes rather than variants of one. A word list
+    would have had to know that "GSQ-RCO" names a compression method, and would be wrong again
+    on the next publisher's suffix.
+
+    Shortest matching prefix wins, which is the same answer as folding repeatedly. The one
+    consequence worth knowing: delete the base and its variants separate again, because then
+    the base is not something you have.
+    """
+    known = set(families)
+    out: dict[str, str] = {}
+    for f in known:
+        parts = f.split("-")
+        out[f] = f
+        for i in range(1, len(parts)):
+            prefix = "-".join(parts[:i])
+            if prefix in known:
+                out[f] = prefix
+                break
+    return out
 
 
 def largest_card_gb() -> float:
