@@ -638,15 +638,20 @@ async def _models_list_ctx(request: Request, snap, flash=None) -> dict:
     update_status = _update_status_map(snap)
     owui = _owui_visibility()
     shapes = _shapes_for_files(snap)
+    # What a section can DO is derived from its own config - GGUF header, its mmproj, its spec
+    # profile - by the same helper the models.ini cards use. OpenWebUI's record is a copy of
+    # that and can lag or have never seen a section at all, which is exactly what happened to
+    # voice-cpu: its file showed image and audio, its own row showed an unreadable projector.
+    try:
+        section_caps = _section_caps(ini.list_sections())
+    except Exception:  # noqa: BLE001 - an unreadable ini must not take the models page down
+        section_caps = {}
     return {
         "request": request, "snap": snap, "flash": flash,
-        "loaded_map": loaded_map,
         "file_to_owner": file_to_owner, "avatars": avatars,
-        "update_status": update_status,
         "owui": owui,
-        "badges": _badges_for_files(snap),
-        "shapes": shapes,
-        "facets": _facets_for_files(snap, shapes, loaded_map, update_status, owui),
+        "rows": _model_rows(snap, shapes, loaded_map, update_status, owui,
+                            db.badges_by_alias(), section_caps),
     }
 
 
@@ -657,19 +662,29 @@ async def models_page(request: Request) -> HTMLResponse:
         "models.html", await _models_list_ctx(request, snap))
 
 
-def _facets_for_files(snap, shapes: dict, loaded_map: dict, update_status: dict,
-                      owui: dict) -> dict:
-    """{display_name: facet dict} - the axes the models list can be grouped and filtered on.
+def _model_rows(snap, shapes: dict, loaded_map: dict, update_status: dict,
+                owui: dict, badges_by_alias: dict, section_caps: dict | None = None) -> list[dict]:
+    """One row per SERVED MODEL, not per file, plus the facets the list groups and filters on.
 
-    Computed here rather than in the template because every one of them is a JOIN across
-    sources the template sees separately: the family needs the filename parsed, the tier needs
-    the hardware, the status needs models.ini AND what is resident right now, and the flags
-    need the GGUF header AND the projector's modalities. Doing that in Jinja would mean
-    re-deriving the same four facts in three places - the row, the filter chips, and the
-    group headings - and they would drift.
+    A file and a model are not the same thing. gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf backs two
+    models.ini sections - its own and `voice-cpu` - with different settings over the same
+    weights, and `voice-qwen` is the only name Qwen3.5-4B is served under at all. Keyed by
+    file, those meta-models were a comma-separated footnote on somebody else's row: no state
+    of their own, no ratings of their own, nowhere to click through to the section that
+    defines them. They are the thing you actually call from OpenWebUI, so they get a row.
 
-    The values are also what the client-side grouping reads off each row's data attributes, so
-    they have to be stable strings, not objects.
+    What belongs to the FILE stays on the file's row and appears once: the byte count, the
+    checkbox, delete. A second section over the same weights frees nothing when you remove it
+    and must not double the group totals, so it carries `primary: False`, no size of its own
+    and no delete button - its sort key is still the file's size, so the two sort together
+    rather than the alias sinking to the bottom of a size sort.
+
+    What belongs to the SECTION is per row and is why the split is worth making: whether it is
+    resident right now, whether speculation is configured for it, which backends offer it, and
+    what you have rated it. All four differ between two sections over one file.
+
+    Family and tier come from the file either way - same weights, same placement - so an alias
+    sorts into the same group as the file it is built on rather than off under its own name.
     """
     card_gb = services.largest_card_gb()
     caps = (owui or {}).get("caps") or {}
@@ -677,51 +692,93 @@ def _facets_for_files(snap, shapes: dict, loaded_map: dict, update_status: dict,
     # Needs the whole set at once: whether a variant has a base to fold onto is a fact about
     # what else is on disk, not about its own filename.
     canon = services.canonical_families({fam for fam, _q in split.values()})
-    out: dict = {}
+    rows: list[dict] = []
     for g in snap.ggufs:
         family, quant = split[g.display_name]
         family = canon.get(family, family)
         tier, tier_label, tier_short = services.size_tier(g.total_bytes, card_gb)
         shape = (shapes or {}).get(g.display_name)
-        cap = caps.get(g.model_id) or {}
-        mods = cap.get("modalities") or []
-        loaded = (loaded_map or {}).get(g.model_id) or []
         us = (update_status or {}).get(g.display_name)
 
-        if g.is_companion:
-            status, status_label = "orphan", "Orphan companion"
-        elif loaded:
-            status, status_label = "loaded", "Loaded now"
-        elif g.aliases:
-            status, status_label = "configured", "In models.ini"
-        else:
-            status, status_label = "unconfigured", "Not configured"
+        # The section named after the file leads, so the row that owns the byte count is the
+        # one whose name matches it; a file served only under aliases has no such row and the
+        # first alias owns it instead.
+        ids = sorted(g.aliases or [], key=lambda a: (a != g.stem, a.lower()))
+        if not ids:
+            ids = [g.stem]
 
-        flags = []
-        if shape and shape.is_moe:
-            flags.append("moe")
-        elif shape:
-            flags.append("dense")
-        if "vision" in mods:
-            flags.append("vision")
-        if "audio" in mods:
-            flags.append("audio")
-        if mods or g.companion_name:
-            flags.append("multimodal")
-        if cap.get("speculative"):
-            flags.append("draft")
-        if (us or {}).get("status") == "stale":
-            flags.append("update")
-        flags.append(status)
+        for n, served_id in enumerate(ids):
+            cap = caps.get(served_id) or {}
+            # The section's own config wins over OpenWebUI's copy of it, and is the only source
+            # that exists for a section OpenWebUI has never been told about. The mismatch flag
+            # still comes from OpenWebUI - disagreement between the two is the thing it reports.
+            sect = (section_caps or {}).get(served_id) or {}
+            mods = sect.get("mods") if sect else (cap.get("modalities") or [])
+            mods = list(mods or [])
+            spec = sect.get("spec") if sect else ("head" if cap.get("speculative") else "")
+            proj_unknown = sect.get("proj_unknown") if sect else bool(g.companion_name and not mods)
+            loaded = (loaded_map or {}).get(served_id) or []
+            configured = bool(g.aliases)
 
-        out[g.display_name] = {
-            "family": family, "quant": quant,
-            "tier": tier, "tier_label": tier_label, "tier_short": tier_short,
-            "status": status, "status_label": status_label,
-            "flags": " ".join(flags),
-            "card_gb": card_gb,
-        }
-    return out
+            if g.is_companion:
+                status, status_label = "orphan", "Orphan companion"
+            elif loaded:
+                status, status_label = "loaded", "Loaded now"
+            elif configured:
+                status, status_label = "configured", "In models.ini"
+            else:
+                status, status_label = "unconfigured", "Not configured"
+
+            flags = []
+            if shape and shape.is_moe:
+                flags.append("moe")
+            elif shape:
+                flags.append("dense")
+            if "vision" in mods:
+                flags.append("vision")
+            if "audio" in mods:
+                flags.append("audio")
+            if mods or g.companion_name:
+                flags.append("multimodal")
+            if spec:
+                flags.append("draft")
+            if (us or {}).get("status") == "stale":
+                flags.append("update")
+            if served_id != g.stem:
+                flags.append("alias")
+            flags.append(status)
+
+            rows.append({
+                "g": g,
+                "id": served_id,
+                # True when this name is not the filename's: a model that exists only in
+                # models.ini, which is what gets the headline instead of the filename.
+                "is_alias": served_id != g.stem,
+                "primary": n == 0,
+                "configured": configured,
+                "siblings": [i for i in ids if i != served_id],
+                "shape": shape,
+                "mods": mods,
+                "spec": spec,
+                "proj_unknown": proj_unknown,
+                "head_idle": bool(sect.get("head_idle")),
+                "cap": cap,
+                "loaded": loaded,
+                "update": us if (us or {}).get("status") == "stale" else None,
+                "badges": (badges_by_alias or {}).get(served_id) or [],
+                "family": family, "quant": quant,
+                "tier": tier, "tier_label": tier_label, "tier_short": tier_short,
+                "status": status, "status_label": status_label,
+                "flags": " ".join(flags),
+                "card_gb": card_gb,
+                # Sort by the file's size on every row so an alias sorts beside its file;
+                # count only the owning row, so group totals stay the bytes on disk.
+                "sort_bytes": g.total_bytes,
+                "count_bytes": g.total_bytes if n == 0 else 0,
+                "search": " ".join([g.display_name, served_id, family, quant,
+                                    (shape.arch if shape else ""), " ".join(g.aliases or [])]).lower(),
+            })
+    return rows
 
 
 def _shapes_for_files(snap) -> dict:
@@ -739,27 +796,6 @@ def _shapes_for_files(snap) -> dict:
             out[g.display_name] = shape
     return out
 
-
-def _badges_for_files(snap) -> dict:
-    """{display_name: [badge rows]} for the models list.
-
-    Badges are keyed by models.ini alias while the list is keyed by file, and one file can
-    carry several aliases, so the join happens here rather than in the template. Duplicates
-    are collapsed per category keeping the newest - a model served under two names would
-    otherwise render "Coding 4/5" twice with no way to tell which one you meant.
-    """
-    by_alias = db.badges_by_alias()
-    out: dict = {}
-    for g in snap.ggufs:
-        best: dict = {}
-        for a in (g.aliases or []):
-            for b in by_alias.get(a, []):
-                cur = best.get(b["category"])
-                if cur is None or (b["created_at"] or 0) > (cur["created_at"] or 0):
-                    best[b["category"]] = b
-        if best:
-            out[g.display_name] = [best[k] for k, _ in db.BADGE_CATEGORIES if k in best]
-    return out
 
 
 @app.get("/model/{filename:path}", response_class=HTMLResponse)
