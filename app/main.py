@@ -624,19 +624,99 @@ def _owui_visibility() -> dict:
     }
 
 
+async def _models_list_ctx(request: Request, snap, flash=None) -> dict:
+    """Everything _models_list.html needs, built in ONE place.
+
+    The partial is rendered from four routes - the page, two deletes and the update check -
+    and the three POST routes each assembled their own context by hand. They were missing
+    `owui`, `badges` and `shapes`, so deleting one file silently stripped the shape chips, the
+    per-connection availability toggles and every rating off every OTHER row until the next
+    full reload. A partial swapped into a page has to come back with the same shape it had.
+    """
+    file_to_owner, avatars = await _models_avatar_map(snap)
+    loaded_map = await _loaded_map()
+    update_status = _update_status_map(snap)
+    owui = _owui_visibility()
+    shapes = _shapes_for_files(snap)
+    return {
+        "request": request, "snap": snap, "flash": flash,
+        "loaded_map": loaded_map,
+        "file_to_owner": file_to_owner, "avatars": avatars,
+        "update_status": update_status,
+        "owui": owui,
+        "badges": _badges_for_files(snap),
+        "shapes": shapes,
+        "facets": _facets_for_files(snap, shapes, loaded_map, update_status, owui),
+    }
+
+
 @app.get("/models", response_class=HTMLResponse)
 async def models_page(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
-    file_to_owner, avatars = await _models_avatar_map(snap)
-    return templates.TemplateResponse("models.html", {
-        "request": request, "snap": snap, "flash": None,
-        "loaded_map": await _loaded_map(),
-        "file_to_owner": file_to_owner, "avatars": avatars,
-        "update_status": _update_status_map(snap),
-        "owui": _owui_visibility(),
-        "badges": _badges_for_files(snap),
-        "shapes": _shapes_for_files(snap),
-    })
+    return templates.TemplateResponse(
+        "models.html", await _models_list_ctx(request, snap))
+
+
+def _facets_for_files(snap, shapes: dict, loaded_map: dict, update_status: dict,
+                      owui: dict) -> dict:
+    """{display_name: facet dict} - the axes the models list can be grouped and filtered on.
+
+    Computed here rather than in the template because every one of them is a JOIN across
+    sources the template sees separately: the family needs the filename parsed, the tier needs
+    the hardware, the status needs models.ini AND what is resident right now, and the flags
+    need the GGUF header AND the projector's modalities. Doing that in Jinja would mean
+    re-deriving the same four facts in three places - the row, the filter chips, and the
+    group headings - and they would drift.
+
+    The values are also what the client-side grouping reads off each row's data attributes, so
+    they have to be stable strings, not objects.
+    """
+    card_gb = services.largest_card_gb()
+    caps = (owui or {}).get("caps") or {}
+    out: dict = {}
+    for g in snap.ggufs:
+        family, quant = services.split_quant(g.stem)
+        tier, tier_label, tier_short = services.size_tier(g.total_bytes, card_gb)
+        shape = (shapes or {}).get(g.display_name)
+        cap = caps.get(g.model_id) or {}
+        mods = cap.get("modalities") or []
+        loaded = (loaded_map or {}).get(g.model_id) or []
+        us = (update_status or {}).get(g.display_name)
+
+        if g.is_companion:
+            status, status_label = "orphan", "Orphan companion"
+        elif loaded:
+            status, status_label = "loaded", "Loaded now"
+        elif g.aliases:
+            status, status_label = "configured", "In models.ini"
+        else:
+            status, status_label = "unconfigured", "Not configured"
+
+        flags = []
+        if shape and shape.is_moe:
+            flags.append("moe")
+        elif shape:
+            flags.append("dense")
+        if "vision" in mods:
+            flags.append("vision")
+        if "audio" in mods:
+            flags.append("audio")
+        if mods or g.companion_name:
+            flags.append("multimodal")
+        if cap.get("speculative"):
+            flags.append("draft")
+        if (us or {}).get("status") == "stale":
+            flags.append("update")
+        flags.append(status)
+
+        out[g.display_name] = {
+            "family": family, "quant": quant,
+            "tier": tier, "tier_label": tier_label, "tier_short": tier_short,
+            "status": status, "status_label": status_label,
+            "flags": " ".join(flags),
+            "card_gb": card_gb,
+        }
+    return out
 
 
 def _shapes_for_files(snap) -> dict:
@@ -758,14 +838,9 @@ async def models_delete(request: Request, name: str = Form(...)) -> HTMLResponse
         except Exception:  # noqa: BLE001 -- deletion must succeed even if OpenWebUI is down
             pass
     snap = services.snapshot_models_dir()
-    file_to_owner, avatars = await _models_avatar_map(snap)
     flash = {"ok": ok, "msg": msg, "freed_h": human_bytes(freed) if freed else None}
-    return templates.TemplateResponse("_models_list.html", {
-        "request": request, "snap": snap, "flash": flash,
-        "loaded_map": await _loaded_map(),
-        "file_to_owner": file_to_owner, "avatars": avatars,
-        "update_status": _update_status_map(snap),
-    })
+    return templates.TemplateResponse(
+        "_models_list.html", await _models_list_ctx(request, snap, flash))
 
 
 @app.post("/models/delete-bulk", response_class=HTMLResponse)
@@ -792,17 +867,12 @@ async def models_delete_bulk(request: Request) -> HTMLResponse:
         except Exception:  # noqa: BLE001
             pass
     snap = services.snapshot_models_dir()
-    file_to_owner, avatars = await _models_avatar_map(snap)
     if errors:
         flash = {"ok": False, "msg": f"deleted {ok_count}, {len(errors)} failed: " + "; ".join(errors[:3])}
     else:
         flash = {"ok": True, "msg": f"deleted {ok_count} file(s)", "freed_h": human_bytes(total_freed) if total_freed else None}
-    return templates.TemplateResponse("_models_list.html", {
-        "request": request, "snap": snap, "flash": flash,
-        "loaded_map": await _loaded_map(),
-        "file_to_owner": file_to_owner, "avatars": avatars,
-        "update_status": _update_status_map(snap),
-    })
+    return templates.TemplateResponse(
+        "_models_list.html", await _models_list_ctx(request, snap, flash))
 
 
 @app.post("/models/check-updates", response_class=HTMLResponse)
@@ -811,14 +881,9 @@ async def models_check_updates(request: Request) -> HTMLResponse:
     if records:
         await hf.check_updates_for(records)
     snap = services.snapshot_models_dir()
-    file_to_owner, avatars = await _models_avatar_map(snap)
-    return templates.TemplateResponse("_models_list.html", {
-        "request": request, "snap": snap,
-        "flash": {"ok": True, "msg": f"checked {len(records)} record(s) against HF"},
-        "loaded_map": await _loaded_map(),
-        "file_to_owner": file_to_owner, "avatars": avatars,
-        "update_status": _update_status_map(snap),
-    })
+    flash = {"ok": True, "msg": f"checked {len(records)} record(s) against HF"}
+    return templates.TemplateResponse(
+        "_models_list.html", await _models_list_ctx(request, snap, flash))
 
 
 # ---------- Settings ----------

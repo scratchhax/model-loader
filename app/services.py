@@ -93,6 +93,76 @@ def model_shape(path: Path) -> ModelShape:
                       expert_used=_int("expert_used_count"),
                       internal_mtp=_int("nextn_predict_layers") > 0)
 
+
+# Trailing quantisation token, with the publisher prefixes that ride in front of it.
+# Anchored to the end so a name that merely CONTAINS a quant-looking run is left alone.
+_QUANT_RE = re.compile(
+    r"[-_.](?:(?:UD|i1|ud|unsloth)-)?"
+    r"(I?Q\d+(?:_[A-Z0-9]+)*|BF16|F16|F32|MXFP4(?:_MOE)?|TQ\d_\d)$"
+)
+
+
+def split_quant(stem: str) -> tuple[str, str]:
+    """("Qwen3.8-27B-UD-Q4_K_M") -> ("Qwen3.8-27B", "UD-Q4_K_M").
+
+    The quant is the only part of a GGUF filename that varies between copies of the SAME
+    model, so stripping it is what lets three files collapse into one family heading. When
+    nothing matches, the whole stem is the family and the quant is empty - which is the right
+    answer for a file that genuinely has no quant in its name, not a parse failure.
+    """
+    m = _QUANT_RE.search(stem)
+    if not m:
+        return stem, ""
+    return stem[:m.start()], stem[m.start() + 1:]
+
+
+def largest_card_gb() -> float:
+    """VRAM of the single biggest card we can see, 0 when nothing reports one.
+
+    One card is the threshold that actually matters for placement: under it a model is a
+    whole-card tenant, over it it has to be split or spilled. Summed VRAM is the wrong number
+    for that question - two 32 GB cards do not hold a 40 GB model the way one 64 GB card would.
+    """
+    from . import hw
+    best = 0.0
+    for name in _effective_container_names():
+        st = hw.stats_for(name)
+        if not (st.ok and st.gpu):
+            continue
+        cards = st.gpu.cards or []
+        if cards:
+            best = max([best] + [float(c.vram_total_gb or 0) for c in cards])
+        else:
+            best = max(best, float(st.gpu.vram_total_gb or 0))
+    return best
+
+
+# Fractions of ONE card. Below the lower one a model can share a card with something else and
+# both still have room for their KV; above a whole card it cannot be a single-card tenant at all.
+_TIER_SHARE = 0.4
+
+
+def size_tier(total_bytes: int, card_gb: float) -> tuple[str, str, str]:
+    """(key, heading, chip) for how this file has to be placed on THIS box.
+
+    Two labels because the same fact reads differently in the two places it appears. As a
+    group heading it is a sentence you read once - "Needs more than one GPU" - and as a chip
+    on every row it has to be a word you skim past, so it is "2+ GPUs". A chip carrying the
+    long form made every sharded row wrap onto a second line.
+
+    Weights only. KV and compute buffers are not in it and they are not small - the autoconfig
+    panel is where that sum is done properly. This is a shelf label, so it answers "roughly
+    where does this one live"; the tooltip says it is weights alone.
+    """
+    if card_gb <= 0:
+        return "unknown", "Size unknown", ""
+    gb = total_bytes / 1024 ** 3
+    if gb > card_gb:
+        return "multi", "Needs more than one GPU", "2+ GPUs"
+    if gb > card_gb * _TIER_SHARE:
+        return "single", "Fits one GPU", "1 GPU"
+    return "share", "Shares a GPU", "part of a GPU"
+
 @dataclass
 class GgufEntry:
     display_name: str        # shown to user (base name, without shard suffix if grouped)
