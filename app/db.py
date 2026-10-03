@@ -50,10 +50,18 @@ def init() -> None:
                 url         TEXT NOT NULL,
                 fetched_at  REAL NOT NULL
             );
+            -- hf_size is what makes this check mean something. A commit date moves every
+            -- time a repo's metadata is touched, so date alone calls a model stale when
+            -- nothing about the weights changed; a GGUF whose byte count differs has
+            -- genuinely been rebuilt. hf_path is the file's path INSIDE the repo, which is
+            -- not the local one (downloads land in a subdir of our own making) and is what
+            -- a re-download has to ask for.
             CREATE TABLE IF NOT EXISTS update_check (
                 filename          TEXT PRIMARY KEY,
                 repo_id           TEXT NOT NULL,
                 hf_last_modified  TEXT,
+                hf_size           INTEGER,
+                hf_path           TEXT,
                 checked_at        REAL NOT NULL
             );
             -- One row per completed llama-server request, scraped from its logs.
@@ -208,6 +216,10 @@ def _add_missing_columns() -> None:
     has to be ALTERed in on any database created before it was added.
     """
     wanted = {
+        "update_check": (
+            ("hf_size", "INTEGER"),
+            ("hf_path", "TEXT"),
+        ),
         "bench_result": (
             ("ttft_answer_ms", "REAL"),
             ("truncated", "INTEGER NOT NULL DEFAULT 0"),
@@ -306,17 +318,21 @@ def set_avatar(owner: str, url: str, fetched_at: float) -> None:
 
 def all_update_checks() -> dict[str, dict]:
     with _LOCK, _conn() as c:
-        rows = c.execute("SELECT filename, repo_id, hf_last_modified, checked_at FROM update_check").fetchall()
+        rows = c.execute("SELECT filename, repo_id, hf_last_modified, hf_size, hf_path, "
+                         "checked_at FROM update_check").fetchall()
     return {r["filename"]: dict(r) for r in rows}
 
 
-def set_update_check(filename: str, repo_id: str, hf_last_modified: str | None, checked_at: float) -> None:
+def set_update_check(filename: str, repo_id: str, hf_last_modified: str | None, checked_at: float,
+                     hf_size: int | None = None, hf_path: str | None = None) -> None:
     with _LOCK, _conn() as c:
         c.execute(
-            "INSERT INTO update_check(filename, repo_id, hf_last_modified, checked_at) VALUES(?, ?, ?, ?) "
+            "INSERT INTO update_check(filename, repo_id, hf_last_modified, hf_size, hf_path, checked_at) "
+            "VALUES(?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(filename) DO UPDATE SET repo_id = excluded.repo_id, "
-            "hf_last_modified = excluded.hf_last_modified, checked_at = excluded.checked_at",
-            (filename, repo_id, hf_last_modified, checked_at),
+            "hf_last_modified = excluded.hf_last_modified, hf_size = excluded.hf_size, "
+            "hf_path = excluded.hf_path, checked_at = excluded.checked_at",
+            (filename, repo_id, hf_last_modified, hf_size, hf_path, checked_at),
         )
 
 

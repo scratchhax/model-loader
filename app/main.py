@@ -521,32 +521,91 @@ async def _loaded_map() -> dict[str, list[str]]:
 
 
 def _update_status_map(snap) -> dict[str, dict]:
-    """filename -> {'status': 'up-to-date'|'stale'|'unknown', 'remote': iso, 'checked_at': ts, 'delta_days': int|None}"""
+    """display_name -> what the last Hugging Face check says about this model.
+
+    {'status': 'up-to-date'|'stale'|'unknown', 'reason': 'size'|'date'|'',
+     'remote': 'YYYY-MM-DD', 'checked_at': ts, 'delta_days': int|None,
+     'repo_id': str, 'parts': [(local rel path, repo path)]}
+
+    Two joins had to be got right and neither was. The check records one row per DOWNLOADED
+    file - a local relative path, per shard - while this map is keyed by the entry the list
+    renders, whose display_name is the shard BASE and carries no subdirectory. So
+    `checks.get(g.display_name)` matched nothing for any sharded model and nothing for any
+    model stored in a subdirectory, which since the layout change is all of them: every model
+    on the box scored "unknown" and no staleness was ever actually evaluated. The other join,
+    local name against repo path, is fixed in hf._match_repo_path.
+
+    The verdict itself is now size first. A commit date moves whenever anything in the repo's
+    metadata is touched, so "the remote commit is newer than my file" is true of almost every
+    model almost always and says nothing about the weights. A differing byte count is not
+    ambiguous: the GGUF was rebuilt. Only when the size is unknown - an old row, or a repo the
+    tree API would not describe - does this fall back to the date, and it says which test it
+    used so the UI can be honest about how much the answer is worth.
+    """
     from datetime import datetime, timezone
     checks = db.all_update_checks()
+
+    def _parse(iso: str):
+        try:
+            core, _, frac = iso.partition(".")
+            if frac:
+                return datetime.fromisoformat(f"{core}.{frac.rstrip('Z')[:6]}+00:00")
+            return datetime.fromisoformat(core.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
     out: dict[str, dict] = {}
     for g in snap.ggufs:
-        row = checks.get(g.display_name)
-        if not row:
+        # Every local path this entry covers, in the same form the download recorded it.
+        # Companions included: an mmproj is folded into its model's row, so a projector that
+        # was rebuilt has nowhere else to be reported and no other way to be refreshed.
+        covered = list(g.parts) + list(g.companion_parts)
+        rels = [f"{g.subdir}/{p.name}" if g.subdir else p.name for p in covered]
+        rows = [(rel, checks[rel]) for rel in rels if rel in checks]
+        if not rows:
             continue
-        remote = row.get("hf_last_modified") or ""
-        if not remote:
-            out[g.display_name] = {"status": "unknown", "remote": "", "checked_at": row["checked_at"], "delta_days": None}
-            continue
-        try:
-            core, _, frac = remote.partition(".")
-            if frac:
-                frac = frac.rstrip("Z")[:6]
-                remote_dt = datetime.fromisoformat(f"{core}.{frac}+00:00")
-            else:
-                remote_dt = datetime.fromisoformat(core.replace("Z", "+00:00"))
-        except ValueError:
-            out[g.display_name] = {"status": "unknown", "remote": remote, "checked_at": row["checked_at"], "delta_days": None}
-            continue
+        repo_id = rows[0][1].get("repo_id") or ""
+        parts = [(rel, r.get("hf_path") or "") for rel, r in rows]
+        checked_at = max(r.get("checked_at") or 0 for _rel, r in rows)
+
+        # Size is per shard and decisive on its own: one shard of a different length means
+        # the model was rebuilt, whatever the rest of them say.
+        size_known = False
+        size_differs = False
+        by_name = {p.name: p for p in covered}
+        for rel, r in rows:
+            remote_size = r.get("hf_size")
+            if remote_size is None:
+                continue
+            p = by_name.get(rel.rsplit("/", 1)[-1])
+            if p is None:
+                continue
+            try:
+                local_size = p.stat().st_size
+            except OSError:
+                continue
+            size_known = True
+            if int(remote_size) != local_size:
+                size_differs = True
+
+        remote_dts = [d for d in (_parse(r.get("hf_last_modified") or "") for _rel, r in rows) if d]
+        newest = max(remote_dts) if remote_dts else None
         local_dt = datetime.fromtimestamp(g.mtime, tz=timezone.utc)
-        delta_days = (remote_dt - local_dt).days
-        status = "stale" if remote_dt > local_dt else "up-to-date"
-        out[g.display_name] = {"status": status, "remote": remote_dt.strftime("%Y-%m-%d"), "checked_at": row["checked_at"], "delta_days": delta_days}
+        delta_days = (newest - local_dt).days if newest else None
+        remote_s = newest.strftime("%Y-%m-%d") if newest else ""
+
+        if size_known:
+            status, reason = ("stale", "size") if size_differs else ("up-to-date", "size")
+        elif newest:
+            status, reason = ("stale" if newest > local_dt else "up-to-date"), "date"
+        else:
+            status, reason = "unknown", ""
+
+        out[g.display_name] = {
+            "status": status, "reason": reason, "remote": remote_s,
+            "checked_at": checked_at, "delta_days": delta_days,
+            "repo_id": repo_id, "parts": parts,
+        }
     return out
 
 
@@ -764,7 +823,12 @@ def _model_rows(snap, shapes: dict, loaded_map: dict, update_status: dict,
                 "head_idle": bool(sect.get("head_idle")),
                 "cap": cap,
                 "loaded": loaded,
-                "update": us if (us or {}).get("status") == "stale" else None,
+                # NOT named "update": Jinja resolves r.update on a dict to the dict's own
+                # update METHOD, which is truthy, so `{% if r.update %}` fired on every row
+                # and painted an amber "update" chip across the whole list while the tooltip
+                # it filled in read "dated  ( days newer)". Anything colliding with a dict
+                # method - update, items, keys, values, get, copy, pop - must not be a key here.
+                "stale": us if (us or {}).get("status") == "stale" else None,
                 "badges": (badges_by_alias or {}).get(served_id) or [],
                 "family": family, "quant": quant,
                 "tier": tier, "tier_label": tier_label, "tier_short": tier_short,
@@ -2123,13 +2187,57 @@ async def containers_openwebui_filter(request: Request) -> HTMLResponse:
     return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{mark} {msg}</div>')
 
 
+def _toast(ok: bool, msg: str) -> HTMLResponse:
+    """The banner the models page swaps into #models-owui-toast. Shared so three routes that
+    report into the same strip cannot drift apart in markup."""
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">'
+                        f'{"&check;" if ok else "Failed:"} {html.escape(msg)}</div>')
+
+
+@app.post("/models/redownload", response_class=HTMLResponse)
+async def models_redownload(name: str = Form(...)) -> HTMLResponse:
+    """Queue a fresh copy of every part of one model from the repo it came from.
+
+    The stale chip used to be a span, so the page could tell you a model was out of date and
+    then offer nothing to do about it. This is what the chip posts to.
+
+    It re-downloads the parts the update check actually resolved - local path to repo path,
+    one row per shard - rather than guessing a repo layout, and leaves the existing files in
+    place until each download finishes: the downloader writes to a temp file and os.replace()s
+    it, so a model that is loaded right now keeps serving from the old inode until it is
+    reloaded.
+    """
+    snap = services.snapshot_models_dir()
+    g = next((e for e in snap.ggufs if e.display_name == name), None)
+    if g is None:
+        return _toast(False, f"{name} is not in the models directory")
+    info = _update_status_map(snap).get(name) or {}
+    repo_id = info.get("repo_id") or ""
+    parts = [(rel, rp) for rel, rp in (info.get("parts") or []) if rp]
+    if not repo_id or "/" not in repo_id:
+        return _toast(False, f"no Hugging Face repo recorded for {name} — re-download it from Search HF")
+    if not parts:
+        return _toast(False, f"could not work out which files in {repo_id} {name} came from; "
+                             "run Check for updates first")
+    by_name = {p.name: p for p in list(g.parts) + list(g.companion_parts)}
+    for rel, repo_path in parts:
+        p = by_name.get(rel.rsplit("/", 1)[-1])
+        try:
+            size = p.stat().st_size if p is not None else 0
+        except OSError:
+            size = 0
+        manager.enqueue(repo_id=repo_id, hf_path=repo_path, filename=rel, total_bytes=size)
+    n = len(parts)
+    return _toast(True, f"queued {n} file{'s' if n != 1 else ''} from {repo_id} — see Downloads")
+
+
 @app.post("/models/align-capability", response_class=HTMLResponse)
 def models_align_capability(section: str = Form(...)) -> HTMLResponse:
     """Align OpenWebUI capabilities for a single models.ini section."""
     ok, msg = services.align_openwebui_capability_for(section)
-    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
-           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
-    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Failed:"} {msg}</div>')
+    return _toast(ok, msg)
 
 
 @app.post("/models/openwebui-visibility", response_class=HTMLResponse)

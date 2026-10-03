@@ -233,9 +233,20 @@
               <span class="text-[10px] text-slate-400 dark:text-slate-600"
                     title="Has a section in models.ini and is not resident right now.">ready</span>
             {% endif %}
-            {% if r.update %}
-            <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                  title="Hugging Face has a newer version dated {{ r.update.remote }} ({{ r.update.delta_days }} day{{ 's' if r.update.delta_days != 1 else '' }} newer)">update</span>
+            {# A button, not a chip. Telling you a model is out of date and then offering
+               nothing to do about it was the worst of both: it took the space of an action
+               and had none. The confirm names the repo because that is the thing being
+               trusted, and the files stay in place until each download completes. #}
+            {% if r.stale %}
+            <button type="button"
+                    hx-post="/models/redownload"
+                    hx-vals='{"name": {{ g.display_name | tojson }}}'
+                    hx-target="#models-owui-toast" hx-swap="innerHTML"
+                    hx-confirm="Re-download {{ g.display_name }}{% if g.is_sharded %} ({{ g.parts | length }} shards, {{ g.human_size }}){% else %} ({{ g.human_size }}){% endif %} from {{ r.stale.repo_id }}? The current files keep serving until each one finishes."
+                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:hover:bg-amber-900"
+                    title="{% if r.stale.reason == 'size' %}Hugging Face holds a DIFFERENT number of bytes for this model than the copy on disk, so it has been rebuilt{% else %}Hugging Face's copy was committed on {{ r.stale.remote }}, after this one was downloaded. Byte counts were not available for this repo, so this is the weaker test: a commit can touch a repo's metadata without changing any weights{% endif %} — click to queue a fresh download.">
+              {{ icon('download', 11) }} update
+            </button>
             {% endif %}
           </div>
         </td>

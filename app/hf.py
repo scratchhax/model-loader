@@ -104,15 +104,31 @@ _NEXT_LINK_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
 _TREE_MAX_PAGES = 40
 
 
-async def repo_detail(repo_id: str, revision: str = "main") -> HfRepoDetail:
+async def _tree_entries(repo_id: str, revision: str = "main",
+                        raise_for_status: bool = True) -> list[dict[str, Any]]:
+    """Every entry in a repo tree, following HF's cursor pagination to the end.
+
+    HF serves 50 entries a page and hands back the rest behind a `Link: <...>; rel="next"`
+    header. A GGUF repo is routinely larger than that - unsloth publishes a dozen quants of
+    three shards each - so reading only the first page returns an arbitrary alphabetical slice
+    of it. This used to be implemented twice, and only one of the two paginated: the update
+    check saw page one, which is why gemma mmproj files resolved and Qwen3.8-Flash-Next's
+    UD-Q3_K_XL shards, further down the alphabet, looked as though they did not exist.
+    """
     entries: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=30.0, headers=_auth_headers(), follow_redirects=True) as client:
         url: str | None = f"{HF_API}/models/{repo_id}/tree/{revision}"
         params: dict[str, str] | None = {"recursive": "true", "expand": "true"}
         for _ in range(_TREE_MAX_PAGES):
             tree = await client.get(url, params=params)
-            tree.raise_for_status()
-            page = tree.json()
+            if raise_for_status:
+                tree.raise_for_status()
+            elif tree.status_code != 200:
+                break
+            try:
+                page = tree.json()
+            except ValueError:
+                break
             if not isinstance(page, list):
                 break
             entries.extend(page)
@@ -125,6 +141,11 @@ async def repo_detail(repo_id: str, revision: str = "main") -> HfRepoDetail:
             # Ran out of pages rather than reaching the end. Better to serve a truncated list than
             # to loop forever, but this should never happen for a real repo.
             pass
+    return entries
+
+
+async def repo_detail(repo_id: str, revision: str = "main") -> HfRepoDetail:
+    entries = await _tree_entries(repo_id, revision)
 
     files: list[HfFile] = []
     for e in entries:
@@ -293,28 +314,47 @@ async def owner_avatars(owners: list[str]) -> dict[str, str]:
     return result
 
 
-async def repo_file_mtimes(repo_id: str, revision: str = "main") -> dict[str, str]:
-    """{path -> ISO8601 lastCommit.date} for every file in a repo tree."""
-    async with httpx.AsyncClient(timeout=15.0, headers=_auth_headers(), follow_redirects=True) as client:
-        r = await client.get(
-            f"{HF_API}/models/{repo_id}/tree/{revision}",
-            params={"recursive": "true", "expand": "true"},
-        )
-    if r.status_code != 200:
-        return {}
-    try:
-        entries: list[dict[str, Any]] = r.json()
-    except ValueError:
-        return {}
-    out: dict[str, str] = {}
+async def repo_file_meta(repo_id: str, revision: str = "main") -> dict[str, dict]:
+    """{repo path -> {'date': ISO8601 lastCommit.date, 'size': int}} for every file in a tree.
+
+    Size comes from the LFS pointer when there is one. A GGUF is always LFS, and `size` on the
+    entry itself is the pointer's size - about 130 bytes - not the model's, so reading the
+    wrong one would make every file look like it had changed.
+    """
+    entries = await _tree_entries(repo_id, revision, raise_for_status=False)
+    out: dict[str, dict] = {}
     for e in entries:
         if e.get("type") != "file":
             continue
         path = e.get("path", "")
-        last = (e.get("lastCommit") or {}).get("date") or ""
-        if path and last:
-            out[path] = last
+        if not path:
+            continue
+        lfs = e.get("lfs") or {}
+        size = lfs.get("size") if lfs.get("size") is not None else e.get("size")
+        out[path] = {"date": (e.get("lastCommit") or {}).get("date") or "",
+                     "size": int(size) if isinstance(size, (int, float)) else None}
     return out
+
+
+def _match_repo_path(local_name: str, meta: dict[str, dict]) -> str:
+    """The repo path a locally-stored file came from, or "".
+
+    These two are not the same string and the check used to compare them directly, so every
+    model downloaded since the subdir layout arrived scored "unknown" and no staleness was
+    ever evaluated for anything actually held. Downloads land under a subdir of OUR choosing -
+    `Qwen3.8-27B-UD-Q4_K_M/Qwen3.8-27B-UD-Q4_K_M.gguf` - while the repo may keep the file at
+    the top level, or under a quant directory of its own with a different name.
+
+    Exact path first, since a repo that does use subdirectories may hold the same basename in
+    several of them; basename only as the fallback.
+    """
+    if local_name in meta:
+        return local_name
+    base = local_name.rsplit("/", 1)[-1]
+    if base in meta:
+        return base
+    hits = [p for p in meta if p.rsplit("/", 1)[-1] == base]
+    return hits[0] if len(hits) == 1 else ""
 
 
 async def check_updates_for(records: list[dict]) -> int:
@@ -330,11 +370,14 @@ async def check_updates_for(records: list[dict]) -> int:
                 db.set_update_check(f, repo_id, None, now)
             continue
         try:
-            mtimes = await repo_file_mtimes(repo_id)
+            meta = await repo_file_meta(repo_id)
         except httpx.HTTPError:
-            mtimes = {}
+            meta = {}
         for f in files:
-            db.set_update_check(f, repo_id, mtimes.get(f), now)
+            path = _match_repo_path(f, meta) if meta else ""
+            e = meta.get(path) or {}
+            db.set_update_check(f, repo_id, e.get("date") or None, now,
+                                hf_size=e.get("size"), hf_path=path or None)
             total += 1
     return total
 
