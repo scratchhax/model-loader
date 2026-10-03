@@ -96,9 +96,15 @@ def _read_raw_stream(f) -> dict[str, Any]:
         magic = f.read(4)
         if magic != b"GGUF":
             raise GgufMetaError(f"not a GGUF file (magic={magic!r})")
-        version = struct.unpack("<I", f.read(4))[0]
-        tensor_count = struct.unpack("<Q", f.read(8))[0]
-        kv_count = struct.unpack("<Q", f.read(8))[0]
+        try:
+            version = struct.unpack("<I", f.read(4))[0]
+            tensor_count = struct.unpack("<Q", f.read(8))[0]
+            kv_count = struct.unpack("<Q", f.read(8))[0]
+        except struct.error as e:
+            # A file whose header cuts off mid-field: report it the way the KV loop reports
+            # its own truncation, rather than letting struct.error punch through the route's
+            # GgufMetaError handler as a 500.
+            raise GgufMetaError(f"truncated GGUF header: {e}")
         out: dict[str, Any] = {
             "_gguf_version": version,
             "_tensor_count": tensor_count,

@@ -181,6 +181,21 @@ def init() -> None:
             -- back to the output it was formed from rather than being an opinion from
             -- nowhere. It is nullable and ON DELETE is not enforced: a badge outlives the
             -- run that inspired it, and losing the run should not silently erase the verdict.
+            -- Logical folders for the models UI. Files never move (one directory per model is
+            -- the layout convention); the folder is recorded here and projected into the
+            -- models.ini section name -- the id llama-server serves and OpenWebUI lists -- as
+            -- `<Folder>/<name>`. OpenWebUI's picker is a flat searchable list, so the prefix
+            -- IS the grouping: it sorts into visual clusters and prefix-search is the nav.
+            CREATE TABLE IF NOT EXISTS folder (
+                folder     TEXT PRIMARY KEY,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS model_folder (
+                stem       TEXT PRIMARY KEY,   -- model file stem, as the models list knows it
+                folder     TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS model_badge (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 alias      TEXT NOT NULL,
@@ -735,3 +750,96 @@ def badges_by_alias() -> dict[str, list[sqlite3.Row]]:
         for r in c.execute("SELECT * FROM model_badge ORDER BY alias, category"):
             out.setdefault(r["alias"], []).append(r)
     return out
+
+
+def badge_move(old_alias: str, new_alias: str) -> int:
+    """Retarget badges to a renamed alias. Returns rows moved."""
+    with _LOCK, _conn() as c:
+        cur = c.execute("UPDATE model_badge SET alias = ? WHERE alias = ?", (new_alias, old_alias))
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------- folders
+#
+# Logical grouping for the models UI. A folder only exists to be a prefix: putting a model in
+# "Coding" renames its models.ini section to `Coding/<name>`, because the section name is the
+# id llama-server serves and the only thing OpenWebUI can group on. The files themselves never
+# move — one directory per model is the layout convention (mmproj companions, shards).
+
+def folders_list() -> list[sqlite3.Row]:
+    with _LOCK, _conn() as c:
+        return list(c.execute(
+            "SELECT f.folder, f.created_at, "
+            "(SELECT COUNT(*) FROM model_folder m WHERE m.folder = f.folder) AS members "
+            "FROM folder f ORDER BY f.folder COLLATE NOCASE").fetchall())
+
+
+def folder_create(name: str) -> tuple[bool, str]:
+    name = (name or "").strip()
+    if not name:
+        return False, "no folder name given"
+    if "/" in name or ".." in name:
+        return False, "folder names cannot contain '/' or '..'"
+    with _LOCK, _conn() as c:
+        if c.execute("SELECT 1 FROM folder WHERE folder = ?", (name,)).fetchone():
+            return False, f"folder {name!r} already exists"
+        c.execute("INSERT INTO folder(folder, created_at) VALUES(?, ?)", (name, time.time()))
+    return True, ""
+
+
+def folder_rename(old: str, new: str) -> tuple[bool, list[str]]:
+    """Rename a folder and return the member stems it carries over."""
+    new = (new or "").strip()
+    if not new or "/" in new or ".." in new:
+        return False, []
+    with _LOCK, _conn() as c:
+        members = [r["stem"] for r in c.execute(
+            "SELECT stem FROM model_folder WHERE folder = ?", (old,)).fetchall()]
+        if not c.execute("SELECT 1 FROM folder WHERE folder = ?", (old,)).fetchone():
+            return False, []
+        if c.execute("SELECT 1 FROM folder WHERE folder = ?", (new,)).fetchone():
+            return False, []
+        c.execute("UPDATE folder SET folder = ? WHERE folder = ?", (new, old))
+        c.executemany("UPDATE model_folder SET folder = ?, updated_at = ? WHERE stem = ?",
+                      [(new, time.time(), s) for s in members])
+    return True, members
+
+
+def folder_delete(name: str) -> tuple[bool, str]:
+    with _LOCK, _conn() as c:
+        if c.execute("SELECT 1 FROM model_folder WHERE folder = ?", (name,)).fetchone():
+            return False, "folder is not empty — move its models out first"
+        if not c.execute("DELETE FROM folder WHERE folder = ?", (name,)).rowcount:
+            return False, f"no such folder: {name}"
+    return True, ""
+
+
+def folder_map() -> dict[str, str]:
+    """stem -> folder for every grouped model."""
+    with _LOCK, _conn() as c:
+        return {r["stem"]: r["folder"] for r in
+                c.execute("SELECT stem, folder FROM model_folder").fetchall()}
+
+
+def folder_set(stem: str, folder: str | None) -> None:
+    """Assign a model stem to a folder, or ungroup it with folder=None. The folder row is
+    created on demand so a moved-into folder survives even if everything later moves out."""
+    with _LOCK, _conn() as c:
+        if folder is None:
+            c.execute("DELETE FROM model_folder WHERE stem = ?", (stem,))
+        else:
+            now = time.time()
+            if not c.execute("SELECT 1 FROM folder WHERE folder = ?", (folder,)).fetchone():
+                c.execute("INSERT OR IGNORE INTO folder(folder, created_at) VALUES(?, ?)",
+                          (folder, now))
+            c.execute(
+                "INSERT INTO model_folder(stem, folder, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(stem) DO UPDATE SET folder = excluded.folder, "
+                "updated_at = excluded.updated_at",
+                (stem, folder, now))
+
+
+def folder_members(folder: str) -> list[str]:
+    with _LOCK, _conn() as c:
+        return [r["stem"] for r in
+                c.execute("SELECT stem FROM model_folder WHERE folder = ?", (folder,)).fetchall()]
