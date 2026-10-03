@@ -89,13 +89,21 @@ This is deliberately manual, and an automated version was built as far as the sc
 
 ### Routing models to backends
 
-![The Models directory grouped by size tier: headings for "Needs more than one GPU", "Fits one GPU" and "Shares a GPU", each with a file count and total size, and one line per model carrying its MoE or dense shape, quant, placement, modality icons, state and your "good at" ratings. One row is expanded to show the drawer underneath it: the per-backend "offered on" toggles, the rating editor and the path on disk](docs/models_available.png)
+![The Models directory grouped by family: headings like gemma-4-26B-A4B-it and gemma-4-E4B-it-qat, each with a model count and total size, and one line per served model carrying its MoE or dense shape, quant, placement, modality icons, state and your "good at" ratings. Under each file sits any models.ini section that serves it under another name - wheatley-voice, voice-cpu - marked "same file" instead of a size. The voice-cpu row is expanded to show its drawer: the per-backend "offered on" toggles, its own rating editor, the path on disk, a link to edit the section, and a note that it shares its weights with gemma-4-E4B-it-qat-UD-Q4_K_XL](docs/models_available.png)
 
 Every llama.cpp backend reads the same `models.ini`, which means by default every backend offers every model — including the CPU one being asked for a 27B. The **offered on** toggles fix that per model: expand a row and click a backend to include or exclude it, and Model Loader writes the change into OpenWebUI's per-connection whitelist.
 
 Companion files fold into the model they belong to rather than listing as models of their own: `mmproj` projectors, and also MTP and draft heads, which are not independently servable. An explicit `noMTP` variant is left alone, since that is a real model choice rather than a companion.
 
-The row also shows what each model actually is: MoE or dense, its quant, whether the weights fit one GPU, what it takes as input, and whether it is resident right now. An alias is printed only when it differs from the filename — one GGUF can back several sections with different settings, and each gets its own toggles. The image and audio icons come from what the projector declares, and the vision flag is pushed into OpenWebUI so the image-upload control only appears where it can work.
+The row also shows what each model actually is: MoE or dense, its quant, whether the weights fit one GPU, what it takes as input, and whether it is resident right now. Those chips are derived from the section's own config — GGUF header, its `mmproj`, its speculation profile — rather than from OpenWebUI's copy of it, so they are right for a section OpenWebUI has never been told about, and the **fix** button still flags the two disagreeing.
+
+### Meta-models get their own row
+
+A file and a model are not the same thing. `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` backs two `models.ini` sections — its own and `voice-cpu` — with different settings over the same weights, and `voice-qwen` is the only name `Qwen3.5-4B` is served under at all. These are what you actually call from OpenWebUI, so each one is a row.
+
+What belongs to the **file** appears once, on the row that owns it: the byte count, the select box, delete. A second section over the same weights says `same file` instead of a size, because removing it frees nothing and must not double the group totals — though it still sorts on the file's size, so the two stay together in a size sort rather than the alias sinking to the bottom. What belongs to the **section** is per row, and is the reason the split is worth making: whether it is loaded right now, whether speculation is configured for it, which backends offer it, and what you have rated it all differ between two sections over one file. Family and size tier come from the file either way, so an alias groups with the weights it runs rather than off under its own initial.
+
+Every configured row carries a link straight to its section in `models.ini` — the settings that define it — and the **meta-model** filter chip lists them all.
 
 ### Finding one model among forty
 

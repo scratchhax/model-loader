@@ -79,6 +79,7 @@
          ('loaded', 'loaded', 'Resident in VRAM on some backend right now'),
          ('unconfigured', 'not configured', 'No section in models.ini, so llama-server will not serve it'),
          ('update', 'update', 'Hugging Face has a newer version than the local copy'),
+         ('alias', 'meta-model', 'Served under a models.ini name of its own rather than its filename - a second configuration over weights that are also served another way'),
          ('moe', 'MoE', 'Mixture of experts - only the routed experts are read per token'),
          ('multimodal', 'multimodal', 'Has a projector: images and/or audio in addition to text')] %}
     <button type="button" data-flag="{{ f }}" title="{{ ttl }}"
@@ -111,63 +112,76 @@
       </tr>
     </thead>
     <tbody id="ml-body" class="divide-y divide-slate-100 dark:divide-slate-800">
-      {% for g in snap.ggufs %}
-      {% set _f = (facets or {}).get(g.display_name) or {} %}
-      {% set _shape = (shapes or {}).get(g.display_name) %}
-      {% set _cap  = (owui.caps if owui else {}).get(g.model_id) %}
-      {% set _mods = (_cap.modalities if _cap else []) %}
-      {% set _loaded = (loaded_map or {}).get(g.model_id) or [] %}
-      {% set _us = (update_status or {}).get(g.display_name) %}
-      {% set _renamed = g.aliases | reject('equalto', g.stem) | list %}
-      {% set _badges = (badges or {}).get(g.display_name) or [] %}
+      {# One row per SERVED MODEL. The rows are built in _model_rows() rather than here,
+         because a file backing two models.ini sections is two models with different state,
+         ratings and backends, and working that out in Jinja would mean doing the join twice. #}
+      {% for r in rows %}
+      {% set g = r.g %}
       {% set owner = (file_to_owner or {}).get(g.display_name, '') %}
-      {% set identity = owner or g.stem %}
       {% set av_url = (avatars or {}).get(owner, '') if owner else '' %}
       {% set rowid = 'ml-' ~ loop.index0 %}
 
       <tr class="ml-row" id="{{ rowid }}"
           data-key="{{ g.display_name }}"
-          data-family="{{ _f.family or g.stem }}"
-          data-tier="{{ _f.tier or 'unknown' }}"
-          data-tier-label="{{ _f.tier_label or 'Size unknown' }}"
-          data-status="{{ _f.status or 'unconfigured' }}"
-          data-status-label="{{ _f.status_label or 'Not configured' }}"
-          data-flags="{{ _f.flags or '' }}"
-          data-size="{{ g.total_bytes }}"
+          data-id="{{ r.id }}"
+          data-family="{{ r.family }}"
+          data-tier="{{ r.tier }}"
+          data-tier-label="{{ r.tier_label }}"
+          data-status="{{ r.status }}"
+          data-status-label="{{ r.status_label }}"
+          data-flags="{{ r.flags }}"
+          data-size="{{ r.sort_bytes }}"
+          data-bytes="{{ r.count_bytes }}"
           data-mtime="{{ g.mtime }}"
-          data-search="{{ (g.display_name ~ ' ' ~ (_f.family or '') ~ ' ' ~ (_f.quant or '') ~ ' ' ~ owner ~ ' ' ~ (_shape.arch if _shape else '') ~ ' ' ~ (g.aliases | join(' '))) | lower }}">
+          data-search="{{ r.search }}">
 
         <td class="px-3 py-2 w-8 align-top">
+          {# The checkbox selects a FILE to delete. A second section over the same weights
+             frees nothing, so it does not get one. #}
+          {% if r.primary %}
           <input type="checkbox" name="names" value="{{ g.display_name }}" x-model="selected" aria-label="select {{ g.display_name }}">
+          {% endif %}
         </td>
 
-        {# ---- model: name, then one subline of what distinguishes THIS file ------------ #}
+        {# ---- model: the id it is SERVED under, then what distinguishes it --------------- #}
         <td class="px-4 py-2 min-w-0">
           <div class="flex items-center gap-2 min-w-0">
-            {{ avatar(identity, av_url, size=20) }}
+            {{ avatar(owner or r.id, av_url, size=20) }}
             <div class="min-w-0">
-              <a href="/model/{{ g.route_key }}" class="font-mono text-[13px] truncate block hover:underline">{{ g.display_name }}</a>
+              {% if r.is_alias %}
+                {# A model that exists only in models.ini. The section name is what you call
+                   from OpenWebUI, so it is the headline and the file it runs is the detail. #}
+                <a href="/config/section/{{ r.id | urlencode }}/edit"
+                   class="font-mono text-[13px] truncate block hover:underline"
+                   title="A models.ini section serving {{ g.display_name }} under this id, with its own settings. Click to open it.">{{ r.id }}</a>
+              {% else %}
+                <a href="/model/{{ g.route_key }}" class="font-mono text-[13px] truncate block hover:underline">{{ g.display_name }}</a>
+              {% endif %}
               <div class="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
+                {% if r.is_alias %}
+                <a href="/model/{{ g.route_key }}" class="font-mono hover:underline"
+                   title="The weights this section runs">{{ g.display_name }}</a>
+                {% endif %}
                 {# MoE vs dense, because it decides what offloading costs. Shared macro with
                    the models.ini section cards, so one model reads the same on both pages. #}
-                {{ caps_chips(_shape) }}
+                {{ caps_chips(r.shape) }}
                 {# The quant is the one part of the filename that varies between copies of the
                    same model, which is exactly why it is also what the family grouping strips. #}
-                {% if _f.quant %}
+                {% if r.quant and not r.is_alias %}
                 <span class="rounded bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 px-1.5 py-0.5 font-mono"
-                      title="Quantisation. Everything else in this filename is the family, which is what the Family grouping collapses on.">{{ _f.quant }}</span>
+                      title="Quantisation. Everything else in this filename is the family, which is what the Family grouping collapses on.">{{ r.quant }}</span>
                 {% endif %}
                 {# Outlined rather than filled: this is a plain fact about the file, and a
                    filled amber chip on every large model reads as a warning about it. #}
-                {% if _f.tier_short %}
+                {% if r.tier_short %}
                 <span class="rounded border px-1.5 py-0.5 border-slate-300 text-slate-500 dark:border-slate-700 dark:text-slate-400"
-                      title="{{ _f.tier_label }} — weights alone against one {{ '%.0f' | format(_f.card_gb or 0) }} GB card. KV and compute buffers are NOT in this number and they are not small; the Autoconfig panel is where that sum is done properly.">{{ _f.tier_short }}</span>
+                      title="{{ r.tier_label }} — weights alone against one {{ '%.0f' | format(r.card_gb or 0) }} GB card. KV and compute buffers are NOT in this number and they are not small; the Autoconfig panel is where that sum is done properly.">{{ r.tier_short }}</span>
                 {% endif %}
-                {% if owner %}<span class="truncate">{{ owner }}</span>{% endif %}
-                {% if g.is_sharded %}<span>· {{ g.parts | length }} shards</span>{% endif %}
+                {% if owner and not r.is_alias %}<span class="truncate">{{ owner }}</span>{% endif %}
+                {% if g.is_sharded and not r.is_alias %}<span>· {{ g.parts | length }} shards</span>{% endif %}
                 {# Only when it tells you something: a subdir named after the file is the
                    normal layout for a sharded download and repeating it is pure noise. #}
-                {% if g.subdir and g.subdir != g.stem %}
+                {% if g.subdir and g.subdir != g.stem and not r.is_alias %}
                 <span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono">📁 {{ g.subdir }}/</span>
                 {% endif %}
               </div>
@@ -175,7 +189,7 @@
           </div>
         </td>
 
-        {# ---- takes: modalities and decoding features, icon-only ---------------------- #}
+        {# ---- takes: modalities and decoding features for THIS section ------------------ #}
         <td class="px-3 py-2 align-middle">
           <div class="flex items-center gap-1">
             <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
@@ -183,15 +197,12 @@
             {# Same macro as the shape chip and as the models.ini section cards. An internally
                speculating model drafts with its own MTP layers rather than a separate head, so
                it gets the MTP chip - a distinction the OpenWebUI record alone cannot make. #}
-            {{ caps_chips(mods=_mods,
-                          spec=(('mtp' if _shape and _shape.internal_mtp else 'head')
-                                if _cap and _cap.speculative else ''),
-                          proj_unknown=(g.companion_name and not _mods),
-                          proj_name=g.companion_name) }}
-            {% if _cap and _cap.mismatch %}
+            {{ caps_chips(mods=r.mods, spec=r.spec, head_idle=r.head_idle,
+                          proj_unknown=r.proj_unknown, proj_name=g.companion_name) }}
+            {% if r.cap.mismatch %}
             <button type="button"
                     hx-post="/models/align-capability"
-                    hx-vals='{"section": {{ g.model_id | tojson }}}'
+                    hx-vals='{"section": {{ r.id | tojson }}}'
                     hx-target="#models-owui-toast" hx-swap="innerHTML"
                     hx-on::after-request="setTimeout(()=>location.reload(),1200)"
                     title="OpenWebUI disagrees with models.ini about this model — click to align."
@@ -200,49 +211,44 @@
           </div>
         </td>
 
-        {# ---- state: configured / loaded / stale, one line ----------------------------- #}
+        {# ---- state: of THIS section, which is the point of giving it a row ------------- #}
         <td class="px-3 py-2 align-middle">
           <div class="flex flex-wrap items-center gap-1 text-[11px]">
             {% if g.is_companion %}
               <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
                     title="Companion file (mmproj etc.) with no main model in its folder. Safe to delete.">orphan companion</span>
-            {% elif not g.aliases %}
+            {% elif not r.configured %}
               <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
                     title="No section in models.ini yet — llama-server will not serve this until one exists.">not configured</span>
             {% endif %}
-            {% if _loaded %}
-              {% for bn in _loaded %}
+            {% if r.loaded %}
+              {% for bn in r.loaded %}
               <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
-                    title="Resident in VRAM on {{ bn }} right now">{{ icon('zap', 10) }} {{ bn }}</span>
+                    title="{{ r.id }} is resident in VRAM on {{ bn }} right now">{{ icon('zap', 10) }} {{ bn }}</span>
               {% endfor %}
-            {% elif g.aliases and not g.is_companion %}
+            {% elif r.configured and not g.is_companion %}
               {# Muted text, not a green pill. Almost every model is configured-and-idle, so a
                  filled chip here painted the whole column one colour and the two states that
                  DO need attention - loaded, not configured - stopped standing out. #}
               <span class="text-[10px] text-slate-400 dark:text-slate-600"
-                    title="Has a section in models.ini. Served as: {{ g.aliases | join(', ') }}. Not resident right now.">ready</span>
+                    title="Has a section in models.ini and is not resident right now.">ready</span>
             {% endif %}
-            {# Only when it is NOT the filename stem: an id equal to the name says nothing. #}
-            {% if _renamed %}
-            <span class="font-mono text-slate-500 dark:text-slate-400"
-                  title="Served under this API id instead of the filename stem">{{ _renamed | join(', ') }}</span>
-            {% endif %}
-            {% if _us and _us.status == 'stale' %}
+            {% if r.update %}
             <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                  title="Hugging Face has a newer version dated {{ _us.remote }} ({{ _us.delta_days }} day{{ 's' if _us.delta_days != 1 else '' }} newer)">update</span>
+                  title="Hugging Face has a newer version dated {{ r.update.remote }} ({{ r.update.delta_days }} day{{ 's' if r.update.delta_days != 1 else '' }} newer)">update</span>
             {% endif %}
           </div>
         </td>
 
-        {# ---- good at: your ratings, read-only here; the editor is in the drawer -------- #}
+        {# ---- good at: your ratings for THIS id; the editor is in the drawer ------------ #}
         <td class="px-3 py-2 align-middle">
           <div class="flex flex-wrap items-center gap-1">
-            {% for b in _badges %}
+            {% for b in r.badges %}
             <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[11px]
               {% if b.rating >= 4 %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
               {% elif b.rating == 3 %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
               {% else %}bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300{% endif %}"
-              title="{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5 — your rating, set {{ b.created_at | ts }}{% if b.note %} · {{ b.note }}{% endif %}">{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5</span>
+              title="{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5 — your rating of {{ r.id }}, set {{ b.created_at | ts }}{% if b.note %} · {{ b.note }}{% endif %}">{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5</span>
             {% else %}
             <span class="text-[10px] text-slate-400 dark:text-slate-600">not rated</span>
             {% endfor %}
@@ -250,15 +256,29 @@
         </td>
 
         <td class="px-3 py-2 text-right align-middle w-32 whitespace-nowrap">
+          {% if r.primary %}
           <div class="tabular-nums text-slate-700 dark:text-slate-200">{{ g.human_size }}</div>
           <div class="tabular-nums text-[11px] text-slate-400 dark:text-slate-500"
                title="Modified {{ g.modified }}">{{ g.modified[:10] }}</div>
+          {% else %}
+          {# The bytes are already counted on the row that owns the file. Printing them again
+             would double every group total and suggest deleting this frees disk. It does not. #}
+          <div class="text-[11px] text-slate-400 dark:text-slate-600"
+               title="Same {{ g.human_size }} file as {{ g.display_name }} — a second section over the same weights, costing no extra disk">same file</div>
+          {% endif %}
         </td>
 
         <td class="px-3 py-2 text-right align-middle whitespace-nowrap">
           <button type="button" class="ml-expand rounded-md border border-slate-200 dark:border-slate-700 px-1.5 py-1
                                        text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"
                   aria-expanded="false" title="Availability, ratings and paths">{{ icon('chevron-down', 13) }}</button>
+          {% if r.configured %}
+          <a href="/config/section/{{ r.id | urlencode }}/edit"
+             class="inline-block rounded-md border border-slate-200 dark:border-slate-700 px-1.5 py-1
+                    text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"
+             title="Open [{{ r.id }}] in models.ini — the settings that define this model">{{ icon('file-cog', 13) }}</a>
+          {% endif %}
+          {% if r.primary %}
           <button
             hx-post="/models/delete"
             hx-vals='{"name": "{{ g.display_name }}"}'
@@ -269,10 +289,11 @@
             class="rounded-md border border-slate-200 dark:border-slate-700 px-1.5 py-1 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">
             {{ icon('trash-2', 13) }}
           </button>
+          {% endif %}
         </td>
       </tr>
 
-      {# ---- drawer: the one-model-at-a-time controls -------------------------------------
+      {# ---- drawer: the one-model-at-a-time controls, for THIS served id -----------------
          Collapsed by default because none of it is scanning material. The whitelist toggles
          and the rating form are things you do TO one model you have already found, and keeping
          them on the visible line is what made eleven rows take 2100px. #}
@@ -281,38 +302,33 @@
         <td colspan="6" class="px-4 py-3">
           <div class="flex flex-col gap-2.5 text-xs">
 
-            {% if owui and owui.conns %}
-              {% for mid in (g.aliases or [g.model_id]) %}
-                {% set vis = (owui.visible or {}).get(mid) %}
-                {% if vis %}
-                <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">offered on</span>
-                  {% if (g.aliases | length) > 1 %}<span class="text-[10px] font-mono text-slate-500 dark:text-slate-400">{{ mid }}</span>{% endif %}
-                  {% for c in owui.conns %}
-                    {% set on = vis.get(c.url) %}
-                    <button type="button"
-                            hx-post="/models/openwebui-visibility"
-                            hx-vals='{"url": {{ c.url | tojson }}, "model_id": {{ mid | tojson }}, "show": "{{ 0 if on else 1 }}"}'
-                            hx-target="#models-owui-toast" hx-swap="innerHTML"
-                            hx-confirm="{{ 'Hide' if on else 'Show' }} {{ mid }} on {{ c.host }}? Restarts open-webui (~5s)."
-                            hx-on::after-request="setTimeout(()=>location.reload(),1600)"
-                            class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono border transition
-                              {% if on %}bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800
-                              {% else %}bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700{% endif %}"
-                            title="{{ 'Offered' if on else 'Not offered' }} on {{ c.host }}{% if not c.explicit %} (this connection currently offers every model){% endif %} — click to {{ 'remove' if on else 'add' }}">
-                      {{ c.prefix_id or c.host }}
-                    </button>
-                  {% endfor %}
-                </div>
-                {% endif %}
+            {% set vis = (owui.visible or {}).get(r.id) if owui else None %}
+            {% if owui and owui.conns and vis %}
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">offered on</span>
+              {% for c in owui.conns %}
+                {% set on = vis.get(c.url) %}
+                <button type="button"
+                        hx-post="/models/openwebui-visibility"
+                        hx-vals='{"url": {{ c.url | tojson }}, "model_id": {{ r.id | tojson }}, "show": "{{ 0 if on else 1 }}"}'
+                        hx-target="#models-owui-toast" hx-swap="innerHTML"
+                        hx-confirm="{{ 'Hide' if on else 'Show' }} {{ r.id }} on {{ c.host }}? Restarts open-webui (~5s)."
+                        hx-on::after-request="setTimeout(()=>location.reload(),1600)"
+                        class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-mono border transition
+                          {% if on %}bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800
+                          {% else %}bg-slate-100 text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700{% endif %}"
+                        title="{{ 'Offered' if on else 'Not offered' }} on {{ c.host }}{% if not c.explicit %} (this connection currently offers every model){% endif %} — click to {{ 'remove' if on else 'add' }}">
+                  {{ c.prefix_id or c.host }}
+                </button>
               {% endfor %}
+            </div>
             {% endif %}
 
-            {# Rated against g.model_id: the ini section name llama-server actually serves the
-               file under, which is also what _badges_for_files reads back. #}
+            {# Rated against this section's own id, so two models over one file can be rated
+               differently - which is the point of their being two models. #}
             <div class="flex flex-wrap items-center gap-1.5">
               <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">good at</span>
-              {% with alias = g.model_id, badges = _badges, run_id = 0, collapsible = False %}
+              {% with alias = r.id, badges = r.badges, run_id = 0, collapsible = False %}
                 {% include "_badges.html" %}
               {% endwith %}
             </div>
@@ -321,8 +337,22 @@
               <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">on disk</span>
               <span class="font-mono text-[11px] text-slate-500 dark:text-slate-400">{{ snap.path }}/{{ g.first_shard_rel }}</span>
               {% if g.companion_name %}<span class="text-[11px] text-slate-500 dark:text-slate-400">· projector {{ g.companion_name }}</span>{% endif %}
-              <a href="/model/{{ g.route_key }}" class="text-[11px] underline text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100">details</a>
+              <a href="/model/{{ g.route_key }}" class="text-[11px] underline text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100">file details</a>
+              {% if r.configured %}
+              <a href="/config/section/{{ r.id | urlencode }}/edit" class="text-[11px] underline text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100">edit [{{ r.id }}]</a>
+              {% endif %}
             </div>
+
+            {% if r.siblings %}
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">same file</span>
+              <span class="text-[11px] text-slate-500 dark:text-slate-400">
+                also served as
+                {% for sid in r.siblings %}<a href="/config/section/{{ sid | urlencode }}/edit" class="font-mono underline">{{ sid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+                — the same weights with their own settings, so they can be loaded, offered and rated separately.
+              </span>
+            </div>
+            {% endif %}
 
           </div>
         </td>
@@ -457,10 +487,19 @@
         var ga = groupOf(a), gb = groupOf(b);
         if (ga !== gb) return ga.localeCompare(gb, undefined, { sensitivity: 'base' });
       }
-      if (state.sort === 'size') return +b.getAttribute('data-size') - +a.getAttribute('data-size');
-      if (state.sort === 'mtime') return +b.getAttribute('data-mtime') - +a.getAttribute('data-mtime');
-      return a.getAttribute('data-key').localeCompare(b.getAttribute('data-key'),
-                                                      undefined, { sensitivity: 'base' });
+      // Size and date are properties of the FILE, so two sections over one file tie on
+      // them; the row that owns the bytes goes first so "same file" reads as a continuation.
+      var sa = +a.getAttribute('data-size'), sb = +b.getAttribute('data-size');
+      if (state.sort === 'size' && sa !== sb) return sb - sa;
+      var ma = +a.getAttribute('data-mtime'), mb = +b.getAttribute('data-mtime');
+      if (state.sort === 'mtime' && ma !== mb) return mb - ma;
+      if (state.sort !== 'name') {
+        var ka = a.getAttribute('data-key'), kb = b.getAttribute('data-key');
+        if (ka !== kb) return ka.localeCompare(kb, undefined, { sensitivity: 'base' });
+        return (+b.getAttribute('data-bytes')) - (+a.getAttribute('data-bytes'));
+      }
+      return a.getAttribute('data-id').localeCompare(b.getAttribute('data-id'),
+                                                    undefined, { sensitivity: 'base' });
     });
 
     rows.forEach(function (tr) {
@@ -473,12 +512,12 @@
 
     var prev = null, bytes = 0;
     shown.forEach(function (tr) {
-      bytes += +tr.getAttribute('data-size');
+      bytes += +tr.getAttribute('data-bytes');
       var g = groupOf(tr);
       if (state.group && g !== prev) {
         prev = g;
         var members = shown.filter(function (x) { return groupOf(x) === g; });
-        var sum = members.reduce(function (a, x) { return a + (+x.getAttribute('data-size')); }, 0);
+        var sum = members.reduce(function (a, x) { return a + (+x.getAttribute('data-bytes')); }, 0);
         var head = document.createElement('tr');
         head.className = 'ml-head';
         head.innerHTML = '<td colspan="7" class="px-4 pt-3 pb-1">' +
@@ -487,7 +526,7 @@
         /* textContent, not string interpolation: a family name comes from a filename on disk. */
         head.querySelector('span').textContent = g;
         head.querySelectorAll('span')[1].textContent =
-          members.length + (members.length === 1 ? ' file · ' : ' files · ') + human(sum);
+          members.length + (members.length === 1 ? ' model · ' : ' models · ') + human(sum);
         body.appendChild(head);
       }
       body.appendChild(tr);
