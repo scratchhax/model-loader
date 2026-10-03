@@ -83,9 +83,20 @@ def kfd_process_vram_gb() -> float:
     return best / (1024 ** 3)
 
 
-def _components(name: str, vendor: str, gpu_count: int) -> dict | None:
+def _components(name: str, vendor: str, gpu_count: int,
+                loaded_ids: frozenset[str] | None = None) -> dict | None:
     """Static per-load VRAM components for what this backend has loaded, or None when any
-    input needed for an honest estimate is missing or contradictory."""
+    input needed for an honest estimate is missing or contradictory.
+
+    `loaded_ids` is what the router says is resident RIGHT NOW. It has to be checked, because
+    everything here describes a SPAWN RECORD scraped from the log and those two can disagree:
+    telemetry ingests on a 20 s timer, so for the first seconds of a new model the newest
+    recorded spawn is still the previous one. Pairing a live measurement with the wrong
+    model's file does not degrade gracefully - it produces a confident, specific, wrong
+    answer. Observed: a dense 25 GB gemma fully resident on the cards, measured at 48.7 GB of
+    VRAM, costed against the 90.8 GB Flash-Next record that was 32 seconds older, and reported
+    as "60% of experts in system RAM" on a model that has no experts and spilled nothing.
+    """
     cfg = db.latest_server_config(name)
     argv = cfg.get("argv") or {}
     path_s = cfg.get("model_path") or argv.get("--model") or argv.get("-m") or ""
@@ -93,6 +104,11 @@ def _components(name: str, vendor: str, gpu_count: int) -> dict | None:
     if not path_s and alias:
         path_s = (ini.get_section(alias) or {}).get("model", "").strip()
     if not path_s:
+        return None
+    # Identity gate. An empty set means nobody asked or the probe has not run, and the caller
+    # gets the old behaviour; a non-empty set that does not contain this record's alias means
+    # the record is for a model that is not the one on the cards.
+    if loaded_ids and alias and alias not in loaded_ids:
         return None
     model = _host_path(path_s)
     try:
@@ -183,17 +199,22 @@ def _components(name: str, vendor: str, gpu_count: int) -> dict | None:
             "is_moe": bool(isinstance(g.get("experts"), int) and (g.get("experts") or 0) > 1)}
 
 
-def _cached_components(name: str, vendor: str, gpu_count: int) -> dict | None:
+def _cached_components(name: str, vendor: str, gpu_count: int,
+                       loaded_ids: frozenset[str] | None = None) -> dict | None:
+    # The loaded model is part of the key, not just an argument: caching on the backend name
+    # alone would serve the previous model's components for the whole TTL after a swap, which
+    # is the same mismatch the gate exists to prevent.
+    key = (name, loaded_ids or frozenset())
     with _LOCK:
-        entry = _CACHE.get(name)
+        entry = _CACHE.get(key)
         if entry and (time.time() - entry[0]) < (_TTL_S if entry[1] else _NEG_TTL_S):
             return entry[1]
     try:
-        comps = _components(name, vendor, gpu_count)
+        comps = _components(name, vendor, gpu_count, loaded_ids)
     except Exception:  # noqa: BLE001 - a meter that fails must degrade to the plain bar
         comps = None
     with _LOCK:
-        _CACHE[name] = (time.time(), comps)
+        _CACHE[key] = (time.time(), comps)
     return comps
 
 
@@ -224,7 +245,7 @@ def _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb, total
             for k, lbl, v, note in parts if v > 0.005]
 
 
-def breakdown(name: str, gpu) -> dict | None:
+def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict | None:
     """Live part-to-whole VRAM breakdown for one backend, or None.
 
     None is the answer far more often than for the recommended-configuration meter, and every
@@ -241,7 +262,7 @@ def breakdown(name: str, gpu) -> dict | None:
     if total_gb <= 0 or used_gb <= 0:
         return None
 
-    comps = _cached_components(name, gpu.vendor, gpu.gpu_count)
+    comps = _cached_components(name, gpu.vendor, gpu.gpu_count, loaded_ids)
     if comps is None:
         return None
 

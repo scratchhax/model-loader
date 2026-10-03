@@ -257,6 +257,20 @@ async def _hero_context() -> dict:
     _rank, b, sp = best
     model_id = (b.loaded_model or "").split(",")[0].strip()
 
+    # Fold in this backend's log before anything reads its spawn record. Rate-limited to once
+    # every 20 s internally, so an HTMX poll does not re-read the log every two seconds.
+    #
+    # This used to happen only inside _hero_mtp(), which returns early when the RECORDED argv
+    # declares no --spec-type - and that record is exactly the thing that goes stale. Load a
+    # model whose predecessor did not speculate and nothing on this page ever refreshed it:
+    # observed four minutes after a swap, with the VRAM meter costing a 25 GB dense gemma
+    # against the 90 GB MoE record it replaced. A page that renders a backend's state should
+    # not depend on what the previous model happened to have configured.
+    try:
+        telemetry.ingest([b.name])
+    except Exception:  # noqa: BLE001 - stale telemetry must never cost the hero
+        pass
+
     # Config and shape come from the section and the GGUF header - the same sources the models
     # page uses, so the hero cannot disagree with the rest of the app.
     ctx_cfg = ""
@@ -294,7 +308,10 @@ async def _hero_context() -> dict:
     hero_weights_split = None
     try:
         if st.ok and st.gpu:
-            hero_weights_split = (vram_live.breakdown(b.name, st.gpu) or {}).get("weights_split")
+            hero_weights_split = (vram_live.breakdown(
+                b.name, st.gpu,
+                frozenset(i.strip() for i in (b.loaded_model or "").split(",") if i.strip()),
+            ) or {}).get("weights_split")
     except Exception:  # noqa: BLE001 - a missing line must never cost the hero
         hero_weights_split = None
 
@@ -358,7 +375,8 @@ def _gpu_strip_context() -> dict:
             # context". The pooled meter is where those are separable, because the fixed costs
             # are known per card and only the PLACEMENT is not, so it is drawn once underneath
             # with the full legend and the spill bar, exactly as the container card draws it.
-            pooled_vb = vram_live.breakdown(name, st.gpu)
+            pooled_vb = vram_live.breakdown(name, st.gpu,
+                                            frozenset(services.last_loaded_ids(name)))
             card_breakdowns = vram_live.per_card(pooled_vb, cards)
         pts = hw.history_for(name)
         if pts:
@@ -2276,7 +2294,9 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     vb_heading = None
     if st and st.ok:
         if st.gpu and _solo_backend() == name:
-            vram_breakdown = vram_live.breakdown(name, st.gpu)
+            vram_breakdown = vram_live.breakdown(
+                name, st.gpu,
+                frozenset(i.strip() for i in (b.loaded_model or "").split(",") if i.strip()))
         elif not st.gpu and st.container:
             vram_breakdown = vram_live.ram_breakdown(name, st.container)
             if vram_breakdown:
