@@ -498,6 +498,10 @@ class LlamaBackend:
     sleep_idle_s: int = 0
     # Whether it is sleeping RIGHT NOW. Only meaningful when sleep_idle_s > 0.
     asleep: bool = False
+    # True when launched with --models-preset/--models-dir, i.e. it serves models.ini and can
+    # swap models. False for a -m server such as the Orpheus TTS backend, which serves exactly
+    # one file and is not a chat endpoint.
+    router: bool = True
 
 
 def _parse_started_at(iso: str) -> tuple[str, str]:
@@ -657,6 +661,20 @@ async def _probe_loaded_model(
             failure: str | None = None
             for it in items:
                 mid = str(it.get("id") or "")
+                # A ROUTER reports status.value per model because it loads and evicts them. A
+                # server started with -m has no status field at all, because it has nothing to
+                # load or unload: the one model named on its command line is resident for the
+                # life of the process. Reading an absent status as "not loaded" made Orpheus
+                # TTS report "1 configured, none loaded" while it was actively speaking, and
+                # left the overview claiming nothing was running whenever it was the only
+                # backend holding a model. Its id is the container path, so show the stem.
+                if "status" not in it:
+                    stem = mid.rsplit("/", 1)[-1]
+                    if stem.lower().endswith(".gguf"):
+                        stem = stem[:-5]
+                    if stem:
+                        loaded_ids.append(stem)
+                    continue
                 status = it.get("status") or {}
                 val = str(status.get("value") or "").lower()
                 if val == "loaded":
@@ -801,6 +819,7 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
 
     out: list[LlamaBackend] = []
     probe_targets: list[tuple[int, str, int | None]] = []  # (idx, name, internal_port)
+    _routers = {d["name"]: bool(d.get("router")) for d in discover_llama_containers()}
 
     for i, name in enumerate(effective):
         b = LlamaBackend(name=name, found=False, status="not_found")
@@ -819,6 +838,7 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             b.uptime = up
             b.host_ports, b.internal_port = _extract_ports(attrs)
             b.sleep_idle_s = _sleep_idle_seconds(attrs)
+            b.router = _routers.get(name, True)
             if b.sleep_idle_s > 0 and b.status == "running":
                 b.asleep = _is_asleep(c)
         except NotFound:

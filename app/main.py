@@ -245,7 +245,12 @@ async def _hero_context() -> dict:
         if not b.loaded_model:
             continue
         sp = await services.inference_speed(b.name, b.internal_port, b.loaded_model)
-        rank = 2 if (sp and sp.live) else 1
+        # A chat backend outranks a single-model one at the same activity level, so a TTS
+        # server - which holds its model permanently and therefore always counts as loaded -
+        # cannot take the headline from the model you are actually talking to. It still leads
+        # when it is the only thing running, which is the point: before this, an overview with
+        # only Orpheus resident read as a dead box.
+        rank = (2 if b.router else 0) + (1 if (sp and sp.live) else 0)
         if best is None or rank > best[0]:
             best = (rank, b, sp)
     if best is None:
