@@ -329,11 +329,7 @@ def to_cli(name: str, items: list[tuple[str, str]]) -> str:
     # `model` is documented as relative to /models, but autoconfig writes the container-absolute
     # path llama-server actually wants. Accept both rather than emitting /models//models/...
     if not explicit_model:
-        # A folder-prefixed section (`Coding/foo`) still names the FILE by its last segment;
-        # the prefix is grouping, not part of the filename.
-        last = name.rsplit("/", 1)[-1]
-        rel = _stems_present().get(last) if "/" in name else None
-        model_path = f"/models/{rel}" if rel else f"/models/{last}.gguf"
+        model_path = f"/models/{name}.gguf"
     elif explicit_model.startswith("/"):
         model_path = explicit_model
     else:
@@ -488,9 +484,7 @@ def section_file_rel(name: str, vals: dict | None = None) -> str | None:
                 return rel
         except OSError:
             pass
-    stems = _stems_present()
-    # A folder-prefixed section (`Coding/foo`) names the file by its last segment.
-    return stems.get(name) or stems.get(name.rsplit("/", 1)[-1])
+    return _stems_present().get(name)
 
 
 def sections_by_file() -> dict[str, list[str]]:
@@ -558,10 +552,7 @@ def unregistered_gguf_stems() -> list[str]:
 
 # ---- writing ----
 
-# Slashes are allowed so a section can carry a folder prefix (`Coding/foo`), which is the
-# only grouping OpenWebUI's flat picker can see. configparser handles them; keep them out of
-# the FIRST segment if a tool ever resolves names as filenames.
-_SECTION_NAME_RE = re.compile(r"^[A-Za-z0-9._\-+]+(/[A-Za-z0-9._\-+]+)*$")
+_SECTION_NAME_RE = re.compile(r"^[A-Za-z0-9._\-+]+$")
 
 
 def valid_section_name(name: str) -> bool:
@@ -676,35 +667,6 @@ def rename_section(old: str, new: str) -> bool:
         cp.set(new, k, v)
     _atomic_write(cp)
     return True
-
-
-def move_sections(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Rename several sections in one atomic write, pinning `model =` on any renamed section
-    that relied on its name to find its file.
-
-    A section whose name matches its file stem has no `model =` and depends on that match;
-    once a folder prefix changes the name, the association would silently break, so the path
-    is materialised before the rename. Pairs whose target already exists are skipped (reported
-    back with an empty target). Returns the (old, new) pairs that were applied.
-    """
-    cp = read_ini()
-    applied: list[tuple[str, str]] = []
-    for old, new in pairs:
-        if not cp.has_section(old) or not valid_section_name(new) or cp.has_section(new):
-            continue
-        if "model" not in cp[old] and "/" in new:
-            rel = _stems_present().get(old) or _stems_present().get(old.rsplit("/", 1)[-1])
-            if rel:
-                cp.set(old, "model", f"/models/{rel}")
-        items = list(cp.items(old))
-        cp.remove_section(old)
-        cp.add_section(new)
-        for k, v in items:
-            cp.set(new, k, v)
-        applied.append((old, new))
-    if applied:
-        _atomic_write(cp)
-    return applied
 
 
 def _atomic_write(cp: configparser.ConfigParser) -> None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import html
 import os
-import re
 import time
 from pathlib import Path
 
@@ -625,65 +624,19 @@ def _owui_visibility() -> dict:
     }
 
 
-def _folder_groups(snap) -> list[dict]:
-    """snap.ggufs bucketed by their logical folder: [{folder: "Coding", ggufs: [...]}, ...],
-    alphabetical, ungrouped (folder "") last."""
-    fmap = db.folder_map()
-    buckets: dict[str, list] = {}
-    for g in snap.ggufs:
-        buckets.setdefault(fmap.get(g.stem, ""), []).append(g)
-    out = [{"folder": k, "ggufs": buckets[k]} for k in sorted(buckets) if k]
-    if "" in buckets:
-        out.append({"folder": "", "ggufs": buckets[""]})
-    return out
-
-
-async def _models_list_ctx(request: Request, flash: dict | None = None) -> dict:
+@app.get("/models", response_class=HTMLResponse)
+async def models_page(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
     file_to_owner, avatars = await _models_avatar_map(snap)
-    return {
-        "request": request, "snap": snap, "flash": flash,
+    return templates.TemplateResponse("models.html", {
+        "request": request, "snap": snap, "flash": None,
         "loaded_map": await _loaded_map(),
         "file_to_owner": file_to_owner, "avatars": avatars,
         "update_status": _update_status_map(snap),
         "owui": _owui_visibility(),
         "badges": _badges_for_files(snap),
         "shapes": _shapes_for_files(snap),
-        "groups": _folder_groups(snap),
-        "folders": db.folders_list(),
-    }
-
-
-def _owui_reconcile_renames(pairs: list[tuple[str, str]]) -> None:
-    """Carry OpenWebUI's per-connection whitelists across a batch of id renames in ONE pass,
-    dropping ids no section provides any more — same logic as config_section_rename. Best
-    effort: OpenWebUI being down must not fail the rename itself."""
-    if not pairs:
-        return
-    try:
-        m = dict(pairs)
-        known = set(ini.section_names())
-        for c in (services.openwebui_state().get("connections") or []):
-            ids = c.get("model_ids") or []
-            if not ids:
-                continue  # empty whitelist = "offer everything"; nothing to reconcile
-            fixed = [m.get(x, x) for x in ids]
-            fixed = [x for x in fixed if x in known]
-            # Never write an empty list: that would flip the connection from a filter to
-            # "offer every model", quietly widening what this backend exposes.
-            if fixed and fixed != ids:
-                services.set_openwebui_model_filter(c["url"], fixed)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        services.align_openwebui_capabilities()
-    except Exception:  # noqa: BLE001
-        pass
-
-
-@app.get("/models", response_class=HTMLResponse)
-async def models_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("models.html", await _models_list_ctx(request))
+    })
 
 
 def _shapes_for_files(snap) -> dict:
@@ -804,8 +757,15 @@ async def models_delete(request: Request, name: str = Form(...)) -> HTMLResponse
             services.sync_openwebui_capabilities()
         except Exception:  # noqa: BLE001 -- deletion must succeed even if OpenWebUI is down
             pass
+    snap = services.snapshot_models_dir()
+    file_to_owner, avatars = await _models_avatar_map(snap)
     flash = {"ok": ok, "msg": msg, "freed_h": human_bytes(freed) if freed else None}
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
+    return templates.TemplateResponse("_models_list.html", {
+        "request": request, "snap": snap, "flash": flash,
+        "loaded_map": await _loaded_map(),
+        "file_to_owner": file_to_owner, "avatars": avatars,
+        "update_status": _update_status_map(snap),
+    })
 
 
 @app.post("/models/delete-bulk", response_class=HTMLResponse)
@@ -837,7 +797,12 @@ async def models_delete_bulk(request: Request) -> HTMLResponse:
         flash = {"ok": False, "msg": f"deleted {ok_count}, {len(errors)} failed: " + "; ".join(errors[:3])}
     else:
         flash = {"ok": True, "msg": f"deleted {ok_count} file(s)", "freed_h": human_bytes(total_freed) if total_freed else None}
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
+    return templates.TemplateResponse("_models_list.html", {
+        "request": request, "snap": snap, "flash": flash,
+        "loaded_map": await _loaded_map(),
+        "file_to_owner": file_to_owner, "avatars": avatars,
+        "update_status": _update_status_map(snap),
+    })
 
 
 @app.post("/models/check-updates", response_class=HTMLResponse)
@@ -845,92 +810,15 @@ async def models_check_updates(request: Request) -> HTMLResponse:
     records = db.download_records()
     if records:
         await hf.check_updates_for(records)
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(
-        request, {"ok": True, "msg": f"checked {len(records)} record(s) against HF"}))
-
-
-# ---------- Model folders ----------
-#
-# Logical folders on the models page. Files never move; a folder is a db mapping that gets
-# projected into the models.ini section name (`Coding/<stem>`) because that section name IS
-# the id llama-server serves and the only grouping OpenWebUI's flat picker can show. Models
-# without an ini section still group in this UI, but cannot get the prefix anywhere else.
-
-_FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-
-
-def _folder_managed_section(stem: str, folder: str) -> str | None:
-    """The ini section a folder action would rename for this stem, if any: the bare stem or
-    a `<folder>/<stem>` section. Custom-renamed sections are deliberately not touched."""
-    names = set(ini.section_names())
-    for cand in (f"{folder}/{stem}" if folder else "", stem):
-        if cand and cand in names:
-            return cand
-    return None
-
-
-@app.post("/models/folder/create", response_class=HTMLResponse)
-async def models_folder_create(request: Request, name: str = Form("")) -> HTMLResponse:
-    name = name.strip()
-    if not _FOLDER_NAME_RE.match(name):
-        flash = {"ok": False, "msg": f"invalid folder name: {name!r} (letters, digits, dot, dash, underscore)"}
-    else:
-        ok, err = db.folder_create(name)
-        flash = {"ok": ok, "msg": f"created folder {name}/" if ok else err}
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
-
-
-@app.post("/models/folder/rename", response_class=HTMLResponse)
-async def models_folder_rename(request: Request, old: str = Form(...), new: str = Form("")) -> HTMLResponse:
-    new = new.strip()
-    if not _FOLDER_NAME_RE.match(new):
-        flash = {"ok": False, "msg": f"invalid folder name: {new!r}"}
-        return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
-    ok, members = db.folder_rename(old, new)
-    if not ok:
-        return templates.TemplateResponse("_models_list.html", await _models_list_ctx(
-            request, {"ok": False, "msg": f"cannot rename folder {old!r}"}))
-    pairs = [(f"{old}/{stem}", f"{new}/{stem}") for stem in members]
-    applied = ini.move_sections(pairs)
-    for o, n in applied:
-        db.badge_move(o, n)
-    _owui_reconcile_renames(applied)
-    flash = {"ok": True, "msg": f"renamed folder {old}/ → {new}/ ({len(applied)} section(s) renamed)"}
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
-
-
-@app.post("/models/folder/delete", response_class=HTMLResponse)
-async def models_folder_delete(request: Request, name: str = Form(...)) -> HTMLResponse:
-    # Only empty folders: deleting a folder that still has members would silently un-prefix
-    # their served ids, which is a rename with all its consequences and should be a move.
-    ok, err = db.folder_delete(name)
-    flash = {"ok": ok, "msg": f"deleted folder {name}/" if ok else err}
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
-
-
-@app.post("/models/move", response_class=HTMLResponse)
-async def models_move(request: Request, stem: str = Form(...), folder: str = Form("")) -> HTMLResponse:
-    folder = folder.strip()
-    if folder and not _FOLDER_NAME_RE.match(folder):
-        return templates.TemplateResponse("_models_list.html", await _models_list_ctx(
-            request, {"ok": False, "msg": f"invalid folder name: {folder!r}"}))
-    prev = db.folder_map().get(stem, "")
-    old_section = _folder_managed_section(stem, prev)
-    new_section = f"{folder}/{stem}" if folder else stem
-    db.folder_set(stem, folder or None)
-    note = ""
-    if old_section and old_section != new_section:
-        applied = ini.move_sections([(old_section, new_section)])
-        if applied:
-            db.badge_move(old_section, new_section)
-            _owui_reconcile_renames(applied)
-            note = f" · section [{old_section}] → [{new_section}]"
-        else:
-            note = " · grouped in this UI only (rename target exists or section invalid)"
-    elif not old_section and folder:
-        note = " · grouped in this UI only — no models.ini section to rename"
-    flash = {"ok": True, "msg": f"{stem} → {folder + '/' if folder else '(ungrouped)'}{note}"}
-    return templates.TemplateResponse("_models_list.html", await _models_list_ctx(request, flash))
+    snap = services.snapshot_models_dir()
+    file_to_owner, avatars = await _models_avatar_map(snap)
+    return templates.TemplateResponse("_models_list.html", {
+        "request": request, "snap": snap,
+        "flash": {"ok": True, "msg": f"checked {len(records)} record(s) against HF"},
+        "loaded_map": await _loaded_map(),
+        "file_to_owner": file_to_owner, "avatars": avatars,
+        "update_status": _update_status_map(snap),
+    })
 
 
 # ---------- Settings ----------
@@ -1559,10 +1447,7 @@ def _gguf_hints_for(name: str) -> tuple[dict[str, str], list[str]]:
     return values, hints
 
 
-# {name:path} because a folder-prefixed section (`Coding/foo`) carries a slash; uvicorn
-# percent-decodes the path before routing, so the plain single-segment converter would
-# never see those names.
-@app.get("/config/section/{name:path}/edit", response_class=HTMLResponse)
+@app.get("/config/section/{name}/edit", response_class=HTMLResponse)
 def config_section_edit(request: Request, name: str, reset: int = 0) -> HTMLResponse:
     # This endpoint returns a PARTIAL, designed to be swapped into /config by HTMX. Reaching
     # it by ordinary navigation (the "edit models.ini" link on a model page, a bookmark, a
@@ -1594,6 +1479,49 @@ def config_section_edit(request: Request, name: str, reset: int = 0) -> HTMLResp
         "auto_filled": reset == 1,
     })
 
+
+@app.post("/config/section/{name}")
+async def config_section_save(request: Request, name: str) -> Response:
+    if not ini.valid_section_name(name):
+        return Response(status_code=200, headers={"HX-Redirect": f"/config?err=invalid+section+name+{name}"})
+    form = await request.form()
+    values: dict[str, str] = {}
+    for f in ini.ALL_FIELDS:
+        raw = form.get(f"fld_{f.key}", "")
+        if f.kind == "bool":
+            values[f.key] = "true" if raw else ""
+        else:
+            values[f.key] = str(raw).strip()
+    extras = str(form.get("extras", ""))
+    # Checked BEFORE the write: a section that did not exist a moment ago is a new model,
+    # and only a new model gets a default backend. Re-running this on an ordinary save would
+    # undo a deliberate removal from a connection.
+    is_new_section = name not in ini.section_names()
+    try:
+        ini.upsert_section(name, values, extras)
+    except Exception as e:  # noqa: BLE001
+        return Response(status_code=200, headers={"HX-Redirect": f"/config?err=save+failed:+{e}"})
+    # Whether a model can accept an image is decided here (by the presence of `mmproj`) but
+    # enforced in OpenWebUI, which otherwise shows the image-upload control on everything and
+    # only fails at inference with "image input is not supported". Push it across on every
+    # save, so adding or removing a projector updates the UI that people actually click.
+    # No restart: the `model` table is ordinary app data, not PersistentConfig.
+    try:
+        services.sync_openwebui_capabilities()
+    except Exception:  # noqa: BLE001 -- saving the section must not depend on OpenWebUI
+        pass
+    # A brand-new model is offered on the GPU backends by default. Without this it lands in
+    # models.ini, works, and is invisible in OpenWebUI because every connection carries an
+    # explicit whitelist that predates it.
+    note = ""
+    if is_new_section:
+        try:
+            ok, msg = services.assign_new_model_to_gpu(name)
+            if ok and msg:
+                note = f"&note={msg}"
+        except Exception:  # noqa: BLE001
+            pass
+    return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={name}{note}"})
 
 
 def _container_baseline(name: str) -> list[str]:
@@ -1678,7 +1606,7 @@ def _predicted_vram_gb(section: str) -> float | None:
         return None
 
 
-@app.get("/config/section/{name:path}/autoconfig", response_class=HTMLResponse)
+@app.get("/config/section/{name}/autoconfig", response_class=HTMLResponse)
 async def config_autoconfig(request: Request, name: str, preset: str = "",
                             sessions: int = 0, spec: str = "", vision: str = "") -> HTMLResponse:
     import json as _json
@@ -1922,7 +1850,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
     })
 
 
-@app.post("/config/section/{name:path}/rename")
+@app.post("/config/section/{name}/rename")
 async def config_section_rename(request: Request, name: str) -> Response:
     """Rename a preset. The section name IS the model id llama-server serves, so this is how
     you give a model a short, human name — `model =` keeps pointing at the same file."""
@@ -1967,7 +1895,7 @@ async def config_section_rename(request: Request, name: str) -> Response:
     return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={new}&edit={new}"})
 
 
-@app.post("/config/section/{name:path}/delete")
+@app.post("/config/section/{name}/delete")
 def config_section_delete(name: str) -> Response:
     ok = ini.delete_section(name)
     if not ok:
@@ -1992,49 +1920,6 @@ def config_section_delete(name: str) -> Response:
     except Exception:  # noqa: BLE001 -- deleting a section must succeed even if OpenWebUI is down
         pass
     return Response(status_code=200, headers={"HX-Redirect": f"/config?deleted={name}"})
-
-@app.post("/config/section/{name:path}")
-async def config_section_save(request: Request, name: str) -> Response:
-    if not ini.valid_section_name(name):
-        return Response(status_code=200, headers={"HX-Redirect": f"/config?err=invalid+section+name+{name}"})
-    form = await request.form()
-    values: dict[str, str] = {}
-    for f in ini.ALL_FIELDS:
-        raw = form.get(f"fld_{f.key}", "")
-        if f.kind == "bool":
-            values[f.key] = "true" if raw else ""
-        else:
-            values[f.key] = str(raw).strip()
-    extras = str(form.get("extras", ""))
-    # Checked BEFORE the write: a section that did not exist a moment ago is a new model,
-    # and only a new model gets a default backend. Re-running this on an ordinary save would
-    # undo a deliberate removal from a connection.
-    is_new_section = name not in ini.section_names()
-    try:
-        ini.upsert_section(name, values, extras)
-    except Exception as e:  # noqa: BLE001
-        return Response(status_code=200, headers={"HX-Redirect": f"/config?err=save+failed:+{e}"})
-    # Whether a model can accept an image is decided here (by the presence of `mmproj`) but
-    # enforced in OpenWebUI, which otherwise shows the image-upload control on everything and
-    # only fails at inference with "image input is not supported". Push it across on every
-    # save, so adding or removing a projector updates the UI that people actually click.
-    # No restart: the `model` table is ordinary app data, not PersistentConfig.
-    try:
-        services.sync_openwebui_capabilities()
-    except Exception:  # noqa: BLE001 -- saving the section must not depend on OpenWebUI
-        pass
-    # A brand-new model is offered on the GPU backends by default. Without this it lands in
-    # models.ini, works, and is invisible in OpenWebUI because every connection carries an
-    # explicit whitelist that predates it.
-    note = ""
-    if is_new_section:
-        try:
-            ok, msg = services.assign_new_model_to_gpu(name)
-            if ok and msg:
-                note = f"&note={msg}"
-        except Exception:  # noqa: BLE001
-            pass
-    return Response(status_code=200, headers={"HX-Redirect": f"/config?saved={name}{note}"})
 
 
 # ---------- Containers ----------

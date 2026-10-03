@@ -24,38 +24,6 @@
 }">
 
 <div id="models-owui-toast" class="mb-3 empty:hidden"></div>
-
-{# Folder bar. Folders are logical: the files never move, but naming a folder here and
-   moving a model into it renames the model's models.ini section to <Folder>/<name> — the
-   section name is the id llama-server serves, and prefixing it is the only grouping
-   OpenWebUI's flat model picker can show. Models without an ini section group in this UI
-   only. #}
-<div class="mb-3 flex flex-wrap items-center gap-2">
-  <form hx-post="/models/folder/create" hx-target="#models-list" hx-swap="innerHTML"
-        class="flex items-center gap-1">
-    <input name="name" placeholder="New folder" aria-label="new folder name"
-           class="w-40 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs">
-    <button class="rounded-md border border-slate-300 dark:border-slate-700 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">Add folder</button>
-  </form>
-  {% for f in folders %}
-  <span class="inline-flex items-center gap-1 rounded-full border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 pl-2.5 pr-1 py-0.5 text-xs">
-    <span>📁 {{ f.folder }} <span class="text-slate-400 tabular-nums">({{ f.members }})</span></span>
-    <form hx-post="/models/folder/rename" hx-target="#models-list" hx-swap="innerHTML"
-          class="inline-flex items-center gap-1">
-      <input type="hidden" name="old" value="{{ f.folder }}">
-      <input name="new" placeholder="rename" aria-label="rename folder {{ f.folder }}"
-             class="w-24 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-1.5 py-0.5 text-xs">
-      <button class="rounded px-1 py-0.5 hover:bg-slate-200 dark:hover:bg-slate-700" title="Rename folder">↦</button>
-    </form>
-    {% if f.members == 0 %}
-    <button hx-post="/models/folder/delete" hx-vals='{"name": {{ f.folder | tojson }}}'
-            hx-target="#models-list" hx-swap="innerHTML"
-            hx-confirm="Delete empty folder {{ f.folder }}?"
-            class="rounded px-1 py-0.5 text-red-600 dark:text-red-400 hover:bg-slate-200 dark:hover:bg-slate-700" title="Delete folder">×</button>
-    {% endif %}
-  </span>
-  {% endfor %}
-</div>
 <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
   {% if snap.ggufs %}
   <table class="w-full text-sm">
@@ -72,18 +40,9 @@
         <th class="px-4 py-2"></th>
       </tr>
     </thead>
-    {% for grp in groups %}
-    <tbody x-data="{ open: true }" class="divide-y divide-slate-100 dark:divide-slate-800">
-      <tr @click="open = !open" class="cursor-pointer select-none bg-slate-50 dark:bg-slate-950/40">
-        <td colspan="6" class="px-4 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300">
-          <span class="inline-flex items-center gap-1.5">
-            <span x-show="open">▾</span><span x-show="!open" x-cloak>▸</span>
-            📁 {{ grp.folder or "Ungrouped" }} <span class="tabular-nums text-slate-400">({{ grp.ggufs | length }})</span>
-          </span>
-        </td>
-      </tr>
-      {% for g in grp.ggufs %}
-      <tr x-show="open">
+    <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+      {% for g in snap.ggufs %}
+      <tr>
         <td class="px-3 py-3 w-8">
           <input type="checkbox" name="names" value="{{ g.display_name }}" x-model="selected" aria-label="select {{ g.display_name }}">
         </td>
@@ -225,24 +184,6 @@
         <td class="px-4 py-3 text-right tabular-nums text-slate-600 dark:text-slate-300">{{ g.human_size }}</td>
         <td class="px-4 py-3 text-slate-500 dark:text-slate-400 tabular-nums">{{ g.modified }}</td>
         <td class="px-4 py-3 text-right">
-          {% if folders and not g.is_companion %}
-          {# Moving a configured model renames its models.ini section to <Folder>/<stem>,
-             because the section name IS the id OpenWebUI lists — that's the whole mechanism.
-             The confirm says so, since the id change breaks existing OpenWebUI chats. #}
-          <form hx-post="/models/move" hx-target="#models-list" hx-swap="innerHTML"
-                {% if g.aliases %}hx-confirm="Move {{ g.stem }}? This renames its models.ini section — and with it the id OpenWebUI knows it by ({{ grp.folder + '/' if grp.folder else '' }}{{ g.stem }}). Existing OpenWebUI chats on the old id will break."{% endif %}
-                class="inline-flex items-center gap-1 mr-2 align-middle">
-            <input type="hidden" name="stem" value="{{ g.stem }}">
-            <select name="folder" aria-label="move {{ g.stem }} to folder"
-                    class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-1.5 py-1 text-xs">
-              <option value="" {% if not grp.folder %}selected{% endif %}>(ungrouped)</option>
-              {% for f in folders %}
-              <option value="{{ f.folder }}" {% if f.folder == grp.folder %}selected{% endif %}>{{ f.folder }}/</option>
-              {% endfor %}
-            </select>
-            <button class="rounded-md border border-slate-300 dark:border-slate-700 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-800" title="Move to folder">Move</button>
-          </form>
-          {% endif %}
           <button
             hx-post="/models/delete"
             hx-vals='{"name": "{{ g.display_name }}"}'
@@ -256,7 +197,6 @@
       </tr>
       {% endfor %}
     </tbody>
-    {% endfor %}
   </table>
   {% else %}
   <div class="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
