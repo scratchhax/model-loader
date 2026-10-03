@@ -492,6 +492,12 @@ class LlamaBackend:
     # resting state, so nothing-loaded must never read as a failure. None = no reported failure.
     load_failed: str | None = None
     last_restart_error: str | None = None
+    # --sleep-idle-seconds: after this many seconds without a request the server releases its
+    # model's VRAM and reloads on the next one. 0 = the flag is absent, which is llama.cpp's
+    # default and means the model holds its allocation until something evicts it.
+    sleep_idle_s: int = 0
+    # Whether it is sleeping RIGHT NOW. Only meaningful when sleep_idle_s > 0.
+    asleep: bool = False
 
 
 def _parse_started_at(iso: str) -> tuple[str, str]:
@@ -691,7 +697,19 @@ def discover_llama_containers() -> list[dict]:
         if c.name == "model-loader":
             continue
         vendor = "rocm" if "rocm" in img else "cuda" if "cuda" in img else ("cpu" if "server" in img else "unknown")
-        out.append({"name": c.name, "image": img, "vendor": vendor})
+        # Router or single-model server? A router is given --models-preset/--models-dir and
+        # serves whatever models.ini holds; a server given -m serves exactly one file and has
+        # no relationship to models.ini at all. They are both llama.cpp:server images, so the
+        # image tag cannot tell them apart - only the command line can. Orpheus TTS is the
+        # case that forced the distinction: a -m server on port 5006 that this app would
+        # otherwise offer to register with Open WebUI as a chat endpoint, at :8080.
+        try:
+            cmd = (c.attrs or {}).get("Config", {}).get("Cmd") or []
+        except DockerException:
+            cmd = []
+        joined = " ".join(str(t) for t in cmd) if isinstance(cmd, list) else str(cmd)
+        is_router = "--models-preset" in joined or "--models-dir" in joined
+        out.append({"name": c.name, "image": img, "vendor": vendor, "router": is_router})
     return out
 
 
@@ -725,6 +743,56 @@ def last_loaded_ids(name: str) -> set[str]:
     return {p.strip() for p in csv.split(",") if p.strip()}
 
 
+def _sleep_idle_seconds(attrs: dict) -> int:
+    """The container's --sleep-idle-seconds, or 0 when absent or disabled.
+
+    Read off the container's own command line rather than from a setting of ours, because the
+    command line is what llama-server is actually running. llama.cpp spells "off" as -1 and as
+    the flag simply not being there; both come back 0 here so callers have one thing to test.
+    """
+    cmd = (attrs.get("Config") or {}).get("Cmd") or []
+    if not isinstance(cmd, list):
+        return 0
+    for i, tok in enumerate(cmd):
+        if tok == "--sleep-idle-seconds" and i + 1 < len(cmd):
+            try:
+                v = int(str(cmd[i + 1]).strip())
+            except (TypeError, ValueError):
+                return 0
+            return v if v > 0 else 0
+        if isinstance(tok, str) and tok.startswith("--sleep-idle-seconds="):
+            try:
+                v = int(tok.split("=", 1)[1].strip())
+            except (TypeError, ValueError):
+                return 0
+            return v if v > 0 else 0
+    return 0
+
+
+# llama-server brackets a sleep with exactly these two, and nothing else reports the state:
+# /props and /v1/models read identically asleep or awake, so the log is the only signal.
+_RE_SLEEP_MARK = re.compile(r"(entering|exiting) sleeping state")
+
+
+def _is_asleep(container) -> bool:
+    """True when the last sleep marker in the log says it went to sleep and never came back.
+
+    Deliberately NOT probed over HTTP. Waking is what a request does - /slots alone both
+    resets the idle timer and wakes a sleeper - so a liveness check would be the thing that
+    prevents the sleep it is trying to observe.
+    """
+    try:
+        raw = container.logs(tail=400, stdout=True, stderr=True)
+    except Exception:  # noqa: BLE001 - a log we cannot read is not a sleeping model
+        return False
+    last = ""
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        m = _RE_SLEEP_MARK.search(line)
+        if m:
+            last = m.group(1)
+    return last == "entering"
+
+
 async def snapshot_llama_backends() -> list[LlamaBackend]:
     client = _docker_client()
     effective = _effective_container_names()
@@ -750,6 +818,9 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             b.started_at = started
             b.uptime = up
             b.host_ports, b.internal_port = _extract_ports(attrs)
+            b.sleep_idle_s = _sleep_idle_seconds(attrs)
+            if b.sleep_idle_s > 0 and b.status == "running":
+                b.asleep = _is_asleep(c)
         except NotFound:
             pass
         except DockerException as e:
@@ -1550,6 +1621,11 @@ def openwebui_state() -> dict:
     discovered = discover_llama_containers()
     missing: list[dict] = []
     for d in discovered:
+        # Single-model servers are not chat endpoints. Orpheus TTS is a llama.cpp container
+        # serving SNAC audio codes on 5006; offering to add it to Open WebUI's model list
+        # would register a URL that is wrong (:8080) for a service that is not a chat model.
+        if not d.get("router"):
+            continue
         candidate_urls = [f"http://{d['name']}:8080/v1"]
         svc = _compose_service_of(client, d["name"])
         if svc:
