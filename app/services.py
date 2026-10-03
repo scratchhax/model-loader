@@ -710,6 +710,21 @@ def _effective_container_names() -> list[str]:
     return result
 
 
+# What each backend reported as loaded on the last probe, so SYNCHRONOUS callers can ask.
+# The router's /v1/models is the only authority on this and reaching it is async; every page
+# that draws a VRAM meter also renders the hero, which probes, so this is refreshed in the
+# same request rather than being a cache with a life of its own.
+_LOADED_BY_BACKEND: dict[str, str] = {}
+_LOADED_LOCK = threading.Lock()
+
+
+def last_loaded_ids(name: str) -> set[str]:
+    """Model ids the last probe saw loaded on this backend. Empty when never probed."""
+    with _LOADED_LOCK:
+        csv = _LOADED_BY_BACKEND.get(name, "")
+    return {p.strip() for p in csv.split(",") if p.strip()}
+
+
 async def snapshot_llama_backends() -> list[LlamaBackend]:
     client = _docker_client()
     effective = _effective_container_names()
@@ -752,6 +767,8 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             out[i].loaded_model = loaded
             out[i].probe_error = err
             out[i].load_failed = failed
+            with _LOADED_LOCK:
+                _LOADED_BY_BACKEND[out[i].name] = loaded or ""
     return out
 
 
