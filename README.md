@@ -95,6 +95,12 @@ Every llama.cpp backend reads the same `models.ini`, which means by default ever
 
 Companion files fold into the model they belong to rather than listing as models of their own: `mmproj` projectors, and also MTP and draft heads, which are not independently servable. An explicit `noMTP` variant is left alone, since that is a real model choice rather than a companion.
 
+### Knowing when a model has actually changed
+
+**Check for updates** asks Hugging Face what it holds for every file you downloaded, and compares **byte counts**, not dates. A repo's commit date moves whenever anything in it is touched — a README, a config, a new quant in a sibling directory — so "the remote commit is newer than my file" is true of nearly every model nearly always and says nothing about the weights. A GGUF whose length differs has been rebuilt, and that is not ambiguous. Only when Hugging Face will not report a size does this fall back to the date, and the tooltip says which test produced the answer so you know what it is worth.
+
+The verdict covers a model's projector and draft head as well as its own shards, because those fold into its row and would otherwise have nowhere to be reported. When something is stale the chip is a **button**: it queues a fresh copy of every affected file from the repo it came from. Downloads land in a temp file and are moved into place when complete, so a model that is loaded right now keeps serving until it is reloaded.
+
 The row also shows what each model actually is: MoE or dense, its quant, whether the weights fit one GPU, what it takes as input, and whether it is resident right now. Those chips are derived from the section's own config — GGUF header, its `mmproj`, its speculation profile — rather than from OpenWebUI's copy of it, so they are right for a section OpenWebUI has never been told about, and the **fix** button still flags the two disagreeing.
 
 ### Meta-models get their own row
