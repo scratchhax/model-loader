@@ -66,6 +66,27 @@
     {% if b.host_ports %}{{ b.host_ports | join(', ') }}
     {% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
   </dd>
+
+  {# Idle sleep. Worth a row of its own because it is invisible everywhere else: /props and
+     /v1/models read identically asleep or awake, and the only other symptom is VRAM quietly
+     vanishing, which looks like a bug if you do not know the setting exists. #}
+  <dt class="text-slate-500 dark:text-slate-400">Idle sleep</dt>
+  <dd>
+    {% if b.sleep_idle_s %}
+      <span class="tabular-nums">{{ b.sleep_idle_s }}s</span>
+      {% if b.asleep %}
+      <span class="ml-1 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
+            title="Sleeping now: this server has released its model's VRAM and will reload it on the next request. Measured on this box, sleep gives back about 92% of the allocation.">asleep</span>
+      {% else %}
+      <span class="ml-1 text-[10px] text-slate-400 dark:text-slate-500"
+            title="Awake and holding its VRAM. It will sleep after {{ b.sleep_idle_s }}s without a request.">awake</span>
+      {% endif %}
+    {% else %}
+      <span class="text-slate-400 dark:text-slate-500">off</span>
+    {% endif %}
+    <span class="ml-1 cursor-help text-slate-400 dark:text-slate-500"
+          title="Set by --sleep-idle-seconds on this container's command line in docker-compose.yaml, not in models.ini — it belongs to the server, not to a model. Change it there and run: docker compose up -d {{ b.name }}. Note that a model which must co-reside with another should NOT sleep: the other model's --fit sizes itself against free VRAM at load time and will take the sleeper's allocation, which then fails to wake.">?</span>
+  </dd>
 </dl>
 {% endif %}
 
