@@ -83,19 +83,29 @@ Speed is measurable. "Is this any good at prose" is not, so Model Loader does no
 
 Every model in a benchmark run gets a rating control beside its results: a category — coding, creative writing, reasoning, tool use, vision — and a score out of five, with an optional note. It lives on the run detail because that is where the model's output is on screen. Rating it from anywhere else would be rating a memory. The run id is stored alongside, so a badge traces back to the evidence that produced it rather than being an opinion from nowhere.
 
-The models list shows the result as a **good at** row, or **not rated** — spelled out rather than left blank, because a row that vanishes when empty makes "never judged" and "judged and poor" look identical.
+The models list shows the result in its **good at** column, or **not rated** — spelled out rather than left blank, because a cell that vanishes when empty makes "never judged" and "judged and poor" look identical. The editor is in the row's drawer, so an opinion formed a week after the benchmark still has somewhere to go.
 
 This is deliberately manual, and an automated version was built as far as the schema before being deleted. The public coding benchmarks (HumanEval, MBPP) sit in nearly every model's training data, so their scores compress into a band that barely separates one local model from another; creative writing has no execution oracle at all, so an automated score there is one LLM judging another — circular when the judge is weaker than the subject, biased when it is the same family. Four responses read by the person who has to live with the answer is better evidence, and it costs no GPU time.
 
 ### Routing models to backends
 
-![The Models directory: each downloaded GGUF with its status, whether it is in models.ini and under what alias, capability chips, per-backend "serves on" toggles, and a "good at" row where you rate the model for coding, creative writing, vision and so on, editable in place](docs/models_available.png)
+![The Models directory grouped by size tier: headings for "Needs more than one GPU", "Fits one GPU" and "Shares a GPU", each with a file count and total size, and one line per model carrying its MoE or dense shape, quant, placement, modality icons, state and your "good at" ratings. One row is expanded to show the drawer underneath it: the per-backend "offered on" toggles, the rating editor and the path on disk](docs/models_available.png)
 
-Every llama.cpp backend reads the same `models.ini`, which means by default every backend offers every model — including the CPU one being asked for a 27B. The **serves on** toggles fix that per model: click a backend to include or exclude it, and Model Loader writes the change into OpenWebUI's per-connection whitelist.
+Every llama.cpp backend reads the same `models.ini`, which means by default every backend offers every model — including the CPU one being asked for a 27B. The **offered on** toggles fix that per model: expand a row and click a backend to include or exclude it, and Model Loader writes the change into OpenWebUI's per-connection whitelist.
 
 Companion files fold into the model they belong to rather than listing as models of their own: `mmproj` projectors, and also MTP and draft heads, which are not independently servable. An explicit `noMTP` variant is left alone, since that is a real model choice rather than a companion.
 
-The row also shows what each model actually is. **`in models.ini · as wheatley-voice`** means that file is served under an alias rather than its filename — one GGUF can back several sections with different settings, and each gets its own toggles. The **vision** chip reads `capable` or `text-only` depending on whether the section declares a projector, and that flag is pushed into OpenWebUI so the image-upload control only appears where it can work.
+The row also shows what each model actually is: MoE or dense, its quant, whether the weights fit one GPU, what it takes as input, and whether it is resident right now. An alias is printed only when it differs from the filename — one GGUF can back several sections with different settings, and each gets its own toggles. The image and audio icons come from what the projector declares, and the vision flag is pushed into OpenWebUI so the image-upload control only appears where it can work.
+
+### Finding one model among forty
+
+A models directory grows monotonically and a flat alphabetical list stops being an organisation somewhere around a dozen files. The toolbar above the table groups, sorts, filters and searches, all client-side, and remembers what you chose:
+
+- **Group by family** collapses the same model at several quants under one heading — `Qwen3.8-27B` holding its `UD-Q4_K_M` and `UD-Q8_K_XL` — with a file count and total size per heading, which is what you want open when you are deciding which copy to delete. The family is the filename with its quant suffix stripped.
+- **Group by size tier** sorts the shelf by how each model has to be placed on *your* hardware, read from the largest card the app can actually see: more than one GPU, one GPU, or part of one. Weights only; the Autoconfig panel is where KV and compute buffers are added up properly.
+- **Group by state** separates loaded, configured, unconfigured and orphaned companions.
+
+Everything that is identical on every row has been taken off the row. The per-backend **offered on** toggles, the rating editor and the path on disk are one model at a time by nature, so they live in a drawer behind the caret rather than on the line — which is what turned a page where eleven models ran to 2,100px into one that fits on a screen.
 
 ## Security posture
 

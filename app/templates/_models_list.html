@@ -1,7 +1,25 @@
 {% from "_avatar.html" import avatar %}
 {% from "_icons.html" import icon %}
 {% from "_caps_chips.html" import caps_chips %}
-{# partial: list of gguf entries; used both on page render and after delete via HTMX #}
+{# partial: the models directory, used both on page render and after an HTMX delete/update check.
+
+   ORGANISATION. This list used to be one flat alphabetical table whose Status cell was five
+   stacked labelled rows - configured, supports, available, loaded, good at - so a single model
+   was ~190px tall and eleven of them ran to 2100px. Worse, four of those five rows said the
+   same thing on every model ("in models.ini", "not loaded", the same three connection chips),
+   and a row that is identical everywhere costs height while carrying no information.
+
+   So: one line per model by default, and the per-model controls that are only ever used one
+   model at a time - the OpenWebUI whitelist toggles, the rating editor - moved into a drawer
+   that opens on click. Everything that differs BETWEEN models stays on the visible line.
+
+   On top of that a toolbar, because eleven models is where sorting by filename stops being an
+   organisation and starts being an accident. Group by family (the same model at three quants
+   collapses under one heading), by size tier (how it has to be placed on this box), or by
+   state; sort; filter; search. All client-side against data- attributes rendered below, so it
+   is instant and needs no new routes - and the choice is remembered, because the grouping you
+   want is a property of how you work, not of this page view.
+#}
 {% if flash %}
 <div class="mb-4 rounded-md px-4 py-3 text-sm
   {% if flash.ok %}bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300
@@ -11,7 +29,7 @@
 </div>
 {% endif %}
 
-<div x-data="{
+<div id="models-browser" x-data="{
   selected: [],
   sizes: { {% for g in snap.ggufs %}'{{ g.display_name }}': {{ g.total_bytes }}{% if not loop.last %}, {% endif %}{% endfor %} },
   get totalBytes() { return this.selected.reduce((a,n)=>a+(this.sizes[n]||0),0) },
@@ -24,6 +42,57 @@
 }">
 
 <div id="models-owui-toast" class="mb-3 empty:hidden"></div>
+
+{% if snap.ggufs %}
+{# ---- toolbar ------------------------------------------------------------------------- #}
+<div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+  <div class="relative">
+    <span class="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400">{{ icon('search', 13) }}</span>
+    <input id="ml-q" type="search" placeholder="filter by name, family, owner…" autocomplete="off"
+           class="w-64 rounded-md border border-slate-300 bg-white py-1 pl-7 pr-2 text-xs
+                  placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950">
+  </div>
+
+  <label class="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
+    {{ icon('layers-3', 13) }} Group
+    <select id="ml-group" class="rounded-md border border-slate-300 bg-white px-1.5 py-1 text-xs
+                                 text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+      <option value="family">Family</option>
+      <option value="tier">Size tier</option>
+      <option value="status">State</option>
+      <option value="">Nothing</option>
+    </select>
+  </label>
+
+  <label class="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
+    Sort
+    <select id="ml-sort" class="rounded-md border border-slate-300 bg-white px-1.5 py-1 text-xs
+                                text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+      <option value="name">Name</option>
+      <option value="size">Largest first</option>
+      <option value="mtime">Newest first</option>
+    </select>
+  </label>
+
+  <div id="ml-chips" class="flex flex-wrap items-center gap-1">
+    {% for f, lbl, ttl in [
+         ('loaded', 'loaded', 'Resident in VRAM on some backend right now'),
+         ('unconfigured', 'not configured', 'No section in models.ini, so llama-server will not serve it'),
+         ('update', 'update', 'Hugging Face has a newer version than the local copy'),
+         ('moe', 'MoE', 'Mixture of experts - only the routed experts are read per token'),
+         ('multimodal', 'multimodal', 'Has a projector: images and/or audio in addition to text')] %}
+    <button type="button" data-flag="{{ f }}" title="{{ ttl }}"
+            class="ml-chip rounded-full border border-slate-300 px-2 py-0.5 text-[11px] text-slate-500
+                   hover:border-slate-500 hover:text-slate-700 dark:border-slate-700 dark:text-slate-400
+                   dark:hover:border-slate-500 dark:hover:text-slate-200">{{ lbl }}</button>
+    {% endfor %}
+  </div>
+
+  <span class="flex-1"></span>
+  <span id="ml-count" class="tabular-nums text-slate-500 dark:text-slate-400"></span>
+</div>
+{% endif %}
+
 <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
   {% if snap.ggufs %}
   <table class="w-full text-sm">
@@ -33,103 +102,191 @@
           <input type="checkbox" aria-label="select all"
                  @change="selected = $event.target.checked ? [{% for g in snap.ggufs %}'{{ g.display_name }}'{% if not loop.last %},{% endif %}{% endfor %}] : []">
         </th>
-        <th class="text-left px-4 py-2 font-medium">Name</th>
-        <th class="text-left px-4 py-2 font-medium">Status</th>
-        <th class="text-right px-4 py-2 font-medium">Size</th>
-        <th class="text-left px-4 py-2 font-medium">Modified</th>
-        <th class="px-4 py-2"></th>
+        <th class="text-left px-4 py-2 font-medium">Model</th>
+        <th class="text-left px-3 py-2 font-medium">Takes</th>
+        <th class="text-left px-3 py-2 font-medium">State</th>
+        <th class="text-left px-3 py-2 font-medium">Good at</th>
+        <th class="text-right px-3 py-2 font-medium w-32">Size</th>
+        <th class="px-3 py-2 w-24"></th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+    <tbody id="ml-body" class="divide-y divide-slate-100 dark:divide-slate-800">
       {% for g in snap.ggufs %}
-      <tr>
-        <td class="px-3 py-3 w-8">
+      {% set _f = (facets or {}).get(g.display_name) or {} %}
+      {% set _shape = (shapes or {}).get(g.display_name) %}
+      {% set _cap  = (owui.caps if owui else {}).get(g.model_id) %}
+      {% set _mods = (_cap.modalities if _cap else []) %}
+      {% set _loaded = (loaded_map or {}).get(g.model_id) or [] %}
+      {% set _us = (update_status or {}).get(g.display_name) %}
+      {% set _renamed = g.aliases | reject('equalto', g.stem) | list %}
+      {% set _badges = (badges or {}).get(g.display_name) or [] %}
+      {% set owner = (file_to_owner or {}).get(g.display_name, '') %}
+      {% set identity = owner or g.stem %}
+      {% set av_url = (avatars or {}).get(owner, '') if owner else '' %}
+      {% set rowid = 'ml-' ~ loop.index0 %}
+
+      <tr class="ml-row" id="{{ rowid }}"
+          data-key="{{ g.display_name }}"
+          data-family="{{ _f.family or g.stem }}"
+          data-tier="{{ _f.tier or 'unknown' }}"
+          data-tier-label="{{ _f.tier_label or 'Size unknown' }}"
+          data-status="{{ _f.status or 'unconfigured' }}"
+          data-status-label="{{ _f.status_label or 'Not configured' }}"
+          data-flags="{{ _f.flags or '' }}"
+          data-size="{{ g.total_bytes }}"
+          data-mtime="{{ g.mtime }}"
+          data-search="{{ (g.display_name ~ ' ' ~ (_f.family or '') ~ ' ' ~ (_f.quant or '') ~ ' ' ~ owner ~ ' ' ~ (_shape.arch if _shape else '') ~ ' ' ~ (g.aliases | join(' '))) | lower }}">
+
+        <td class="px-3 py-2 w-8 align-top">
           <input type="checkbox" name="names" value="{{ g.display_name }}" x-model="selected" aria-label="select {{ g.display_name }}">
         </td>
-        <td class="px-4 py-3 min-w-0">
-          {% set owner = (file_to_owner or {}).get(g.display_name, '') %}
-          {% set identity = owner or g.stem %}
-          {% set av_url = (avatars or {}).get(owner, '') if owner else '' %}
+
+        {# ---- model: name, then one subline of what distinguishes THIS file ------------ #}
+        <td class="px-4 py-2 min-w-0">
           <div class="flex items-center gap-2 min-w-0">
-            {{ avatar(identity, av_url, size=22) }}
+            {{ avatar(identity, av_url, size=20) }}
             <div class="min-w-0">
-              <a href="/model/{{ g.route_key }}"
-                 class="font-mono truncate block hover:underline">{{ g.display_name }}</a>
-              {% set _shape = (shapes or {}).get(g.display_name) %}
-              {% if owner or g.is_sharded or g.subdir or _shape %}
-              <div class="text-xs text-slate-500 dark:text-slate-400 mt-0.5 truncate flex flex-wrap items-center gap-1">
+              <a href="/model/{{ g.route_key }}" class="font-mono text-[13px] truncate block hover:underline">{{ g.display_name }}</a>
+              <div class="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
                 {# MoE vs dense, because it decides what offloading costs. Shared macro with
                    the models.ini section cards, so one model reads the same on both pages. #}
                 {{ caps_chips(_shape) }}
-                {% if owner %}<span>{{ owner }}</span>{% endif %}
-                {% if g.subdir %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono">📁 {{ g.subdir }}/</span>{% endif %}
+                {# The quant is the one part of the filename that varies between copies of the
+                   same model, which is exactly why it is also what the family grouping strips. #}
+                {% if _f.quant %}
+                <span class="rounded bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 px-1.5 py-0.5 font-mono"
+                      title="Quantisation. Everything else in this filename is the family, which is what the Family grouping collapses on.">{{ _f.quant }}</span>
+                {% endif %}
+                {# Outlined rather than filled: this is a plain fact about the file, and a
+                   filled amber chip on every large model reads as a warning about it. #}
+                {% if _f.tier_short %}
+                <span class="rounded border px-1.5 py-0.5 border-slate-300 text-slate-500 dark:border-slate-700 dark:text-slate-400"
+                      title="{{ _f.tier_label }} — weights alone against one {{ '%.0f' | format(_f.card_gb or 0) }} GB card. KV and compute buffers are NOT in this number and they are not small; the Autoconfig panel is where that sum is done properly.">{{ _f.tier_short }}</span>
+                {% endif %}
+                {% if owner %}<span class="truncate">{{ owner }}</span>{% endif %}
                 {% if g.is_sharded %}<span>· {{ g.parts | length }} shards</span>{% endif %}
+                {# Only when it tells you something: a subdir named after the file is the
+                   normal layout for a sharded download and repeating it is pure noise. #}
+                {% if g.subdir and g.subdir != g.stem %}
+                <span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono">📁 {{ g.subdir }}/</span>
+                {% endif %}
               </div>
-              {% endif %}
             </div>
           </div>
         </td>
-        <td class="px-4 py-3">
-          {# Status is four stacked, labelled rows rather than one wrapped stream of chips.
-             Each answers a different question — is it configured, what can it take, where may
-             it run, where is it running — and mixing them on one line made a model with two
-             aliases wrap into an unreadable block. #}
-          {% set _cap  = (owui.caps if owui else {}).get(g.model_id) %}
-          {% set _mods = (_cap.modalities if _cap else []) %}
-          {% set _loaded = (loaded_map or {}).get(g.model_id) or [] %}
-          {% set _us = (update_status or {}).get(g.display_name) %}
-          {% set _renamed = g.aliases | reject('equalto', g.stem) | list %}
-          {% set _badges = (badges or {}).get(g.display_name) or [] %}
-          <div class="flex flex-col gap-1.5 text-xs">
 
-            {# 1 — configured, and under what id #}
-            <div class="flex flex-wrap items-center gap-1.5">
-              {% if g.is_companion %}
-                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
-                      title="Companion file (mmproj etc.) with no main model in its folder. Safe to delete.">orphan companion</span>
-              {% elif g.aliases %}
-                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                      title="Has a section in models.ini. Served as: {{ g.aliases | join(', ') }}">
-                  in models.ini{% if _renamed %} · as <span class="font-mono ml-1">{{ _renamed | join(', ') }}</span>{% endif %}
-                </span>
-              {% else %}
-                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
-                      title="No section in models.ini yet — llama-server will not serve this until one exists.">not configured</span>
-              {% endif %}
-              {% if _us and _us.status == 'stale' %}
-                <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                      title="Hugging Face has a newer version dated {{ _us.remote }} ({{ _us.delta_days }} day{{ 's' if _us.delta_days != 1 else '' }} newer)">update available</span>
-              {% endif %}
-            </div>
+        {# ---- takes: modalities and decoding features, icon-only ---------------------- #}
+        <td class="px-3 py-2 align-middle">
+          <div class="flex items-center gap-1">
+            <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                  title="Text — every model accepts text prompts.">{{ icon('type', 12) }}</span>
+            {# Same macro as the shape chip and as the models.ini section cards. An internally
+               speculating model drafts with its own MTP layers rather than a separate head, so
+               it gets the MTP chip - a distinction the OpenWebUI record alone cannot make. #}
+            {{ caps_chips(mods=_mods,
+                          spec=(('mtp' if _shape and _shape.internal_mtp else 'head')
+                                if _cap and _cap.speculative else ''),
+                          proj_unknown=(g.companion_name and not _mods),
+                          proj_name=g.companion_name) }}
+            {% if _cap and _cap.mismatch %}
+            <button type="button"
+                    hx-post="/models/align-capability"
+                    hx-vals='{"section": {{ g.model_id | tojson }}}'
+                    hx-target="#models-owui-toast" hx-swap="innerHTML"
+                    hx-on::after-request="setTimeout(()=>location.reload(),1200)"
+                    title="OpenWebUI disagrees with models.ini about this model — click to align."
+                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600 hover:bg-amber-500 text-white">fix</button>
+            {% endif %}
+          </div>
+        </td>
 
-            {# 2 — what it can take. Text is always shown: every model accepts it, and an
-               explicit icon reads better than inferring capability from an absent one. #}
-            <div class="flex flex-wrap items-center gap-1.5">
-              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">supports</span>
-              <span class="inline-flex items-center rounded px-1.5 py-0.5 bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                    title="Text — every model accepts text prompts.">{{ icon('type', 12) }}</span>
-              {{ caps_chips(mods=_mods, spec=('head' if _cap and _cap.speculative else ''),
-                            proj_unknown=(g.companion_name and not _mods), proj_name=g.companion_name) }}
-              {% if _cap and _cap.mismatch %}
-                <button type="button"
-                        hx-post="/models/align-capability"
-                        hx-vals='{"section": {{ g.model_id | tojson }}}'
-                        hx-target="#models-owui-toast" hx-swap="innerHTML"
-                        hx-on::after-request="setTimeout(()=>location.reload(),1200)"
-                        title="OpenWebUI disagrees with models.ini about this model — click to align."
-                        class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600 hover:bg-amber-500 text-white">
-                  fix
-                </button>
-              {% endif %}
-            </div>
+        {# ---- state: configured / loaded / stale, one line ----------------------------- #}
+        <td class="px-3 py-2 align-middle">
+          <div class="flex flex-wrap items-center gap-1 text-[11px]">
+            {% if g.is_companion %}
+              <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300"
+                    title="Companion file (mmproj etc.) with no main model in its folder. Safe to delete.">orphan companion</span>
+            {% elif not g.aliases %}
+              <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                    title="No section in models.ini yet — llama-server will not serve this until one exists.">not configured</span>
+            {% endif %}
+            {% if _loaded %}
+              {% for bn in _loaded %}
+              <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
+                    title="Resident in VRAM on {{ bn }} right now">{{ icon('zap', 10) }} {{ bn }}</span>
+              {% endfor %}
+            {% elif g.aliases and not g.is_companion %}
+              {# Muted text, not a green pill. Almost every model is configured-and-idle, so a
+                 filled chip here painted the whole column one colour and the two states that
+                 DO need attention - loaded, not configured - stopped standing out. #}
+              <span class="text-[10px] text-slate-400 dark:text-slate-600"
+                    title="Has a section in models.ini. Served as: {{ g.aliases | join(', ') }}. Not resident right now.">ready</span>
+            {% endif %}
+            {# Only when it is NOT the filename stem: an id equal to the name says nothing. #}
+            {% if _renamed %}
+            <span class="font-mono text-slate-500 dark:text-slate-400"
+                  title="Served under this API id instead of the filename stem">{{ _renamed | join(', ') }}</span>
+            {% endif %}
+            {% if _us and _us.status == 'stale' %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                  title="Hugging Face has a newer version dated {{ _us.remote }} ({{ _us.delta_days }} day{{ 's' if _us.delta_days != 1 else '' }} newer)">update</span>
+            {% endif %}
+          </div>
+        </td>
 
-            {# 3 — where it MAY run. These chips are the per-connection whitelist toggles. #}
+        {# ---- good at: your ratings, read-only here; the editor is in the drawer -------- #}
+        <td class="px-3 py-2 align-middle">
+          <div class="flex flex-wrap items-center gap-1">
+            {% for b in _badges %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[11px]
+              {% if b.rating >= 4 %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+              {% elif b.rating == 3 %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300
+              {% else %}bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300{% endif %}"
+              title="{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5 — your rating, set {{ b.created_at | ts }}{% if b.note %} · {{ b.note }}{% endif %}">{{ badge_labels.get(b.category, b.category) }} {{ b.rating }}/5</span>
+            {% else %}
+            <span class="text-[10px] text-slate-400 dark:text-slate-600">not rated</span>
+            {% endfor %}
+          </div>
+        </td>
+
+        <td class="px-3 py-2 text-right align-middle w-32 whitespace-nowrap">
+          <div class="tabular-nums text-slate-700 dark:text-slate-200">{{ g.human_size }}</div>
+          <div class="tabular-nums text-[11px] text-slate-400 dark:text-slate-500"
+               title="Modified {{ g.modified }}">{{ g.modified[:10] }}</div>
+        </td>
+
+        <td class="px-3 py-2 text-right align-middle whitespace-nowrap">
+          <button type="button" class="ml-expand rounded-md border border-slate-200 dark:border-slate-700 px-1.5 py-1
+                                       text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"
+                  aria-expanded="false" title="Availability, ratings and paths">{{ icon('chevron-down', 13) }}</button>
+          <button
+            hx-post="/models/delete"
+            hx-vals='{"name": "{{ g.display_name }}"}'
+            hx-target="#models-list"
+            hx-swap="innerHTML"
+            hx-confirm="Delete {{ g.display_name }}{% if g.is_sharded %} and its {{ g.parts | length }} shards{% endif %}{% if g.companion_name %} plus its multimodal projector {{ g.companion_name }}{% endif %}? This frees {{ g.human_size }}.{% if g.aliases %} It is referenced by [{{ g.aliases | join(', ') }}] in models.ini.{% endif %}"
+            title="Delete {{ g.display_name }}"
+            class="rounded-md border border-slate-200 dark:border-slate-700 px-1.5 py-1 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">
+            {{ icon('trash-2', 13) }}
+          </button>
+        </td>
+      </tr>
+
+      {# ---- drawer: the one-model-at-a-time controls -------------------------------------
+         Collapsed by default because none of it is scanning material. The whitelist toggles
+         and the rating form are things you do TO one model you have already found, and keeping
+         them on the visible line is what made eleven rows take 2100px. #}
+      <tr class="ml-drawer hidden bg-slate-50 dark:bg-slate-950/40" data-for="{{ rowid }}">
+        <td></td>
+        <td colspan="6" class="px-4 py-3">
+          <div class="flex flex-col gap-2.5 text-xs">
+
             {% if owui and owui.conns %}
               {% for mid in (g.aliases or [g.model_id]) %}
                 {% set vis = (owui.visible or {}).get(mid) %}
                 {% if vis %}
                 <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">available</span>
+                  <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">offered on</span>
                   {% if (g.aliases | length) > 1 %}<span class="text-[10px] font-mono text-slate-500 dark:text-slate-400">{{ mid }}</span>{% endif %}
                   {% for c in owui.conns %}
                     {% set on = vis.get(c.url) %}
@@ -151,51 +308,32 @@
               {% endfor %}
             {% endif %}
 
-            {# 4 — where it IS running, right now. #}
-            <div class="flex flex-wrap items-center gap-1.5">
-              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">loaded</span>
-              {% if _loaded %}
-                {% for bn in _loaded %}
-                  <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
-                        title="Resident in VRAM on {{ bn }} right now">{{ icon('zap', 10) }} {{ bn }}</span>
-                {% endfor %}
-              {% else %}
-                <span class="text-[10px] text-slate-400 dark:text-slate-600">not loaded</span>
-              {% endif %}
-            </div>
-
-            {# 5 - what it is GOOD at, in your judgement, and editable right here. A benchmark
-               run is the best place to FORM the opinion, with the output on screen, but most of
-               what you learn about a model you learn by using it for a week - so the editor
-               lives wherever the model does. Collapsed behind a button because this list is
-               dense and most rows are not being re-rated today.
-
-               Rated against g.model_id: the ini section name llama-server actually serves the
+            {# Rated against g.model_id: the ini section name llama-server actually serves the
                file under, which is also what _badges_for_files reads back. #}
             <div class="flex flex-wrap items-center gap-1.5">
-              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[4.5rem] shrink-0">good at</span>
-              {% with alias = g.model_id, badges = _badges, run_id = 0, collapsible = True %}
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">good at</span>
+              {% with alias = g.model_id, badges = _badges, run_id = 0, collapsible = False %}
                 {% include "_badges.html" %}
               {% endwith %}
             </div>
 
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span class="text-[10px] uppercase tracking-wide text-slate-400 w-[5.5rem] shrink-0">on disk</span>
+              <span class="font-mono text-[11px] text-slate-500 dark:text-slate-400">{{ snap.path }}/{{ g.first_shard_rel }}</span>
+              {% if g.companion_name %}<span class="text-[11px] text-slate-500 dark:text-slate-400">· projector {{ g.companion_name }}</span>{% endif %}
+              <a href="/model/{{ g.route_key }}" class="text-[11px] underline text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100">details</a>
+            </div>
+
           </div>
-        </td>
-        <td class="px-4 py-3 text-right tabular-nums text-slate-600 dark:text-slate-300">{{ g.human_size }}</td>
-        <td class="px-4 py-3 text-slate-500 dark:text-slate-400 tabular-nums">{{ g.modified }}</td>
-        <td class="px-4 py-3 text-right">
-          <button
-            hx-post="/models/delete"
-            hx-vals='{"name": "{{ g.display_name }}"}'
-            hx-target="#models-list"
-            hx-swap="innerHTML"
-            hx-confirm="Delete {{ g.display_name }}{% if g.is_sharded %} and its {{ g.parts | length }} shards{% endif %}{% if g.companion_name %} plus its multimodal projector {{ g.companion_name }}{% endif %}? This frees {{ g.human_size }}.{% if g.aliases %} It is referenced by [{{ g.aliases | join(', ') }}] in models.ini.{% endif %}"
-            class="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">
-            {{ icon('trash-2', 13) }} Delete
-          </button>
         </td>
       </tr>
       {% endfor %}
+
+      <tr id="ml-empty" class="hidden">
+        <td colspan="7" class="px-4 py-10 text-center text-sm text-slate-500 dark:text-slate-400">
+          Nothing matches those filters.
+        </td>
+      </tr>
     </tbody>
   </table>
   {% else %}
@@ -231,3 +369,161 @@
 </div>
 
 </div>
+
+<script>
+/* Grouping, sorting, filtering and the row drawers.
+ *
+ * Plain DOM rather than Alpine on purpose: the rows are server-rendered - every chip, tooltip
+ * and hx-* attribute on them comes from Jinja - so this only ever reorders and hides existing
+ * <tr>s. Rebuilding them client-side would mean duplicating all of that markup in JS.
+ *
+ * Re-runs on every HTMX swap of the partial, which is why it is written to be idempotent and
+ * reads its state back out of localStorage rather than out of the previous DOM. */
+(function () {
+  var body = document.getElementById('ml-body');
+  if (!body) return;
+  var KEY = 'ml.view.v1';
+  var q = document.getElementById('ml-q');
+  var grouper = document.getElementById('ml-group');
+  var sorter = document.getElementById('ml-sort');
+  var chipBox = document.getElementById('ml-chips');
+  var count = document.getElementById('ml-count');
+  var empty = document.getElementById('ml-empty');
+
+  var rows = Array.prototype.slice.call(body.querySelectorAll('tr.ml-row'));
+  var drawers = {};
+  Array.prototype.forEach.call(body.querySelectorAll('tr.ml-drawer'), function (d) {
+    drawers[d.getAttribute('data-for')] = d;
+  });
+
+  var state = { q: '', group: 'family', sort: 'name', flags: [] };
+  try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+  if (q) q.value = state.q || '';
+  if (grouper) grouper.value = state.group;
+  if (sorter) sorter.value = state.sort;
+
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+  var CHIP_ON = 'bg-sky-600 text-white border-sky-600 dark:bg-sky-500 dark:border-sky-500';
+  function paintChips() {
+    Array.prototype.forEach.call(chipBox ? chipBox.querySelectorAll('.ml-chip') : [], function (b) {
+      var on = state.flags.indexOf(b.getAttribute('data-flag')) !== -1;
+      CHIP_ON.split(' ').forEach(function (c) { b.classList.toggle(c, on); });
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  function human(n) {
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+  }
+
+  /* Fixed order, not alphabetical: these headings are a scale and reading them out of order
+   * loses the only thing they were for. Anything unlisted sorts last. */
+  var TIER_ORDER = ['multi', 'single', 'share', 'unknown'];
+  var STATUS_ORDER = ['loaded', 'configured', 'unconfigured', 'orphan'];
+
+  function groupOf(tr) {
+    if (state.group === 'family') return tr.getAttribute('data-family');
+    if (state.group === 'tier') return tr.getAttribute('data-tier-label');
+    if (state.group === 'status') return tr.getAttribute('data-status-label');
+    return '';
+  }
+  function groupRank(tr) {
+    var list = state.group === 'tier' ? TIER_ORDER : state.group === 'status' ? STATUS_ORDER : null;
+    if (!list) return 0;
+    var k = tr.getAttribute(state.group === 'tier' ? 'data-tier' : 'data-status');
+    var i = list.indexOf(k);
+    return i === -1 ? list.length : i;
+  }
+
+  function visible(tr) {
+    var needle = (state.q || '').trim().toLowerCase();
+    if (needle && tr.getAttribute('data-search').indexOf(needle) === -1) return false;
+    var flags = (' ' + tr.getAttribute('data-flags') + ' ');
+    for (var i = 0; i < state.flags.length; i++) {
+      if (flags.indexOf(' ' + state.flags[i] + ' ') === -1) return false;
+    }
+    return true;
+  }
+
+  function apply() {
+    var shown = rows.filter(visible);
+    shown.sort(function (a, b) {
+      if (state.group) {
+        var ra = groupRank(a), rb = groupRank(b);
+        if (ra !== rb) return ra - rb;
+        var ga = groupOf(a), gb = groupOf(b);
+        if (ga !== gb) return ga.localeCompare(gb, undefined, { sensitivity: 'base' });
+      }
+      if (state.sort === 'size') return +b.getAttribute('data-size') - +a.getAttribute('data-size');
+      if (state.sort === 'mtime') return +b.getAttribute('data-mtime') - +a.getAttribute('data-mtime');
+      return a.getAttribute('data-key').localeCompare(b.getAttribute('data-key'),
+                                                      undefined, { sensitivity: 'base' });
+    });
+
+    rows.forEach(function (tr) {
+      var hide = shown.indexOf(tr) === -1;
+      tr.classList.toggle('hidden', hide);
+      var d = drawers[tr.id];
+      if (d && hide) d.classList.add('hidden');
+    });
+    Array.prototype.forEach.call(body.querySelectorAll('tr.ml-head'), function (h) { h.remove(); });
+
+    var prev = null, bytes = 0;
+    shown.forEach(function (tr) {
+      bytes += +tr.getAttribute('data-size');
+      var g = groupOf(tr);
+      if (state.group && g !== prev) {
+        prev = g;
+        var members = shown.filter(function (x) { return groupOf(x) === g; });
+        var sum = members.reduce(function (a, x) { return a + (+x.getAttribute('data-size')); }, 0);
+        var head = document.createElement('tr');
+        head.className = 'ml-head';
+        head.innerHTML = '<td colspan="7" class="px-4 pt-3 pb-1">' +
+          '<span class="text-xs font-semibold text-slate-600 dark:text-slate-300"></span>' +
+          '<span class="ml-2 text-[11px] tabular-nums text-slate-400 dark:text-slate-500"></span></td>';
+        /* textContent, not string interpolation: a family name comes from a filename on disk. */
+        head.querySelector('span').textContent = g;
+        head.querySelectorAll('span')[1].textContent =
+          members.length + (members.length === 1 ? ' file · ' : ' files · ') + human(sum);
+        body.appendChild(head);
+      }
+      body.appendChild(tr);
+      if (drawers[tr.id]) body.appendChild(drawers[tr.id]);
+    });
+
+    if (empty) { body.appendChild(empty); empty.classList.toggle('hidden', shown.length > 0); }
+    if (count) {
+      count.textContent = shown.length === rows.length
+        ? rows.length + ' models · ' + human(bytes)
+        : shown.length + ' of ' + rows.length + ' · ' + human(bytes);
+    }
+  }
+
+  if (q) q.addEventListener('input', function () { state.q = q.value; save(); apply(); });
+  if (grouper) grouper.addEventListener('change', function () { state.group = grouper.value; save(); apply(); });
+  if (sorter) sorter.addEventListener('change', function () { state.sort = sorter.value; save(); apply(); });
+  if (chipBox) chipBox.addEventListener('click', function (e) {
+    var b = e.target.closest('.ml-chip');
+    if (!b) return;
+    var f = b.getAttribute('data-flag'), i = state.flags.indexOf(f);
+    if (i === -1) state.flags.push(f); else state.flags.splice(i, 1);
+    save(); paintChips(); apply();
+  });
+
+  body.addEventListener('click', function (e) {
+    var b = e.target.closest('.ml-expand');
+    if (!b) return;
+    var tr = b.closest('tr.ml-row'), d = drawers[tr.id];
+    if (!d) return;
+    var open = d.classList.toggle('hidden') === false;
+    b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    b.style.transform = open ? 'rotate(180deg)' : '';
+  });
+
+  paintChips();
+  apply();
+})();
+</script>
