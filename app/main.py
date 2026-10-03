@@ -190,6 +190,48 @@ async def _hero_backends_cached() -> list:
     return backends
 
 
+# The MTP/spec box reads the telemetry rollup, and the hero polls at 500 ms. The rollup itself
+# only moves when telemetry re-ingests (every 20 s), so the box is recomputed on a 10 s TTL and
+# the ingest call inside it is self-throttled the same way.
+_MTP_TTL_S = 10.0
+_mtp_cache: dict[str, tuple[float, "telemetry.Stats"]] = {}
+
+
+def _hero_mtp(backend: str, model_id: str) -> dict | None:
+    """Draft-acceptance facts for the running model, or None when it does not speculate.
+
+    What the running instance was SPECULATING with comes off its own argv (the telemetry db's
+    newest spawn record), not the ini: the box claims what the server is actually doing. The
+    numbers come from the print_timing draft-acceptance lines the telemetry module scrapes -
+    measured from real traffic, which is the only honest source, since llama.cpp reports the
+    acceptance for the requests it has already served and nothing at all until one finishes.
+    """
+    argv = db.latest_server_config(backend).get("argv") or {}
+    stype = str(argv.get("--spec-type") or "").strip()
+    if not stype or stype == "none":
+        return None
+    key = f"{backend}/{model_id}"
+    now = time.time()
+    ent = _mtp_cache.get(key)
+    if ent is None or (now - ent[0]) > _MTP_TTL_S:
+        try:
+            telemetry.ingest([backend])
+            ent = (now, telemetry.stats_for(model_path="", alias=model_id))
+        except Exception:  # noqa: BLE001 - a missing box, never a broken hero
+            ent = (now, telemetry.Stats())
+        _mtp_cache[key] = ent
+    tel = ent[1]
+    return {
+        "spec_type": stype,
+        "label": "MTP" if "mtp" in stype else ("NGRAM" if stype.startswith("ngram") else "SPEC"),
+        "acc_pct": (100.0 * tel.draft_acc_p50) if tel.draft_acc_p50 is not None else None,
+        "mean_len": tel.draft_len_p50 if tel.draft_len_p50 else 0.0,
+        "n": tel.draft_n,
+        "age": tel.age_str,
+        "n_max": tel.draft_n_max,
+    }
+
+
 async def _hero_context() -> dict:
     """The loaded model, its throughput, and enough of its config to read the panel.
 
@@ -210,7 +252,7 @@ async def _hero_context() -> dict:
         return {"speed": None, "hero_model": "", "hero_backend": "",
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
-                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0}
+                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None}
 
     _rank, b, sp = best
     model_id = (b.loaded_model or "").split(",")[0].strip()
@@ -270,7 +312,8 @@ async def _hero_context() -> dict:
             # in the template so the thresholds sit with the dataclass they describe.
             "slot_density": services.slot_density(len(sp.slots) if sp else 0),
             "slot_columns": services.slot_columns(len(sp.slots) if sp else 0),
-            "hero_weights_split": hero_weights_split}
+            "hero_weights_split": hero_weights_split,
+            "hero_mtp": _hero_mtp(b.name, model_id)}
 
 
 def _solo_backend() -> str:

@@ -75,11 +75,12 @@
       </div>
     </div>
 
-    {# ---- the three numbers that matter ---- #}
-    <div class="mt-4 grid grid-cols-3 gap-3">
-      {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n) %}
+    {# ---- the three numbers that matter, plus speculation's score when it runs ---- #}
+    <div class="mt-4 grid {{ 'grid-cols-4' if hero_mtp else 'grid-cols-3' }} gap-3">
+      {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n, tip='') %}
       <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
-                  {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}">
+                  {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}"
+           {% if tip %}title="{{ tip }}"{% endif %}>
         <div class="flex items-baseline gap-1">
           <span class="font-mono text-2xl font-semibold tabular-nums leading-none
                        {% if active %}text-{{ tint }}-300{% else %}text-slate-300{% endif %}">{{ value }}</span>
@@ -109,6 +110,32 @@
                  speed and speed.state == 'prefill', 'sky', '', 0, 0) }}
       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
                  false, 'slate', '', 0, 0) }}
+
+      {# ---- speculation's scorecard ----
+         Only drawn when the RUNNING instance was spawned with a spec-type — the claim is what
+         the server is doing now, not what the ini allows. The number is the median draft
+         acceptance scraped from the server's own print_timing lines over real traffic: of the
+         tokens the head proposed, how many the target model accepted. ×mean len is the payoff
+         — tokens produced per draft step — which is what acceptance actually buys. Amber, the
+         same hue speculation wears everywhere else in the app; it is a throughput bet, not a
+         free win, and the colour has meant "bet" since the caps chips. #}
+      {% if hero_mtp %}
+      {% set mtp_acc_txt = '' %}
+      {% if hero_mtp.n %}
+        {% set mtp_acc_txt = '%.0f%% of the tokens the draft proposed were accepted by the target model, median of %d requests' % (hero_mtp.acc_pct, hero_mtp.n) %}
+        {% if hero_mtp.age %}{% set mtp_acc_txt = mtp_acc_txt ~ ', ' ~ hero_mtp.age %}{% endif %}
+        {% if hero_mtp.mean_len and hero_mtp.n_max %}
+          {% set mtp_acc_txt = mtp_acc_txt ~ '. Each draft step produced ×%.1f tokens on average against a depth of %d — every token under the cap is throughput the head left unclaimed' % (hero_mtp.mean_len, hero_mtp.n_max) %}
+        {% endif %}
+      {% else %}
+        {% set mtp_acc_txt = 'no measured request yet — the figure appears after the first completed generation' %}
+      {% endif %}
+      {% set mtp_label = hero_mtp.label %}
+      {% if hero_mtp.mean_len %}{% set mtp_label = mtp_label ~ ' · ×%.1f' % hero_mtp.mean_len %}{% endif %}
+      {{ readout(('%0.f' % hero_mtp.acc_pct) if hero_mtp.acc_pct is not none else '—',
+                 '% accepted', mtp_label ~ ' drafts', true, 'amber', '', 0, 0,
+                 hero_mtp.label ~ ' speculative decoding is running (' ~ hero_mtp.spec_type ~ '). ' ~ mtp_acc_txt) }}
+      {% endif %}
     </div>
 
     {# ---- context bar: cached share first, so a long conversation that is mostly cache reads cheap ---- #}
