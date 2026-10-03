@@ -70,7 +70,13 @@ _RE_SUCCESS = re.compile(
 )
 # A load was attempted. Fallback boundary when nothing has succeeded yet: the failure, if any,
 # must come after the most recent attempt to be the current one.
-_RE_ATTEMPT = re.compile(r"loading model|spawning server instance", re.I)
+#
+# The lookbehinds matter. llama.cpp reports a failure as "error loading model: <reason>", which
+# contains the words this pattern looks for, so without them the most recent "attempt" was the
+# failure line itself and the window opened ON it - discarding every warning that led there. The
+# visible symptom was a diagnosis that named the fatal line and silently dropped the
+# common_fit_params warning two lines above it, which is the one that explains why.
+_RE_ATTEMPT = re.compile(r"(?<!error )(?<!failed )loading model|spawning server instance", re.I)
 
 # A rule's hint may be a fixed string or a callable that reads the matched line, for the one
 # case where the fix depends on WHICH file failed — a missing `model =` vs a missing `mmproj =`.
@@ -101,7 +107,50 @@ def _path_hint(line: str) -> str:
 
 # Ordered most-specific first. When several rules could match, the specific one (KV cache,
 # ctx-vs-trained, projector mismatch) is reported before the generic "out of memory"/assert.
+def _split_tensor_hint(line: str) -> str:
+    """Name the architecture that refused SPLIT_MODE_TENSOR, since that is the whole answer."""
+    m = re.search(r"architecture '([^']+)'", line)
+    arch = m.group(1) if m else ""
+    which = f"this model's architecture ({arch})" if arch else "this model's architecture"
+    return (f"`split-mode = tensor` is not implemented for {which} in this llama.cpp build — "
+            "llama.cpp marks that mode EXPERIMENTAL and only some architectures have it. Nothing "
+            "in the section can work around it. Use `split-mode = layer` (the default). If what "
+            "you wanted was control over how much of the model lands on each GPU, that is "
+            "`tensor-split` ratios, which is a different setting and works with layer.")
+
+
+def _split_buffers_hint(line: str) -> str:
+    """`split-mode = row` against a backend with no split-buffer support."""
+    m = re.search(r"device (\S+) does not support split buffers", line)
+    dev = m.group(1) if m else "this device"
+    return (f"`split-mode = row` needs a backend that implements split buffers and {dev} does "
+            "not, so row fails for every model on this backend rather than just this one. Use "
+            "`split-mode = layer` and set `tensor-split` ratios to control each GPU's share.")
+
+
 _RULES: list[tuple[re.Pattern[str], Hint]] = [
+    # Split-mode rules first: they are exact strings with exactly one cause, and each would
+    # otherwise be reported as the generic allocation or assertion failure it leads to.
+    (re.compile(r"SPLIT_MODE_TENSOR not implemented for architecture", re.I),
+     _split_tensor_hint),
+
+    (re.compile(r"does not support split buffers", re.I),
+     _split_buffers_hint),
+
+    # Not fatal on its own, and that is exactly why it is worth reporting: --fit quietly stops
+    # placing anything, and the error you actually SEE is an allocation failure several lines
+    # later with no obvious connection to the setting that caused it.
+    (re.compile(
+        r"common_fit_params:.{0,80}abort"
+        r"|llama_params_fit is not implemented"
+        r"|tensor_split already set by user",
+        re.I),
+     "`--fit` gave up before placing anything, so every size came from the section exactly as "
+     "written. --fit only adjusts arguments that are UNSET: pinning tensor-split or ngl disables "
+     "it, and split-mode = tensor disables it outright. If the next error is an allocation "
+     "failure, this is the reason — either clear tensor-split and ngl and let fit do the "
+     "placement, or pin n-cpu-moe yourself to match."),
+
     (re.compile(
         r"failed to allocate buffer for kv cache|kv[_ ]?cache.{0,40}out of memory",
         re.I),

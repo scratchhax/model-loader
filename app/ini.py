@@ -62,12 +62,24 @@ RUNTIME_FIELDS: tuple[Field, ...] = (
           help="On context-shift, how many tokens from the very start of the prompt to preserve. -1 = keep all (no shifting)."),
     Field("swa-full", "Full-size SWA cache", "bool",
           help="Use full-size cache for sliding-window attention models (Gemma, Mistral SWA variants). Higher VRAM, avoids some artifacts."),
+    # row and tensor are offered because llama-server offers them, but both fail at LOAD rather
+    # than degrading: row needs a backend with split-buffer support (ROCm has none, so it fails
+    # for every model there), and tensor is EXPERIMENTAL upstream and implemented for only some
+    # architectures. Saying so here is the difference between a 30-second answer and reading a
+    # stack trace; Diagnose recognises both failures and names the cause.
     Field("split-mode", "Multi-GPU split mode", "select", choices=("", "none", "layer", "row", "tensor"),
-          help="How to split a model across multiple GPUs. none = single GPU, layer = pipeline-split (default), row = per-row parallel, tensor = experimental."),
+          help="How to split a model across multiple GPUs. layer = pipeline-split, the default and "
+               "the one that always works; none = single GPU. row needs backend split-buffer support "
+               "(ROCm/HIP has none and will refuse to load); tensor is EXPERIMENTAL upstream and only "
+               "implemented for some architectures, and it also disables --fit. To control how much "
+               "goes on each card, set tensor-split ratios and leave this on layer."),
     Field("main-gpu", "Main GPU index", "int", placeholder="0",
           help="Which GPU holds the model when split-mode=none, or which GPU holds intermediates/KV when split-mode=row."),
     Field("tensor-split", "Tensor split ratio", "text", placeholder="e.g. 3,1",
-          help="Comma-separated proportions of the model to place on each GPU. '3,1' = 75% on GPU0, 25% on GPU1."),
+          help="Comma-separated proportions of the model to place on each GPU. '3,1' = 75% on GPU0, "
+               "25% on GPU1. This is NOT split-mode=tensor; it works with the default layer split. "
+               "Setting it disables --fit, which only adjusts arguments you have left unset, so pin "
+               "n-cpu-moe yourself as well on a model that does not fit outright."),
     Field("load-mode", "Model load mode", "select", choices=("", "none", "mmap", "mlock", "mmap+mlock", "dio"),
           help="mmap = default memory-map, mlock = lock in RAM (no swap), mmap+mlock = both, dio = direct I/O when supported."),
     Field("numa", "NUMA optimizations", "select", choices=("", "distribute", "isolate", "numactl"),
