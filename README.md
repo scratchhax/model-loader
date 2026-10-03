@@ -101,7 +101,7 @@ The row also shows what each model actually is: MoE or dense, its quant, whether
 
 A models directory grows monotonically and a flat alphabetical list stops being an organisation somewhere around a dozen files. The toolbar above the table groups, sorts, filters and searches, all client-side, and remembers what you chose:
 
-- **Group by family** collapses the same model at several quants under one heading — `Qwen3.8-27B` holding its `UD-Q4_K_M` and `UD-Q8_K_XL` — with a file count and total size per heading, which is what you want open when you are deciding which copy to delete. The family is the filename with its quant suffix stripped.
+- **Group by family** collapses the same model at several quants under one heading — `Qwen3.8-27B` holding its `UD-Q4_K_M` and `UD-Q8_K_XL` — with a file count and total size per heading, which is what you want open when you are deciding which copy to delete. The family is the filename with its quant suffix stripped, and variants then fold onto their base when the base is itself on disk: `Qwen3.8-Flash-Next-GSQ-RCO` and `-Uncensored` sit under `Qwen3.8-Flash-Next`. That rule is the files you have rather than a list of known suffixes — which is why `gemma-4-12b-it` and `gemma-4-E4B-it-qat` stay apart, there being no `gemma-4` base here and those two being different model sizes rather than variants of one.
 - **Group by size tier** sorts the shelf by how each model has to be placed on *your* hardware, read from the largest card the app can actually see: more than one GPU, one GPU, or part of one. Weights only; the Autoconfig panel is where KV and compute buffers are added up properly.
 - **Group by state** separates loaded, configured, unconfigured and orphaned companions.
 

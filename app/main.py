@@ -673,9 +673,14 @@ def _facets_for_files(snap, shapes: dict, loaded_map: dict, update_status: dict,
     """
     card_gb = services.largest_card_gb()
     caps = (owui or {}).get("caps") or {}
+    split = {g.display_name: services.split_quant(g.stem) for g in snap.ggufs}
+    # Needs the whole set at once: whether a variant has a base to fold onto is a fact about
+    # what else is on disk, not about its own filename.
+    canon = services.canonical_families({fam for fam, _q in split.values()})
     out: dict = {}
     for g in snap.ggufs:
-        family, quant = services.split_quant(g.stem)
+        family, quant = split[g.display_name]
+        family = canon.get(family, family)
         tier, tier_label, tier_short = services.size_tier(g.total_bytes, card_gb)
         shape = (shapes or {}).get(g.display_name)
         cap = caps.get(g.model_id) or {}
