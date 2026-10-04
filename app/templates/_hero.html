@@ -233,3 +233,36 @@
     {% endif %}
   </div>
 </div>
+
+{# ---- also serving ----------------------------------------------------------------------
+   One card can only lead with one model, and this box routinely has three resident at once:
+   a chat model on the cards, Orpheus beside it, and the Home Assistant voice model on the
+   CPU. Ranking decides which gets the big card; these make sure the others are never simply
+   absent, which is what made the headline look like it was choosing at random. #}
+{% if hero_others %}
+<div class="mt-2 flex flex-wrap gap-2">
+  {% for o in hero_others %}
+  <a href="/containers"
+     class="flex min-w-0 flex-1 basis-56 items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3 py-2
+            transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/60"
+     title="{{ o.backend }} is also holding a model{% if o.live %} and is generating right now{% elif o.asleep %}, asleep with its VRAM released until the next request{% endif %}. Click for the container view.">
+    <span class="h-1.5 w-1.5 shrink-0 rounded-full
+      {% if o.live %}bg-emerald-500{% elif o.asleep %}bg-sky-500{% else %}bg-slate-300 dark:bg-slate-600{% endif %}"></span>
+    <div class="min-w-0 flex-1">
+      <div class="truncate font-mono text-[11px] text-slate-500 dark:text-slate-400">{{ o.backend }}</div>
+      <div class="truncate font-mono text-[13px] text-slate-700 dark:text-slate-200">{{ o.model }}</div>
+    </div>
+    <div class="shrink-0 text-right">
+      {% if o.live and o.tps %}
+      <div class="tabular-nums text-sm text-emerald-600 dark:text-emerald-400">{{ '%.1f' % o.tps }}</div>
+      <div class="text-[10px] text-slate-400 dark:text-slate-500">tok/s</div>
+      {% elif o.asleep %}
+      <div class="text-[10px] text-sky-600 dark:text-sky-400">asleep</div>
+      {% else %}
+      <div class="text-[10px] text-slate-400 dark:text-slate-500">{{ 'GPU' if o.gpu else 'CPU' }} · idle</div>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
