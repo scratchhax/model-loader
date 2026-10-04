@@ -241,6 +241,7 @@ async def _hero_context() -> dict:
     """
     backends = await _hero_backends_cached()
     best: tuple[int, object, object] | None = None      # (rank, backend, speed)
+    scored: list[tuple[int, object, object]] = []
     for b in backends:
         if not b.loaded_model:
             continue
@@ -258,15 +259,36 @@ async def _hero_context() -> dict:
         # llama-cpu serving wheatley-voice while a 25 GB model sat on the cards.
         _gpu = b.vendor in ("rocm", "cuda")
         rank = (4 if (sp and sp.live) else 0) + (2 if _gpu else 0) + (1 if b.router else 0)
+        scored.append((rank, b, sp))
         if best is None or rank > best[0]:
             best = (rank, b, sp)
     if best is None:
         return {"speed": None, "hero_model": "", "hero_backend": "",
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
-                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None}
+                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None,
+                "hero_others": []}
 
     _rank, b, sp = best
+
+    # Everything else holding a model. The hero can only lead with one, and on this box three
+    # backends are routinely resident at once - a chat model on the cards, a TTS model beside
+    # it, and the Home Assistant voice model on the CPU. Picking one and silently dropping the
+    # rest is what made the headline look arbitrary; showing them removes the question.
+    hero_others = []
+    for _r, ob, osp in sorted(scored, key=lambda t: -t[0]):
+        if ob.name == b.name:
+            continue
+        hero_others.append({
+            "backend": ob.name,
+            "model": (ob.loaded_model or "").split(",")[0].strip(),
+            "gpu": ob.vendor in ("rocm", "cuda"),
+            "live": bool(osp and osp.live),
+            "state": (osp.state if osp else "idle"),
+            "tps": round(osp.gen_tps, 1) if (osp and osp.live and osp.gen_tps) else 0.0,
+            "asleep": bool(getattr(ob, "asleep", False)),
+        })
+
     model_id = (b.loaded_model or "").split(",")[0].strip()
 
     # Fold in this backend's log before anything reads its spawn record. Rate-limited to once
@@ -342,6 +364,7 @@ async def _hero_context() -> dict:
             "slot_density": services.slot_density(len(sp.slots) if sp else 0),
             "slot_columns": services.slot_columns(len(sp.slots) if sp else 0),
             "hero_weights_split": hero_weights_split,
+            "hero_others": hero_others,
             "hero_mtp": _hero_mtp(b.name, model_id)}
 
 
