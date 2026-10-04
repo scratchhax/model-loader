@@ -245,12 +245,19 @@ async def _hero_context() -> dict:
         if not b.loaded_model:
             continue
         sp = await services.inference_speed(b.name, b.internal_port, b.loaded_model)
-        # A chat backend outranks a single-model one at the same activity level, so a TTS
-        # server - which holds its model permanently and therefore always counts as loaded -
-        # cannot take the headline from the model you are actually talking to. It still leads
-        # when it is the only thing running, which is the point: before this, an overview with
-        # only Orpheus resident read as a dead box.
-        rank = (2 if b.router else 0) + (1 if (sp and sp.live) else 0)
+        # Three questions, in the order they matter on a box whose whole point is the cards:
+        #
+        #   generating now   the thing actually working always leads, GPU or not
+        #   touches a GPU    an idle CPU backend is not the headline while a card holds a model
+        #   is a chat router a TTS server holds its model permanently and so always counts as
+        #                    loaded; it must not outrank the model you are talking to
+        #
+        # Ranking on `router` alone tied three backends that share one models.ini - the GPU
+        # router, llama-cpu and llama-voice - so the winner was whichever docker happened to
+        # enumerate first, and the hero appeared to pick at random. In practice it would show
+        # llama-cpu serving wheatley-voice while a 25 GB model sat on the cards.
+        _gpu = b.vendor in ("rocm", "cuda")
+        rank = (4 if (sp and sp.live) else 0) + (2 if _gpu else 0) + (1 if b.router else 0)
         if best is None or rank > best[0]:
             best = (rank, b, sp)
     if best is None:
