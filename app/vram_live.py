@@ -163,7 +163,14 @@ def _components(name: str, vendor: str, gpu_count: int,
         ubatch = int(str(argv.get("--ubatch-size") or argv.get("-ub") or 512).strip() or 512)
     except (TypeError, ValueError):
         ubatch = 512
-    compute_gb = autoconfig.compute_buffer_gb(ctx_total, ubatch, vendor=vendor) * gpu_count
+    # Split mode off the RUNNING server's own argv, not the ini: tensor-parallel allocates a
+    # measured 0.63x the per-card compute buffer that layer split does (see the table in
+    # autoconfig). Charging the layer figure for a tensor load inflates this segment by ~37%
+    # and hides the same amount inside "other", which is the one segment nobody can explain.
+    # The meter's job is to show what is actually unaccounted for, so it gets the real number.
+    split_mode = (argv.get("--split-mode") or argv.get("-sm") or "").strip()
+    compute_gb = autoconfig.compute_buffer_gb(ctx_total, ubatch, vendor=vendor,
+                                              split_mode=split_mode) * gpu_count
 
     reserve_gb = autoconfig._RESERVE_PER_GPU * gpu_count
 
