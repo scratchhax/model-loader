@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
 from . import telemetry
-from . import bench, db, gguf_meta, hf, hw, ini, services, vram_live
+from . import bench, db, gguf_meta, gpu_procs, hf, hw, ini, services, vram_live
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -342,9 +342,11 @@ async def _hero_context() -> dict:
     hero_weights_split = None
     try:
         if st.ok and st.gpu:
+            _t = _gpu_tenants()
             hero_weights_split = (vram_live.breakdown(
                 b.name, st.gpu,
                 frozenset(i.strip() for i in (b.loaded_model or "").split(",") if i.strip()),
+                foreign=[(t.label, t.total_gb) for t in _t if t.foreign and t.total_gb > 0.005],
             ) or {}).get("weights_split")
     except Exception:  # noqa: BLE001 - a missing line must never cost the hero
         hero_weights_split = None
@@ -368,6 +370,18 @@ async def _hero_context() -> dict:
             "hero_mtp": _hero_mtp(b.name, model_id)}
 
 
+def _gpu_tenants() -> list:
+    """Every process on the cards, ours and not ours. [] on a box this cannot be read on.
+
+    Lives here rather than in gpu_procs so the module stays a probe with no opinion about
+    which containers the app considers its own.
+    """
+    try:
+        return gpu_procs.tenants(set(services._effective_container_names()))
+    except Exception:  # noqa: BLE001 - a tenant table that fails degrades to not being drawn
+        return []
+
+
 def _solo_backend() -> str:
     """The single running backend that sees GPUs, or "" when zero or several do.
 
@@ -376,6 +390,11 @@ def _solo_backend() -> str:
     second one's model - the meter falls back to the plain measured bar instead. Backends
     without GPU cards (a CPU build, a voice pipeline) cannot put anything on the device, so
     they do not break sole ownership, and the "other" residual would catch them if they did.
+
+    Note what this does NOT cover, and never could: a GPU process the app did not start. It
+    enumerates BACKENDS, and a TTS server or an image generator is not one. That gap is what
+    gpu_procs closes - sole ownership among backends is still the condition for drawing the
+    meter, and the meter is now told about the tenants that are not backends.
     """
     gpu_backends = [n for n in services._effective_container_names()
                     if (st := hw.stats_for(n)).ok and st.gpu and st.gpu.cards]
@@ -398,6 +417,9 @@ def _gpu_strip_context() -> dict:
     card_breakdowns: dict[int, dict] = {}
     pooled_vb: dict | None = None
     solo = _solo_backend()
+    tenants = _gpu_tenants()
+    foreign_cards = gpu_procs.foreign_by_card(tenants)
+    foreign_pool = [(t.label, t.total_gb) for t in tenants if t.foreign and t.total_gb > 0.005]
     for name in services._effective_container_names():
         st = hw.stats_for(name)
         if not (st.ok and st.gpu and st.gpu.cards):
@@ -411,8 +433,9 @@ def _gpu_strip_context() -> dict:
             # are known per card and only the PLACEMENT is not, so it is drawn once underneath
             # with the full legend and the spill bar, exactly as the container card draws it.
             pooled_vb = vram_live.breakdown(name, st.gpu,
-                                            frozenset(services.last_loaded_ids(name)))
-            card_breakdowns = vram_live.per_card(pooled_vb, cards)
+                                            frozenset(services.last_loaded_ids(name)),
+                                            foreign=foreign_pool)
+            card_breakdowns = vram_live.per_card(pooled_vb, cards, foreign_cards)
         pts = hw.history_for(name)
         if pts:
             span_s = (pts[-1].ts - pts[0].ts) if len(pts) > 1 else 0.0
@@ -429,7 +452,34 @@ def _gpu_strip_context() -> dict:
                     "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
                 }
         break
-    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns}
+    return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
+            "tenants": _tenant_rows(tenants, cards)}
+
+
+def _tenant_rows(tenants: list, cards: list) -> list[dict]:
+    """The "on the cards" table: one row per GPU process, in the card order the strip uses.
+
+    Drawn whenever there is anything to draw, including when the per-card meters are not -
+    this table needs no estimate and no sole owner, only the kernel's own accounting, so it
+    is the one readout that keeps working in exactly the situations the meter gives up on.
+    """
+    if not tenants or not cards:
+        return []
+    idx = [c.index for c in cards]
+    rows = []
+    for t in tenants:
+        rows.append({
+            "label": t.label,
+            "comm": t.comm,
+            "pid": t.pid,
+            "foreign": t.foreign,
+            "total_gb": t.total_gb,
+            # None, not 0.0: a card this process has registered with but allocated nothing on
+            # is not the same claim as a card it is using lightly, and a column of dashes next
+            # to a column of numbers says which card a tenant is actually on at a glance.
+            "per_card": [(t.per_card_gb.get(i) or None) for i in idx],
+        })
+    return rows
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2329,9 +2379,11 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     vb_heading = None
     if st and st.ok:
         if st.gpu and _solo_backend() == name:
+            tenants = _gpu_tenants()
             vram_breakdown = vram_live.breakdown(
                 name, st.gpu,
-                frozenset(i.strip() for i in (b.loaded_model or "").split(",") if i.strip()))
+                frozenset(i.strip() for i in (b.loaded_model or "").split(",") if i.strip()),
+                foreign=[(t.label, t.total_gb) for t in tenants if t.foreign and t.total_gb > 0.005])
         elif not st.gpu and st.container:
             vram_breakdown = vram_live.ram_breakdown(name, st.container)
             if vram_breakdown:

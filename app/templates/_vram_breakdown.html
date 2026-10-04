@@ -3,13 +3,22 @@
   Part-to-whole VRAM meter, shared by the autoconfig panel, the container cards and the GPU
   strip so the palette is validated once and drawn identically everywhere.
 
-  Segment order is weights -> context -> overhead -> compute on purpose: it keeps emerald and
-  amber apart, the one adjacent pair the palette validator flags as weak for protanopia. The
-  four hues are sky-600 / emerald-600 / violet-600 / amber-600, which pass the lightness band,
-  chroma floor, CVD separation (worst adjacent dE 16.1), normal-vision floor and 3:1 surface
-  contrast against BOTH the light and dark panel surfaces - the dark steps are validated, not
-  flipped. Free is a neutral track, not a category, so it is exempt from the chroma floor;
-  "other" is the same argument - a residual bucket, neutral slate, one step above the track.
+  Segment order is weights -> context -> overhead -> compute -> other tenants on purpose: it
+  keeps emerald and amber apart, the one adjacent pair the palette validator flags as weak for
+  protanopia. The five hues are sky-600 / emerald-600 / violet-600 / amber-600 / fuchsia-600,
+  which pass the lightness band, chroma floor, CVD separation (worst adjacent dE 16.1),
+  normal-vision floor and 3:1 surface contrast against BOTH the light and dark panel surfaces -
+  the dark steps are validated, not flipped. Free is a neutral track, not a category, so it is
+  exempt from the chroma floor; "other" is the same argument - a residual bucket, neutral slate,
+  one step above the track.
+
+  fuchsia-600 is "foreign": a process on the card that is not this backend. That is an identity,
+  not a component of the load, so it gets a hue of its own rather than a shade of one. It was
+  picked by running the validator over the five in segment order against both surfaces, and it
+  is the candidate that leaves the worst adjacent pair exactly where it already was
+  (emerald<->sky, dE 16.1). rose-600 would have dropped that to 9.4 against the amber it sits
+  beside, and cyan-600 passed every number while reading as the same blue as the weights
+  segment two along.
 
   Identity never rests on colour: every segment is named with its value in the legend, so the
   bar is readable in greyscale and by a colourblind reader. Values live in the legend rather
@@ -33,6 +42,7 @@
      'ctx':      'bg-emerald-600',
      'overhead': 'bg-violet-600',
      'compute':  'bg-amber-600',
+     'foreign':  'bg-fuchsia-600',
      'other':    'bg-slate-400 dark:bg-slate-500',
      'free':     'bg-slate-300 dark:bg-slate-700',
    } %}
