@@ -227,8 +227,38 @@ def _compute_profile(vendor: str) -> tuple[float, float, float, bool]:
     return _COMPUTE_PROFILES["nvidia"]
 
 
+# Tensor-parallel allocates a SMALLER per-card compute buffer than layer split, not a larger
+# one. Measured on the 2x R9700 (2026-10-04, ubatch 512, q8_0 KV), per card in MiB:
+#
+#     ctx       Qwen3.8-27B            gemma-4-26B-A4B
+#               layer   tensor  ratio  layer   tensor  ratio
+#      32768   377.13   240.28  0.637  344.32  219.30  0.637
+#      65536   633.13   400.28  0.632  600.32  379.30  0.632
+#     131072  1145.13   720.28  0.629 1112.32  699.30  0.629
+#
+# Two different architectures agreeing to three decimal places at every context, which is what
+# makes a flat multiplier defensible rather than a curve fit. The slope is the cleaner statement
+# of it: 8.0 MiB per 1K of context in layer mode against exactly 5.0 in tensor, so 0.625, with
+# the measured ratios landing slightly above that because the fixed floor shrinks by a little
+# less than the slope does.
+#
+# Worth stating plainly because the intuition runs the other way: tensor-parallel adds a
+# cross-card reduction per layer and therefore "must" need more scratch. It does not. The graph
+# is split across both devices, so each card builds activations for its own shard.
+#
+# NOTE this is read off llama.cpp's `Meta()` buffer lines, which replace ROCm0/ROCm1 in tensor
+# mode and are PER CARD, not pooled - confirmed by the model buffer, 7338.51 MiB against layer's
+# 14674.45 across two cards, exactly half.
+# DELIBERATELY NOT applied to the fit budget, only to the live meter in vram_live. Charging
+# less would let autoconfig propose a LARGER context for a tensor section, and as of 2026-10-04
+# a tensor load's measured VRAM still exceeds the full estimate by ~3 GB per card from a source
+# nobody has identified (it shows up as the "other" segment). Until that residual is explained,
+# over-charging compute here is the conservative error and partly offsets it. Revisit together.
+_COMPUTE_TENSOR_SPLIT_MULT = 0.63
+
+
 def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool = False,
-                      vendor: str = "") -> float:
+                      vendor: str = "", split_mode: str = "") -> float:
     """Per-CARD compute buffer, in GB. Every card allocates its own, so the pooled cost is this
     times gpu_count.
 
@@ -239,6 +269,10 @@ def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool
     Scaled by ubatch because the ctx-sized term is a mask over the micro-batch: doubling ubatch
     doubles it. Autoconfig never raises ubatch itself (see the note where batch-size is set), so
     in practice this runs at the 512 the measurements used.
+
+    `split_mode` of "tensor" applies the measured tensor-parallel discount above. Anything else,
+    including the empty default, keeps the layer-split numbers, so every existing caller is
+    unaffected.
     """
     if total_ctx <= 0:
         return 0.0
@@ -247,6 +281,8 @@ def compute_buffer_gb(total_ctx: int, ubatch: int = 512, pipeline_parallel: bool
     mib = base + slope * (total_ctx / 1024.0) * ub_mult
     if not pipeline_parallel:
         mib *= fallback
+    if (split_mode or "").strip().lower() == "tensor":
+        mib *= _COMPUTE_TENSOR_SPLIT_MULT
     return mib / 1024.0
 
 
