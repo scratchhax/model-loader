@@ -502,6 +502,9 @@ class LlamaBackend:
     # swap models. False for a -m server such as the Orpheus TTS backend, which serves exactly
     # one file and is not a chat endpoint.
     router: bool = True
+    # "rocm" | "cuda" | "cpu" | "unknown", from the image tag. Whether this backend can touch
+    # the cards at all, which is what decides who leads the overview.
+    vendor: str = ""
 
 
 def _parse_started_at(iso: str) -> tuple[str, str]:
@@ -819,7 +822,9 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
 
     out: list[LlamaBackend] = []
     probe_targets: list[tuple[int, str, int | None]] = []  # (idx, name, internal_port)
-    _routers = {d["name"]: bool(d.get("router")) for d in discover_llama_containers()}
+    _discovered = discover_llama_containers()
+    _routers = {d["name"]: bool(d.get("router")) for d in _discovered}
+    _vendors = {d["name"]: str(d.get("vendor") or "") for d in _discovered}
 
     for i, name in enumerate(effective):
         b = LlamaBackend(name=name, found=False, status="not_found")
@@ -839,6 +844,7 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             b.host_ports, b.internal_port = _extract_ports(attrs)
             b.sleep_idle_s = _sleep_idle_seconds(attrs)
             b.router = _routers.get(name, True)
+            b.vendor = _vendors.get(name, "")
             if b.sleep_idle_s > 0 and b.status == "running":
                 b.asleep = _is_asleep(c)
         except NotFound:
