@@ -188,12 +188,31 @@ def _components(name: str, vendor: str, gpu_count: int,
                 aux_gb += 7.0 * max(0, 1024 - 512) * layers * hidden / 1e9
         except OSError:
             pass
-    draft_s = (argv.get("--spec-draft-model") or "").strip()
+    # A speculative draft head costs FAR more than its file. Measured 2026-10-04 on
+    # gemma-4-31B-it-Q6_K, tensor split, ctx 262144, ubatch 1024, same mmproj in both runs:
+    #
+    #     without draft   43.27 GiB      with draft   49.43 GiB      difference 6.16 GiB
+    #
+    # against the 0.56 GB this used to charge - eleven times under, and the single largest
+    # error in the whole meter. The buffer inventory says why: the draft runs its OWN context,
+    # so it allocates a SECOND compute buffer sized from the same ctx and ubatch as the target.
+    # Measured per card, 2735.29 MiB for the draft against 2735.32 for the target - identical.
+    # Its own weights (382.31 MiB/card) and KV (425.00) are the small part.
+    #
+    # The flag is `--model-draft`. This used to look for `--spec-draft-model`, which llama.cpp
+    # does not emit, so a draft head was charged NOTHING AT ALL - the bug behind the ~3 GB/card
+    # "other" residual that prompted the measurement.
+    draft_s = (argv.get("--model-draft") or argv.get("-md")
+               or argv.get("--spec-draft-model") or "").strip()
     if draft_s:
         try:
             aux_gb += _host_path(draft_s).stat().st_size / (1024 ** 3) * 1.15
         except OSError:
             pass
+        # The duplicate compute buffer is per card, like the target's, so it belongs with
+        # compute rather than in aux - aux is apportioned to the main GPU, which would put
+        # the whole of it on card 0 and skew every per-card figure beside it.
+        compute_gb *= 2.0
 
     if model_gb <= 0:
         return None
