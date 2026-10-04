@@ -452,6 +452,12 @@ def _gpu_strip_context() -> dict:
                     "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
                 }
         break
+    # The estimate-based meter is all-or-nothing on the backend's model and says None whenever
+    # it cannot size one - idle router, sleeping model, no telemetry. A foreign tenant's VRAM
+    # is measured, not estimated, so it should not disappear with it. Fall back to drawing what
+    # IS known rather than an anonymous fill.
+    if not card_breakdowns and foreign_cards and cards:
+        card_breakdowns = vram_live.tenants_only_per_card(cards, foreign_cards)
     return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
             "tenants": _tenant_rows(tenants, cards)}
 

@@ -424,6 +424,62 @@ def ram_breakdown(name: str, cont) -> dict | None:
     }
 
 
+def tenants_only_per_card(cards: list,
+                          foreign_by_card: dict[int, list[tuple[str, float]]]) -> dict[int, dict]:
+    """Per-card meter built from MEASUREMENT ALONE: who else is on the card, and what is left.
+
+    This exists because breakdown() is all-or-nothing on the BACKEND's model, and it says None
+    for a long list of good reasons - no model loaded, one asleep, no spawn telemetry, an
+    offload it cannot cost. In every one of those cases the card falls back to a plain fill,
+    and a foreign tenant's VRAM goes unexplained even though it is the one quantity here that
+    was never estimated in the first place.
+
+    Observed 2026-10-04: router idle with nothing loaded, chatterbox-tts holding 5.88 GB of
+    card 0. The tenant table said "chatterbox-tts 5.88 GB" and the bar directly above it showed
+    an anonymous fill - two readouts on one screen disagreeing about the same card.
+
+    So when the estimate cannot be drawn, draw what was measured. Every segment here is the
+    kernel's own per-process figure; "other" is the remainder, which is honest because nothing
+    in this meter claims to know what that remainder is.
+    """
+    out: dict[int, dict] = {}
+    for i, c in enumerate(cards):
+        idx = getattr(c, "index", i)
+        fgn = [(l, gb) for l, gb in (foreign_by_card or {}).get(idx, []) if gb > 0.005]
+        if not fgn:
+            continue
+        total = float(c.vram_total_gb or 0)
+        used = float(c.vram_used_gb or 0)
+        if total <= 0:
+            continue
+        spent = 0.0
+        segs = []
+        for label, gb in fgn:
+            take = min(gb, max(0.0, used - spent))
+            if take <= 0.005:
+                continue
+            spent += take
+            segs.append({"key": "foreign", "label": label, "gb": round(take, 2),
+                         "pct": 100.0 * take / total,
+                         "note": "another process on this card, measured per process by the "
+                                 "kernel. No backend model is sized here - this meter is "
+                                 "measurement only"})
+        other = max(0.0, used - spent)
+        free = max(0.0, total - used)
+        if other > 0.005:
+            segs.append({"key": "other", "label": "other", "gb": round(other, 2),
+                         "pct": 100.0 * other / total,
+                         "note": "allocated on this card but not attributable to a process "
+                                 "this app can see - driver and display context, mostly"})
+        if free > 0.005:
+            segs.append({"key": "free", "label": "free", "gb": round(free, 2),
+                         "pct": 100.0 * free / total, "note": "unallocated on the card"})
+        out[idx] = {"total_gb": total, "used_gb": used, "free_gb": free,
+                    "subtitle": "measured per process; no backend model sized",
+                    "segments": segs}
+    return out
+
+
 def per_card(vb: dict, cards: list,
              foreign_by_card: dict[int, list[tuple[str, float]]] | None = None) -> dict[int, dict]:
     """Split a pooled breakdown into per-card meters, keyed by card index.
