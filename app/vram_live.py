@@ -219,11 +219,19 @@ def _cached_components(name: str, vendor: str, gpu_count: int,
 
 
 def _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb, total_gb,
-              gpu_pct=100, ctx_total=0):
+              gpu_pct=100, ctx_total=0, foreign=()):
     """The part-to-whole segment list, ordered weights -> context -> overhead -> compute ->
-    other -> free: the same order the autoconfig panel validated (it keeps the two hues the
-    palette validator flags as a weak protanopic pair apart), with the two residual buckets
-    neutrals at the end."""
+    [other tenants] -> other -> free: the same order the autoconfig panel validated (it keeps
+    the two hues the palette validator flags as a weak protanopic pair apart), with the two
+    residual buckets neutrals at the end.
+
+    `foreign` is [(label, GB)] for processes on the card that are NOT this backend - see
+    gpu_procs. They sit after everything this backend owns and before the residual, because
+    that is the reading order of the claim being made: here is what the model costs, here is
+    who else is on the card, here is what is left over. Their hue (fuchsia-600) was validated
+    against the four it joins and the surfaces it is drawn on; the worst adjacent CVD pair is
+    unchanged by its addition.
+    """
     parts = [
         ("model", "model weights", model_gb,
          ("GPU-resident weights: %d%% of the model, the rest streams from host RAM" % gpu_pct)
@@ -235,6 +243,10 @@ def _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb, total
          "driver and runtime context per card, plus any vision projector and draft head"),
         ("compute", "compute buffers", compute_gb, "per-card graph scratch, which grows with context"),
     ]
+    for label, gb in foreign:
+        parts.append(("foreign", label, gb,
+                      "another process on this card, not this backend: measured straight from "
+                      "the kernel's per-process VRAM accounting, not estimated"))
     if other_gb > 0.005:
         parts.append(("other", "other", other_gb,
                       "in the measured total but not in the estimate: allocator fragmentation, "
@@ -245,7 +257,8 @@ def _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb, total
             for k, lbl, v, note in parts if v > 0.005]
 
 
-def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict | None:
+def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None,
+              foreign: list[tuple[str, float]] | None = None) -> dict | None:
     """Live part-to-whole VRAM breakdown for one backend, or None.
 
     None is the answer far more often than for the recommended-configuration meter, and every
@@ -254,6 +267,13 @@ def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict 
     offload whose weights cost cannot be derived, a sleeping model whose measured usage has
     legitimately dropped below the allocation, or more than one backend on the cards (the
     estimate covers one of them and the residual would silently absorb the other).
+
+    `foreign` is [(label, GB)] for OTHER processes on the cards, measured per process by
+    gpu_procs. Passing it does two things, and the second matters more than the first: the
+    tenant gets a named segment instead of swelling the residual, AND every comparison below
+    is made against what is left for THIS backend. Without that, somebody else's 6 GB counts
+    as this model's measured usage - which both hides a genuine shortfall (the `used_gb <
+    est * 0.85` guard stops firing) and makes a spill look like a fit.
     """
     if gpu is None or not getattr(gpu, "cards", None) or gpu.gpu_count <= 0:
         return None
@@ -264,6 +284,16 @@ def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict 
 
     comps = _cached_components(name, gpu.vendor, gpu.gpu_count, loaded_ids)
     if comps is None:
+        return None
+
+    # What is this backend's, and what is this backend's to spend. Everything from here on is
+    # reasoned in those terms; only free_gb stays measured against the whole card, because
+    # free is free whoever was not using it.
+    foreign = [(l, gb) for l, gb in (foreign or []) if gb > 0.005]
+    foreign_gb = min(sum(gb for _l, gb in foreign), used_gb)
+    own_used_gb = max(0.0, used_gb - foreign_gb)
+    own_total_gb = max(0.0, total_gb - foreign_gb)
+    if own_used_gb <= 0 or own_total_gb <= 0:
         return None
 
     fixed_gb = comps["kv_gb"] + comps["reserve_gb"] + comps["aux_gb"] + comps["compute_gb"]
@@ -277,8 +307,8 @@ def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict 
     # at load from the context and the card count and do not move, so whatever else the device
     # is holding is weights. Measurement supplies the one thing the config cannot, which is the
     # opposite of guessing: nothing here is estimated that could have been measured.
-    if est > total_gb * 1.02:
-        resident_gb = kfd_process_vram_gb() or used_gb
+    if est > own_total_gb * 1.02:
+        resident_gb = kfd_process_vram_gb() or own_used_gb
         weights_gb = resident_gb - fixed_gb
         total_weights = comps["model_total_gb"]
         if weights_gb <= 0.05 or total_weights <= 0:
@@ -297,8 +327,9 @@ def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict 
                                                 autoconfig.format_ctx(comps["ctx_total"])),
             "segments": _segments(weights_gb, comps["kv_gb"],
                                   comps["reserve_gb"] + comps["aux_gb"], comps["compute_gb"],
-                                  max(0.0, used_gb - resident_gb), free_gb, total_gb,
-                                  gpu_pct=gpu_pct, ctx_total=comps["ctx_total"]),
+                                  max(0.0, own_used_gb - resident_gb), free_gb, total_gb,
+                                  gpu_pct=gpu_pct, ctx_total=comps["ctx_total"],
+                                  foreign=foreign),
             "weights_split": {
                 "total_gb": total_weights, "gpu_gb": on_gpu_raw, "host_gb": host_gb,
                 "gpu_pct": 100.0 * on_gpu_raw / total_weights,
@@ -307,27 +338,28 @@ def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict 
                 "measured": True,
             },
             "raw": dict(comps, scale=1.0, measured_resident_gb=resident_gb,
-                        drawn_model_gb=weights_gb),
+                        drawn_model_gb=weights_gb, foreign_gb=foreign_gb),
         }
     scale = 1.0
-    if est > used_gb:
-        if used_gb < est * 0.85:
+    if est > own_used_gb:
+        if own_used_gb < est * 0.85:
             return None
-        scale = used_gb / est
+        scale = own_used_gb / est
 
     model_gb = comps["model_gb"] * scale
     kv_gb = comps["kv_gb"] * scale
     overhead_gb = (comps["reserve_gb"] + comps["aux_gb"]) * scale
     compute_gb = comps["compute_gb"] * scale
-    other_gb = max(0.0, used_gb - est * scale)
+    other_gb = max(0.0, own_used_gb - est * scale)
     free_gb = max(0.0, total_gb - used_gb)
 
     return {
         "total_gb": total_gb, "used_gb": used_gb, "free_gb": free_gb,
         "subtitle": "%s @ %s, as loaded" % (comps["model_label"], autoconfig.format_ctx(comps["ctx_total"])),
         "segments": _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb,
-                              total_gb, gpu_pct=comps["gpu_pct"], ctx_total=comps["ctx_total"]),
-        "raw": dict(comps, scale=scale, drawn_model_gb=model_gb),
+                              total_gb, gpu_pct=comps["gpu_pct"], ctx_total=comps["ctx_total"],
+                              foreign=foreign),
+        "raw": dict(comps, scale=scale, drawn_model_gb=model_gb, foreign_gb=foreign_gb),
     }
 
 
@@ -392,7 +424,8 @@ def ram_breakdown(name: str, cont) -> dict | None:
     }
 
 
-def per_card(vb: dict, cards: list) -> dict[int, dict]:
+def per_card(vb: dict, cards: list,
+             foreign_by_card: dict[int, list[tuple[str, float]]] | None = None) -> dict[int, dict]:
     """Split a pooled breakdown into per-card meters, keyed by card index.
 
     Three of the four costs are known per card and only one is not, so they are itemised
@@ -414,6 +447,14 @@ def per_card(vb: dict, cards: list) -> dict[int, dict]:
     question is "full of what".
 
     Each card's segments still sum to that card, and the free share stays measured.
+
+    `foreign_by_card` is the fifth itemised cost and it is EXACT, measured per process and per
+    card by gpu_procs. It has to be subtracted before the apportionment, not merely drawn: the
+    apportionment splits each card's unexplained usage by how much of it there is, so a tenant
+    sitting entirely on one card used to be spread across both. Measured on this box with
+    chatterbox-tts holding 6.28 GB on card 0 and nothing on card 1, the strip reported "other
+    3.42 GB" and "other 2.58 GB" - the second of those describing a card the container had not
+    allocated a byte on, and both of them stealing from the weights figure beside them.
     """
     out: dict[int, dict] = {}
     if not vb or not cards:
@@ -429,14 +470,24 @@ def per_card(vb: dict, cards: list) -> dict[int, dict]:
     wk_pool = weights_pool + kv_pool
     w_frac = (weights_pool / wk_pool) if wk_pool > 0 else 1.0
     compute_each = raw["compute_gb"] * scale / n
-    fixed, overhead = [], []
+    fixed, overhead, foreign = [], [], []
     for i, c in enumerate(cards):
         # Card 0 also carries the projector/draft-head allocation; a card's own overhead can
         # never exceed what is measured on it.
         want = raw["reserve_gb"] / n + (raw["aux_gb"] if i == 0 else 0.0)
         ov = min(want * scale, c.vram_used_gb)
         overhead.append(ov)
-        fixed.append(min(ov + compute_each, c.vram_used_gb))
+        # Another tenant's share of THIS card, clamped to what is left after the overhead so a
+        # sampling skew between the two sources can never push the segments past the card.
+        room = max(0.0, c.vram_used_gb - ov)
+        fgn, spent = [], 0.0
+        for label, gb in (foreign_by_card or {}).get(i, []):
+            take = min(gb, room - spent)
+            if take > 0.005:
+                fgn.append((label, take))
+                spent += take
+        foreign.append(fgn)
+        fixed.append(min(ov + spent + compute_each, c.vram_used_gb))
     slack = [max(0.0, c.vram_used_gb - fixed[i]) for i, c in enumerate(cards)]
     slack_sum = sum(slack)
     for i, c in enumerate(cards):
@@ -444,8 +495,9 @@ def per_card(vb: dict, cards: list) -> dict[int, dict]:
         alloc = min(wk_pool * share, max(0.0, c.vram_used_gb - fixed[i]))
         model_gb = alloc * w_frac
         kv_gb = alloc - model_gb
-        compute_gb = min(compute_each, max(0.0, c.vram_used_gb - overhead[i]))
-        other_gb = max(0.0, c.vram_used_gb - overhead[i] - compute_gb - alloc)
+        foreign_gb = sum(gb for _l, gb in foreign[i])
+        compute_gb = min(compute_each, max(0.0, c.vram_used_gb - overhead[i] - foreign_gb))
+        other_gb = max(0.0, c.vram_used_gb - overhead[i] - foreign_gb - compute_gb - alloc)
         free_gb = max(0.0, c.vram_total_gb - c.vram_used_gb)
         card_total = float(c.vram_total_gb or c.vram_used_gb)
         if card_total <= 0:
@@ -468,6 +520,13 @@ def per_card(vb: dict, cards: list) -> dict[int, dict]:
                 {"key": "compute", "label": "compute buffers", "gb": round(compute_gb, 2),
                  "pct": 100.0 * compute_gb / card_total,
                  "note": "graph scratch, allocated identically on every card"},
+            ] + [
+                {"key": "foreign", "label": label, "gb": round(gb, 2),
+                 "pct": 100.0 * gb / card_total,
+                 "note": "another process on this card, not this backend - measured per "
+                         "process by the kernel, so this one is not apportioned"}
+                for label, gb in foreign[i]
+            ] + [
                 {"key": "other", "label": "other", "gb": round(other_gb, 2),
                  "pct": 100.0 * other_gb / card_total,
                  "note": "in the measured total but not in the estimate"},

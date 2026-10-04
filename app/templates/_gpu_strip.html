@@ -94,6 +94,74 @@
   {% endfor %}
 
 </div>
+
+{% if tenants %}
+{#
+  ON THE CARDS - every process holding VRAM, not just the ones this app started.
+
+  The question this answers is "something is using the GPU and the app shows nothing": a TTS
+  server, an image generator, anything with /dev/kfd. It used to reach this page only as a
+  bulge in the "other" residual above, and a SMEARED one, because that residual is apportioned
+  by each card's usage and a tenant sitting on one card got drawn across both.
+
+  A table rather than another bar. The bars above already carry the magnitude; what is missing
+  here is identity and exact placement, and three rows of names with two numeric columns reads
+  faster than three more meters. The fuchsia dot is the only decoration, and it is load-bearing:
+  it is the same hue as the segment this row explains in the bar above, which is what makes the
+  two readouts one readout.
+#}
+<div class="mt-3 rounded-xl border border-slate-800 bg-slate-950/95 px-4 py-3 text-slate-200">
+  <div class="flex items-baseline justify-between gap-2">
+    <h4 class="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+      {{ icon('cpu', 12) }} on the cards
+    </h4>
+    <span class="text-[10px] tabular-nums text-slate-500">
+      {{ tenants | length }} process{{ '' if tenants | length == 1 else 'es' }}
+    </span>
+  </div>
+
+  <table class="mt-2 w-full text-[11px]">
+    <thead>
+      <tr class="text-slate-500">
+        <th class="pb-1 text-left font-normal">process</th>
+        {% for c in cards %}
+        <th class="pb-1 pl-3 text-right font-normal">card {{ c.index }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in tenants %}
+      <tr class="border-t border-slate-800/80">
+        <td class="py-1 pr-2">
+          <span class="flex items-baseline gap-1.5">
+            {# Identity never rests on colour: the dot ties the row to its segment, the words
+               carry the claim on their own. #}
+            <span class="mt-[3px] h-2 w-2 shrink-0 rounded-sm {% if t.foreign %}bg-fuchsia-600{% else %}bg-sky-600{% endif %}"></span>
+            <span class="truncate font-mono {% if t.foreign %}text-slate-200{% else %}text-slate-400{% endif %}"
+                  title="pid {{ t.pid }}{% if t.comm %} · {{ t.comm }}{% endif %}">{{ t.label }}</span>
+            {% if t.foreign %}
+            <span class="shrink-0 rounded bg-fuchsia-500/15 px-1 py-px text-[9px] font-medium text-fuchsia-300"
+                  title="not a llama backend this app manages - it is on the cards anyway, and the meters above now size around it instead of absorbing it into the residual">not a backend</span>
+            {% elif t.total_gb < 0.01 %}
+            {# A router child under --sleep-idle-seconds: still registered with the driver,
+               holding nothing. Worth a word, because "asleep" and "gone" look identical as a
+               zero and only one of them means the VRAM is genuinely available. #}
+            <span class="shrink-0 rounded bg-slate-700/60 px-1 py-px text-[9px] font-medium text-slate-400"
+                  title="registered with the driver but holding no VRAM - a backend child that has gone to sleep, or one that has not loaded a model yet">idle</span>
+            {% endif %}
+          </span>
+        </td>
+        {% for gb in t.per_card %}
+        <td class="py-1 pl-3 text-right font-mono tabular-nums {% if gb %}text-slate-200{% else %}text-slate-600{% endif %}">
+          {%- if gb %}{{ '%.2f' % gb }}<span class="text-slate-500"> GB</span>{% else %}&mdash;{% endif -%}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 {% else %}
 <div class="rounded-xl border border-slate-800 bg-slate-950/95 px-4 py-6 text-center text-[11px] text-slate-500">
   No GPU telemetry yet. The sampler probes inside the backend container, so this fills in once a
