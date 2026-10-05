@@ -211,8 +211,20 @@
       {% endif %}
       {% set mtp_label = hero_mtp.label %}
       {% if hero_mtp.mean_len %}{% set mtp_label = mtp_label ~ ' · ×%.1f' % hero_mtp.mean_len %}{% endif %}
+      {# The price, in the label, beside the payoff. A draft head is a VRAM bet and the panel
+         showed only the winnings. Stated in CONTEXT as well as gigabytes because that is the
+         trade actually on the table: on a box that is VRAM-bound, the head is not paid for in
+         GB, it is paid for in the context you could have had instead. #}
+      {% if hero_mtp.cost %}
+        {% set mtp_label = mtp_label ~ ' · %.1f GB' % hero_mtp.cost.gb %}
+        {% set mtp_acc_txt = mtp_acc_txt ~ ' The head costs %.1f GB of VRAM' % hero_mtp.cost.gb %}
+        {% if hero_mtp.cost.ctx_tokens %}
+          {% set mtp_acc_txt = mtp_acc_txt ~ ", which at the KV rate of this model is about %dk of context you could have had instead" % (hero_mtp.cost.ctx_tokens // 1024) %}
+        {% endif %}
+        {% set mtp_acc_txt = mtp_acc_txt ~ ". Most of that is not the weights of the head: it runs its own context, so it allocates a second compute buffer the same size as the one the target uses." %}
+      {% endif %}
       {{ readout(('%0.f' % hero_mtp.acc_pct) if hero_mtp.acc_pct is not none else '—',
-                 '% accepted', mtp_label ~ ' drafts', true, 'amber', '', 0, 0,
+                 '% accepted', mtp_label, true, 'amber', '', 0, 0,
                  hero_mtp.label ~ ' speculative decoding is running (' ~ hero_mtp.spec_type ~ '). ' ~ mtp_acc_txt) }}
       {% endif %}
     </div>
