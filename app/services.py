@@ -1094,6 +1094,13 @@ class SlotSpeed:
     # this box - the difference between "it is about to answer" and "go and get a coffee".
     prefill_done: int = 0      # prompt tokens read so far, cache hits included
     prefill_total: int = 0     # the whole prompt this slot is working through
+    # The prompt this slot's CURRENT task actually arrived with: cache hits plus processed.
+    # Deliberately not n_prompt_tokens, which keeps growing while the model generates - it is
+    # the slot's whole context, not the prompt. Dividing the (frozen) cache count by the
+    # (growing) context made a perfectly cached conversation appear to shed cache as it
+    # answered: measured on one task, n_prompt_tokens ran 47,626 -> 51,042 over 90 s while
+    # n_prompt_tokens_processed sat still at 46,844.
+    prompt_tokens: int = 0
     task_id: int | None = None
 
     @property
@@ -1122,6 +1129,8 @@ class InferenceSpeed:
     gen_tokens: int = 0        # tokens produced in the run these rates came from
     prefill_tps: float = 0.0   # tokens/s in
     prefill_pct: int = 0       # progress through the current prompt, 0-100
+    prompt_tokens: int = 0     # the prompts the busy slots arrived with, cache + processed.
+                               # The honest denominator for "how much came from cache".
     prefill_done: int = 0      # prompt tokens read so far, summed over prefilling slots
     prefill_total: int = 0     # the whole prompt, summed the same way. 0 when only the log
                                # knows, because the log's total is progress-derived guesswork
@@ -1263,7 +1272,8 @@ def _slot_speed(container_name: str, s: dict, r: dict, now: float) -> "SlotSpeed
     return SlotSpeed(index=index, state=state, gen_tps=gen_tps, decoded=decoded,
                      ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=cached_tok,
                      prefill_pct=prefill_pct, prefill_done=prefill_done,
-                     prefill_total=prefill_total, task_id=task_id)
+                     prefill_total=prefill_total, prompt_tokens=cached_tok + processed,
+                     task_id=task_id)
 
 
 def _prune_slot_state(container_name: str, live: set[int]) -> None:
@@ -1550,6 +1560,10 @@ async def inference_speed(container_name: str, internal_port: int | None,
 
     # Summed over prefilling slots for the same reason gen_tps is summed: the figure describes
     # the machine. Both are 0 off the prefill path, since `prefilling` is empty then.
+    # Busy slots only. An idle slot still reports the context it is holding, and folding that
+    # into the cache ratio mixes one conversation's cache with another conversation's size.
+    prompt_tokens = sum(sl.prompt_tokens for sl in slots
+                        if sl.state in ("prefill", "generating"))
     prefill_done = sum(sl.prefill_done for sl in prefilling)
     prefill_total = sum(sl.prefill_total for sl in prefilling)
     if not prefill_done and state == "prefill":
@@ -1571,6 +1585,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
         prefill_tps=prefill_tps, prefill_pct=prefill_pct,
         prefill_done=prefill_done, prefill_total=prefill_total,
+        prompt_tokens=prompt_tokens,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
         live=busy, slots=slots,
     )
