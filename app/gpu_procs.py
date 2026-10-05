@@ -79,10 +79,40 @@ class Tenant:
     container: str            # owning container, or "" for a host process
     backend: str              # the llama backend name when it is one of ours, else ""
     per_card_gb: dict[int, float] = field(default_factory=dict)
+    # Peak compute units this process held per card inside the sampler's window, and the CUs a
+    # card has in total. Both 0/empty on a box where the stats node cannot be read, which is
+    # why every consumer must treat "no CU data" as unknown rather than as idle.
+    cu_by_card: dict[int, int] = field(default_factory=dict)
+    cu_total: int = 0
+    # Milliseconds this process's memory has spent evicted, summed over cards. Climbs only when
+    # something else took the VRAM, so a rising value is contention, not activity.
+    evicted_ms: int = 0
 
     @property
     def total_gb(self) -> float:
         return sum(self.per_card_gb.values())
+
+    @property
+    def cu_peak(self) -> int:
+        """Busiest single card, in CUs. 0 when it has done no measurable work."""
+        return max(self.cu_by_card.values(), default=0)
+
+    @property
+    def working(self) -> bool:
+        """Did this process actually run anything in the last few seconds?
+
+        Deliberately NOT 'holds VRAM'. Chatterbox sits on ~6 GB around the clock and is doing
+        nothing almost all of it; a panel that calls that 'in use' is the reason this field
+        exists.
+        """
+        return self.cu_peak > 0
+
+    @property
+    def cu_pct(self) -> int:
+        """Busiest card's occupancy as a percentage of one card's CUs. 0 when unknown."""
+        if not self.cu_total:
+            return 0
+        return max(0, min(100, round(100.0 * self.cu_peak / self.cu_total)))
 
     @property
     def foreign(self) -> bool:
@@ -92,6 +122,159 @@ class Tenant:
     @property
     def label(self) -> str:
         return self.container or self.comm or f"pid {self.pid}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Compute occupancy: the one per-process signal that says who is WORKING, not merely resident.
+#
+# /sys/class/kfd/kfd/proc/<pid>/stats_<gpuid>/cu_occupancy is compute units in use by that
+# process on that card, right now. Measured on this box by driving chatterbox while watching
+# both it and the llama servers:
+#
+#     card utilisation          card0 71%   card1 27%
+#     pid 293730 python3        cu_occupancy max 34      <- chatterbox, correctly attributed
+#     pid 2662870 llama-server  cu_occupancy max  0
+#     pid 2664529 llama-server  cu_occupancy max  0
+#
+# It knows nothing about what the process is, which is the whole point: ComfyUI, a stray
+# PyTorch script and a second llama-server all light up identically with no adapter.
+#
+# The catch is that it is INSTANTANEOUS. Over that 1.6 s TTS burst only 11 of ~50 samples read
+# non-zero, so a 1 s poll would show a busy tenant as idle most of the time. Hence a background
+# sampler at 20 Hz and a decaying max over _CU_WINDOW_S - the UI says "busiest in the last few
+# seconds" rather than pretending this is a continuous reading.
+_CU_HZ = 20.0
+_CU_WINDOW_S = 3.0
+_CU_PEAKS: dict[tuple[int, int], tuple[float, int]] = {}   # (pid, card) -> (when, cu)
+_CU_LOCK = threading.Lock()
+_CU_THREAD: threading.Thread | None = None
+
+
+# simd_count / simd_per_cu for one GPU node - 128 / 2 = 64 on an R9700. Measured once and kept
+# for the life of the process: it is a property of the silicon, and a card swap is a restart.
+_CU_SH = (
+    r"for n in /sys/class/kfd/kfd/topology/nodes/*/; do "
+    r'g=$(cat "$n/gpu_id" 2>/dev/null); [ -n "$g" ] && [ "$g" != 0 ] || continue; '
+    r"""s=$(awk '$1=="simd_count"{print $2; exit}' "$n/properties" 2>/dev/null); """
+    r"""p=$(awk '$1=="simd_per_cu"{print $2; exit}' "$n/properties" 2>/dev/null); """
+    r'[ "${s:-0}" -gt 0 ] && [ "${p:-0}" -gt 0 ] && { echo "$((s / p))"; break; }; done'
+)
+_CU_TOTAL: int | None = None
+
+
+def _cu_per_card_local() -> int:
+    try:
+        for node in sorted(_KFD_NODES.glob("*/properties")):
+            text = node.read_text()
+            simd, per_cu = _node_prop(text, "simd_count"), _node_prop(text, "simd_per_cu")
+            if simd and per_cu:
+                return simd // per_cu
+    except OSError:
+        pass
+    return 0
+
+
+def cu_per_card(exec_candidates=()) -> int:
+    """Compute units on one card, for the denominator. 0 when it cannot be determined.
+
+    Local read first, then through a container that holds /dev/kfd - the same two-step
+    card_index_by_gpu_id needs, and for the same reason: the topology nodes are EPERM to a
+    container without the device, so this app reads 0 for every property from inside its own
+    container and has to borrow a backend's view. Verified: readable on the host, all zeros
+    from inside model-loader.
+    """
+    global _CU_TOTAL
+    if _CU_TOTAL is not None:
+        return _CU_TOTAL
+    got = _cu_per_card_local()
+    if not got and exec_candidates:
+        try:
+            client = docker.from_env()
+            for name in exec_candidates:
+                try:
+                    c = client.containers.get(name)
+                    if c.status != "running":
+                        continue
+                    code, out = c.exec_run(["sh", "-c", _CU_SH], demux=False)
+                except Exception:  # noqa: BLE001 - a container without a shell is not the one
+                    continue
+                if code == 0:
+                    text = out.decode("utf-8", "replace") if isinstance(out, bytes) else str(out)
+                    digits = "".join(ch for ch in text if ch.isdigit())
+                    if digits:
+                        got = int(digits)
+                        break
+        except (DockerException, OSError):
+            got = 0
+    # Only a real answer is cached. A 0 means no backend was up to ask yet, and that changes.
+    if got:
+        _CU_TOTAL = got
+    return got
+
+
+def _sample_cu(gpu_ids: dict[str, int]) -> None:
+    """One pass over every KFD process, recording any non-zero occupancy with its timestamp."""
+    now = time.time()
+    try:
+        procs = list(_KFD_PROC.iterdir())
+    except OSError:
+        return
+    hits: list[tuple[tuple[int, int], tuple[float, int]]] = []
+    for proc in procs:
+        if not proc.name.isdigit():
+            continue
+        pid = int(proc.name)
+        for stats in proc.glob("stats_*"):
+            idx = gpu_ids.get(stats.name[len("stats_"):])
+            if idx is None:
+                continue
+            try:
+                cu = int((stats / "cu_occupancy").read_text().strip() or 0)
+            except (OSError, ValueError):
+                continue
+            if cu > 0:
+                hits.append(((pid, idx), (now, cu)))
+    if not hits:
+        return
+    with _CU_LOCK:
+        for key, val in hits:
+            prev = _CU_PEAKS.get(key)
+            # Keep the larger reading while the window is still open; otherwise start fresh.
+            if prev and (now - prev[0]) < _CU_WINDOW_S and prev[1] >= val[1]:
+                continue
+            _CU_PEAKS[key] = val
+
+
+def _cu_loop(gpu_ids: dict[str, int]) -> None:
+    period = 1.0 / _CU_HZ
+    while True:
+        _sample_cu(gpu_ids)
+        with _CU_LOCK:
+            cutoff = time.time() - _CU_WINDOW_S
+            for k in [k for k, (when, _) in _CU_PEAKS.items() if when < cutoff]:
+                del _CU_PEAKS[k]
+        time.sleep(period)
+
+
+def _ensure_cu_sampler(gpu_ids: dict[str, int]) -> None:
+    """Start the sampler once, lazily. A daemon thread, so it never holds up a shutdown."""
+    global _CU_THREAD
+    if not gpu_ids:
+        return
+    with _CU_LOCK:
+        if _CU_THREAD is not None and _CU_THREAD.is_alive():
+            return
+        _CU_THREAD = threading.Thread(target=_cu_loop, args=(dict(gpu_ids),),
+                                      name="kfd-cu-sampler", daemon=True)
+        _CU_THREAD.start()
+
+
+def _cu_for(pid: int) -> dict[int, int]:
+    """{card: peak CUs} this pid has used inside the window. Empty when it has done nothing."""
+    cutoff = time.time() - _CU_WINDOW_S
+    with _CU_LOCK:
+        return {card: cu for (p, card), (when, cu) in _CU_PEAKS.items()
+                if p == pid and when >= cutoff}
 
 
 def _node_prop(text: str, key: str) -> int:
@@ -298,15 +481,36 @@ def tenants(backend_names=()) -> list[Tenant]:
         if per_card:
             raw.append((int(proc.name), per_card))
 
+    # Start the occupancy sampler on the first real scan rather than at import: it needs the
+    # gpu-id map, and on a box with no KFD there is nothing to sample and no thread to leak.
+    _ensure_cu_sampler(gpu_ids)
+    cu_total = cu_per_card(sorted(known))
+
     owners = _owner_map({pid for pid, _ in raw})
     out = [
         Tenant(pid=pid, comm=comm, container=cont,
-               backend=cont if cont in known else "", per_card_gb=per_card)
+               backend=cont if cont in known else "", per_card_gb=per_card,
+               cu_by_card=_cu_for(pid), cu_total=cu_total,
+               evicted_ms=_evicted_ms(pid))
         for pid, per_card in raw
         for cont, comm in (owners.get(pid, ("", "")),)
     ]
     out.sort(key=lambda t: (-t.total_gb, t.pid))
     return out
+
+
+def _evicted_ms(pid: int) -> int:
+    """Total ms this process's memory has been evicted, over all cards. 0 when unreadable."""
+    total = 0
+    try:
+        for f in (_KFD_PROC / str(pid)).glob("stats_*/evicted_ms"):
+            try:
+                total += int(f.read_text().strip() or 0)
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        return 0
+    return total
 
 
 def foreign_by_card(ts: list[Tenant], floor_gb: float = 0.01) -> dict[int, list[tuple[str, float]]]:

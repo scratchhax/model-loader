@@ -232,6 +232,21 @@ def _hero_mtp(backend: str, model_id: str) -> dict | None:
     }
 
 
+def _hero_foreign_only() -> list[dict]:
+    """Foreign tenants that are working, for the standby panel.
+
+    Nothing of ours loaded is precisely the case where a foreign tenant is the only thing on
+    the cards, so the standby panel is the one that must not stay silent about it.
+    """
+    try:
+        return [{"label": t.label, "cu_pct": t.cu_pct, "cu_peak": t.cu_peak,
+                 "cu_total": t.cu_total, "gb": round(t.total_gb, 1),
+                 "card": (max(t.cu_by_card, key=t.cu_by_card.get) if t.cu_by_card else None)}
+                for t in _gpu_tenants() if t.foreign and t.working]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 async def _hero_context() -> dict:
     """The loaded model, its throughput, and enough of its config to read the panel.
 
@@ -275,7 +290,8 @@ async def _hero_context() -> dict:
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
                 "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None,
-                "hero_loading": False, "hero_loading_s": 0.0, "hero_others": []}
+                "hero_loading": False, "hero_loading_s": 0.0,
+                "hero_foreign": _hero_foreign_only(), "hero_others": []}
 
     _rank, b, sp = best
 
@@ -345,6 +361,21 @@ async def _hero_context() -> dict:
     except Exception:  # noqa: BLE001 - the hero degrades to fewer facts, it never 500s
         pass
 
+    # Anything on the cards that is NOT one of ours and is actually running kernels right now.
+    # This is the whole answer to "the panel says idle while the box is clearly working": our
+    # own backends can be idle while a TTS model or an image pipeline has a card at 70%.
+    hero_foreign = []
+    try:
+        for t in _gpu_tenants():
+            if t.foreign and t.working:
+                hero_foreign.append({
+                    "label": t.label, "cu_pct": t.cu_pct, "cu_peak": t.cu_peak,
+                    "cu_total": t.cu_total, "gb": round(t.total_gb, 1),
+                    "card": (max(t.cu_by_card, key=t.cu_by_card.get) if t.cu_by_card else None),
+                })
+    except Exception:  # noqa: BLE001 - a box without KFD simply has no tenants
+        hero_foreign = []
+
     st = hw.stats_for(b.name)
     vram_used = st.gpu.vram_used_gb if (st.ok and st.gpu) else None
     vram_total = st.gpu.vram_total_gb if (st.ok and st.gpu) else 0.0
@@ -385,6 +416,7 @@ async def _hero_context() -> dict:
             "tps_samples": 0 if hero_loading else len(tps),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
+            "hero_foreign": hero_foreign,
             "hero_loading_gpu": hero_loading and b.vendor in ("rocm", "cuda"),
             # Drive the per-slot strip's row height and column wrap. Computed here rather than
             # in the template so the thresholds sit with the dataclass they describe.
@@ -533,6 +565,14 @@ def _tenant_rows(tenants: list, cards: list) -> list[dict]:
             # is not the same claim as a card it is using lightly, and a column of dashes next
             # to a column of numbers says which card a tenant is actually on at a glance.
             "per_card": [(t.per_card_gb.get(i) or None) for i in idx],
+            # Who is WORKING, as opposed to merely resident. cu_total is 0 on a box whose
+            # stats nodes cannot be read, and the template must then say nothing rather than
+            # draw an idle badge - unknown and idle are different claims.
+            "working": t.working,
+            "cu_peak": t.cu_peak,
+            "cu_total": t.cu_total,
+            "cu_pct": t.cu_pct,
+            "cu_card": (max(t.cu_by_card, key=t.cu_by_card.get) if t.cu_by_card else None),
         })
     return rows
 
