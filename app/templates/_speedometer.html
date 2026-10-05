@@ -25,6 +25,14 @@
       {% elif speed.state == 'prefill' %}
         <span class="inline-block h-1.5 w-1.5 rounded-full bg-sky-500"></span>
         <span class="text-sky-700 dark:text-sky-300">reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}</span>
+        {# The count behind the percentage - see the note in _hero.html. 38% of a 400-token
+           prompt and 38% of an 80,000-token one are the same number and a very different wait. #}
+        {% if speed.prefill_done %}
+        <span class="font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400"
+              title="prompt tokens read so far{% if speed.prefill_total %} of {{ '{:,}'.format(speed.prefill_total) }}{% endif %}; tokens reused from the KV cache count as read">
+          {{ '{:,}'.format(speed.prefill_done) }}{% if speed.prefill_total %}/{{ '{:,}'.format(speed.prefill_total) }}{% endif %} tok
+        </span>
+        {% endif %}
       {% else %}
         <span class="inline-block h-1.5 w-1.5 rounded-full bg-slate-300 dark:bg-slate-600"></span>
         <span class="text-slate-500 dark:text-slate-400">idle{% if speed.gen_tps %} · last run{% endif %}</span>
