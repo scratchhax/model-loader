@@ -325,3 +325,71 @@ def foreign_by_card(ts: list[Tenant], floor_gb: float = 0.01) -> dict[int, list[
             if gb >= floor_gb:
                 by_card.setdefault(idx, []).append((t.label, gb))
     return by_card
+
+
+# Last VRAM each foreign tenant was seen holding, so a STOPPED one can still say what it will
+# want back. It vanishes from the kernel's tables the moment it stops, which is exactly when
+# that number becomes interesting.
+_LAST_SEEN: dict[str, float] = {}
+
+
+def note_seen(ts: list[Tenant]) -> None:
+    for t in ts:
+        if t.foreign and t.container and t.total_gb > 0.005:
+            _LAST_SEEN[t.container] = t.total_gb
+
+
+def last_seen_gb(container: str) -> float:
+    return _LAST_SEEN.get(container, 0.0)
+
+
+def gpu_capable_containers(backend_names=()) -> list[dict]:
+    """Containers that were given a GPU but are NOT llama backends, running or stopped.
+
+    Discovered from the device list docker was told to pass through, not from what is currently
+    on the cards, because the whole point is to describe something that has been ejected - a
+    stopped container holds no VRAM and appears in no kernel table.
+
+    /dev/kfd is the AMD compute device; a container with it can run compute, and one without it
+    cannot, which makes it a better test than the image name or a label someone has to remember
+    to set.
+    """
+    known = set(backend_names or ())
+    out: list[dict] = []
+    try:
+        client = docker.from_env()
+        for c in client.containers.list(all=True):
+            if c.name in known:
+                continue
+            try:
+                devs = (c.attrs.get("HostConfig") or {}).get("Devices") or []
+                paths = {str(d.get("PathOnHost", "")) for d in devs}
+            except Exception:  # noqa: BLE001 - a container mid-removal is not an error
+                continue
+            if "/dev/kfd" not in paths:
+                continue
+            out.append({"name": c.name, "running": c.status == "running",
+                        "status": c.status, "last_gb": _LAST_SEEN.get(c.name, 0.0)})
+    except (DockerException, OSError):
+        return []
+    out.sort(key=lambda r: r["name"])
+    return out
+
+
+def set_container_running(name: str, start: bool) -> tuple[bool, str]:
+    """Start or stop one container. Returns (ok, message)."""
+    try:
+        client = docker.from_env()
+        c = client.containers.get(name)
+        if start:
+            if c.status == "running":
+                return True, f"{name} is already running"
+            c.start()
+            return True, f"{name} starting - it reloads its weights, give it a moment"
+        if c.status != "running":
+            return True, f"{name} is already stopped"
+        c.stop(timeout=30)
+        return True, f"{name} stopped and its VRAM released"
+    except (DockerException, OSError) as e:
+        return False, f"{name}: {e}"
+

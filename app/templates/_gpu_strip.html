@@ -193,6 +193,46 @@
       {% endfor %}
     </tbody>
   </table>
+
+  {% if ejectable %}
+  {#
+    EJECT / RESTORE for GPU-capable containers that are not llama backends.
+
+    Stopping the container rather than calling the service's own unload endpoint: every such
+    service has a different API, or none, and docker works for all of them. It also frees more -
+    chatterbox's own unload leaves 1.34 GB of HIP context where stopping returns the whole
+    5.88 GB. The trade is a slower restore, measured ~10 s against ~5.
+
+    A stopped container holds no VRAM and appears in no kernel table, which is exactly when
+    "how much will it want back" becomes the interesting number - so that figure is remembered
+    from when it was last seen, and a restore that will not fit is called out BEFORE the click
+    rather than after, as a 503 from a service that looked like it started fine.
+  #}
+  <div class="mt-3 border-t border-slate-800 pt-2.5">
+    <div id="gpu-tenant-toast" class="empty:hidden mb-2"></div>
+    <div class="flex flex-wrap items-center gap-2">
+      {% for e in ejectable %}
+      <div class="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-1.5">
+        <span class="h-2 w-2 shrink-0 rounded-sm {% if e.running %}bg-fuchsia-600{% else %}bg-slate-700{% endif %}"></span>
+        <span class="font-mono text-[11px] text-slate-300">{{ e.name }}</span>
+        {% if e.running %}
+        <span class="tabular-nums text-[11px] text-slate-500">{{ '%.2f' % e.gb }} GB</span>
+        <button class="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-medium text-slate-300 hover:bg-slate-700"
+                hx-post="/gpu-tenants/{{ e.name }}/eject" hx-target="#gpu-tenant-toast" hx-swap="innerHTML"
+                title="Stops the container and returns all {{ '%.2f' % e.gb }} GB. It reloads its weights on restore, measured ~10 s from the warm cache.">eject</button>
+        {% else %}
+        <span class="text-[11px] text-slate-500">stopped{% if e.want_gb %} · wants {{ '%.2f' % e.want_gb }} GB{% endif %}</span>
+        <button class="rounded px-2 py-0.5 text-[10px] font-medium
+                       {% if e.tight %}bg-amber-900/60 text-amber-300 hover:bg-amber-900{% else %}bg-slate-800 text-slate-300 hover:bg-slate-700{% endif %}"
+                hx-post="/gpu-tenants/{{ e.name }}/restore" hx-target="#gpu-tenant-toast" hx-swap="innerHTML"
+                {% if e.tight %}title="Only {{ '%.2f' % e.free_gb }} GB free and it last held {{ '%.2f' % e.want_gb }} GB. A chat model loaded with fit = on will have taken the space; evict that model first or this will start and then fail to allocate."
+                {% else %}title="Starts the container. It reloads its weights from the warm cache, measured ~10 s."{% endif %}>restore{% if e.tight %} ⚠{% endif %}</button>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endif %}
 {% else %}
