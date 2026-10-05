@@ -114,6 +114,21 @@
           {% elif hero_model %}idle
           {% else %}standby{% endif %}
         </div>
+        {# ---- the counter behind the percentage ----
+           A percentage alone cannot tell a 400-token prompt from an 80,000-token one, and on
+           this box those are 0.3 s and roughly 70 s - the difference between "it is about to
+           answer" and "go and get a coffee". The same 38% means both. So the raw count goes
+           underneath, and it is the count that actually moves while you watch.
+
+           The total is printed only when /slots gave an exact one. The log's figure would have
+           to be reconstructed by dividing by a progress value printed to two decimals, which is
+           +/-6% early in a prompt - a denominator worse than no denominator. #}
+        {% if speed and speed.state == 'prefill' and speed.prefill_done %}
+        <div class="mt-0.5 font-mono text-[10px] tabular-nums text-slate-400"
+             title="prompt tokens read so far{% if speed.prefill_total %} of {{ '{:,}'.format(speed.prefill_total) }} in this prompt{% endif %}. Tokens served from the KV cache count as read - they are tokens the slot does not have to process, and excluding them would make a heavily cached prompt appear to crawl while it finished instantly.">
+          {{ '{:,}'.format(speed.prefill_done) }}{% if speed.prefill_total %}<span class="text-slate-600"> / {{ '{:,}'.format(speed.prefill_total) }}</span>{% endif %}<span class="text-slate-600"> tok</span>
+        </div>
+        {% endif %}
         {% if hero_vram_used is not none %}
         <div class="mt-1 font-mono text-sm tabular-nums text-slate-300">{{ '%.1f' % hero_vram_used }}<span class="text-slate-600"> / {{ '%.0f' % hero_vram_total }} GB</span></div>
         {% endif %}

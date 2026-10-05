@@ -1089,6 +1089,11 @@ class SlotSpeed:
     ctx_total: int = 0         # this slot's share of the KV pool (ctx-size / parallel)
     ctx_cached: int = 0        # of ctx_used, how many came from cache
     prefill_pct: int = 0       # progress through this slot's prompt, 0-100
+    # The numerator and denominator that percentage came from. A bare percentage cannot tell a
+    # 400-token prompt from an 80,000-token one, and those take 0.3 s and 70 s respectively on
+    # this box - the difference between "it is about to answer" and "go and get a coffee".
+    prefill_done: int = 0      # prompt tokens read so far, cache hits included
+    prefill_total: int = 0     # the whole prompt this slot is working through
     task_id: int | None = None
 
     @property
@@ -1117,6 +1122,9 @@ class InferenceSpeed:
     gen_tokens: int = 0        # tokens produced in the run these rates came from
     prefill_tps: float = 0.0   # tokens/s in
     prefill_pct: int = 0       # progress through the current prompt, 0-100
+    prefill_done: int = 0      # prompt tokens read so far, summed over prefilling slots
+    prefill_total: int = 0     # the whole prompt, summed the same way. 0 when only the log
+                               # knows, because the log's total is progress-derived guesswork
     ctx_used: int = 0          # tokens held across all slots
     ctx_total: int = 0         # the whole KV pool: per-slot ctx x slot count
     ctx_cached: int = 0        # of ctx_used, how many came from cache instead of being re-read
@@ -1229,8 +1237,12 @@ def _slot_speed(container_name: str, s: dict, r: dict, now: float) -> "SlotSpeed
     # One decoded token is the switch out of prefill. See the n_prompt_tokens note below.
     state = "generating" if decoded else "prefill"
     prefill_pct = 0
+    prefill_done = prefill_total = 0
     if state == "prefill" and ctx_used:
-        prefill_pct = min(100, int(round(100.0 * (cached_tok + processed) / ctx_used)))
+        # Cache hits count as read: they are tokens the slot no longer has to process, and
+        # excluding them would make a 95%-cached prompt crawl from 0 while finishing instantly.
+        prefill_done, prefill_total = cached_tok + processed, ctx_used
+        prefill_pct = min(100, int(round(100.0 * prefill_done / prefill_total)))
 
     gen_tps = 0.0
     prev = _speed_prev.get(key)
@@ -1250,7 +1262,8 @@ def _slot_speed(container_name: str, s: dict, r: dict, now: float) -> "SlotSpeed
 
     return SlotSpeed(index=index, state=state, gen_tps=gen_tps, decoded=decoded,
                      ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=cached_tok,
-                     prefill_pct=prefill_pct, task_id=task_id)
+                     prefill_pct=prefill_pct, prefill_done=prefill_done,
+                     prefill_total=prefill_total, task_id=task_id)
 
 
 def _prune_slot_state(container_name: str, live: set[int]) -> None:
@@ -1380,6 +1393,7 @@ def _rates_from_log(name: str) -> dict:
     which is what the card shows, dimmed, while the model sits idle.
     """
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
+           "cur_pp_done": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
            "open_task": None, "open_slot": None}
     # A wide tail, then the router's own chatter removed. It has to be both. While a slot
@@ -1433,10 +1447,18 @@ def _rates_from_log(name: str) -> dict:
         m = _RE_PP.search(line)
         if m:
             tps, pct = float(m.group(3)), int(round(float(m.group(2)) * 100))
+            # n_tokens is CUMULATIVE, not the size of this chunk. Verified against a live task:
+            #   n_tokens = 18665, progress = 0.23   ...   n_tokens = 57157, progress = 0.69
+            # which implies the same ~82k prompt at both ends. Only the running count is taken
+            # from here; the total is NOT, because progress is printed to two decimals and
+            # dividing by it gives +/-6% at the start of a prompt. An exact total comes from
+            # /slots or it does not come at all.
+            done = int(m.group(1))
             if not out["last_pp_tps"]:
                 out["last_pp_tps"] = tps
             if mine and not out["cur_pp_tps"]:
                 out["cur_pp_tps"], out["cur_pp_pct"] = tps, pct
+                out["cur_pp_done"] = done
                 out["newest"] = out["newest"] or "prefill"
     return out
 
@@ -1526,6 +1548,14 @@ async def inference_speed(container_name: str, internal_port: int | None,
         if not prefill_pct and prefilling:
             prefill_pct = max(sl.prefill_pct for sl in prefilling)
 
+    # Summed over prefilling slots for the same reason gen_tps is summed: the figure describes
+    # the machine. Both are 0 off the prefill path, since `prefilling` is empty then.
+    prefill_done = sum(sl.prefill_done for sl in prefilling)
+    prefill_total = sum(sl.prefill_total for sl in prefilling)
+    if not prefill_done and state == "prefill":
+        # /slots had nothing - the log's running count, with no total to go with it.
+        prefill_done = r["cur_pp_done"]
+
     # Pool-wide context: every slot's share added up, against the whole --ctx-size pool. With
     # parallel = 1 this is just the one slot, unchanged.
     ctx_used = sum(sl.ctx_used for sl in slots)
@@ -1540,6 +1570,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
         prefill_tps=prefill_tps, prefill_pct=prefill_pct,
+        prefill_done=prefill_done, prefill_total=prefill_total,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
         live=busy, slots=slots,
     )
