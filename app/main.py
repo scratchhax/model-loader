@@ -377,7 +377,9 @@ def _gpu_tenants() -> list:
     which containers the app considers its own.
     """
     try:
-        return gpu_procs.tenants(set(services._effective_container_names()))
+        ts = gpu_procs.tenants(set(services._effective_container_names()))
+        gpu_procs.note_seen(ts)
+        return ts
     except Exception:  # noqa: BLE001 - a tenant table that fails degrades to not being drawn
         return []
 
@@ -458,8 +460,27 @@ def _gpu_strip_context() -> dict:
     # IS known rather than an anonymous fill.
     if not card_breakdowns and foreign_cards and cards:
         card_breakdowns = vram_live.tenants_only_per_card(cards, foreign_cards)
+    live = {t.container: t.total_gb for t in tenants if t.foreign and t.container}
+    free_gb = sum(max(0.0, c.vram_total_gb - c.vram_used_gb) for c in cards) if cards else 0.0
+    ejectable = []
+    for row in gpu_procs.gpu_capable_containers(services._effective_container_names()):
+        # A RUNNING container earns a row only by actually holding VRAM. Plenty of things are
+        # given /dev/kfd and allocate nothing - gpu-monitor is one - and offering to eject them
+        # is noise that makes the real control harder to find. A STOPPED one always shows,
+        # because being stopped is the whole reason you would want the button.
+        if row["running"] and live.get(row["name"], 0.0) <= 0.005:
+            continue
+        want = live.get(row["name"]) or row["last_gb"]
+        ejectable.append(dict(
+            row, gb=live.get(row["name"], 0.0), want_gb=want,
+            # Restoring needs the VRAM back. Saying so BEFORE the click is the whole value of
+            # putting this in the app rather than leaving it to two curl commands: a chat model
+            # with fit = on will have taken the freed space, and the only symptom otherwise is
+            # a 503 from a service that looks like it started fine.
+            tight=bool(not row["running"] and want > 0.005 and free_gb < want * 1.15),
+            free_gb=free_gb))
     return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
-            "tenants": _tenant_rows(tenants, cards)}
+            "tenants": _tenant_rows(tenants, cards), "ejectable": ejectable}
 
 
 def _tenant_rows(tenants: list, cards: list) -> list[dict]:
@@ -2398,6 +2419,27 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
         "request": request, "b": b, "stats": _stats_by_name(), "perf": _perf_by_name(),
         "speed": speed, "vram_breakdown": vram_breakdown, "vb_heading": vb_heading,
     })
+
+
+@app.post("/gpu-tenants/{name}/{action}", response_class=HTMLResponse)
+def gpu_tenant_power(name: str, action: str) -> HTMLResponse:
+    """Eject (stop) or restore (start) a GPU-capable container that is not a llama backend.
+
+    Stopping rather than calling the service's own unload endpoint, deliberately: every such
+    service has a different API, or none, and docker is the one control that works for all of
+    them. It also frees MORE - chatterbox's own unload leaves 1.34 GB of HIP context behind
+    where stopping the container returns the whole 5.88 GB. The cost is a slower restore,
+    measured ~10 s against ~5, which is a trade worth making for something ejected precisely
+    because it is not being used.
+
+    Refuses to touch a llama backend: those are the router's, and the Containers page owns them.
+    """
+    if name in set(services._effective_container_names()):
+        return _toast(False, f"{name} is a llama backend - use the Containers page")
+    if action not in ("eject", "restore"):
+        return _toast(False, f"unknown action {action}")
+    ok, msg = gpu_procs.set_container_running(name, start=(action == "restore"))
+    return _toast(ok, msg)
 
 
 @app.post("/containers/{name}/restart", response_class=HTMLResponse)
