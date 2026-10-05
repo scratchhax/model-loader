@@ -74,12 +74,23 @@
         {# ---- what the box is doing, for the 10-40 s this panel used to spend blank ----
            The router publishes "loading" and nothing else: no phase, no percentage. That is
            fine, because a phase label would not have earned its keep either - 79% of a measured
-           9.6 s swap is the single "reading weights" step, and the share only grows with the
-           model. So this says what IS known and points at the one thing on the page that moves
-           while you wait, which is the VRAM meter filling up. #}
+           9.6 s swap is the single weights step, and the share only grows with the model. So
+           this says what IS known and points at the one thing on the page that moves while you
+           wait, which is the VRAM meter filling up.
+
+           It says MOVING and not "reading from disk", because measured on this box the disk is
+           usually not involved at all. A genuine cold spawn of the 15.3 GiB Qwen3.8-27B read
+           0.0 MiB off md0 - the file was wholly in the page cache, where 125 GB of host RAM
+           keeps every model that has been touched recently. The same probe caught a 6.6 GiB
+           gemma-4-12b reading 6773 MiB off the array, because the big loads in between had
+           evicted it. Both happen, the panel cannot cheaply tell which, and claiming either one
+           would be wrong about half the time. What is true in both cases is that the bytes have
+           to get onto the cards, and that is also where the time goes: 18.1 s for that 15.3 GiB
+           load with zero disk reads. #}
         {% if hero_loading %}
-        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-amber-200/70">
-          Reading {% if hero_size_h %}{{ hero_size_h }} {% endif %}off the array{% if hero_ctx_cfg %},
+        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-amber-200/70"
+           title="Measured on this box: the weights usually come out of the host page cache rather than off the array - a cold spawn of a 15.3 GB model read 0.0 MiB from md0 and still took 18.1 s, because the cost is moving the bytes onto the cards, not finding them. A model that has not been touched in a while, or one evicted from the cache by a bigger load, does read from the array. Note that load-mode = mlock does not change this: mlock is released when the server process exits, and it is the page cache, not mlock, that survives an eviction.">
+          Moving {% if hero_size_h %}{{ hero_size_h }} of {% endif %}weights{% if hero_loading_gpu %} onto the cards{% else %} into place{% endif %}{% if hero_ctx_cfg %},
           then allocating the KV cache for {{ hero_ctx_cfg }} of context{% endif %}.
           The VRAM meter below climbs as it lands.
         </p>

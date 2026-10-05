@@ -385,6 +385,7 @@ async def _hero_context() -> dict:
             "tps_samples": 0 if hero_loading else len(tps),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
+            "hero_loading_gpu": hero_loading and b.vendor in ("rocm", "cuda"),
             # Drive the per-slot strip's row height and column wrap. Computed here rather than
             # in the template so the thresholds sit with the dataclass they describe.
             "slot_density": services.slot_density(len(sp.slots) if sp else 0),
