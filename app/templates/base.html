@@ -95,6 +95,29 @@
       background-size: 800px 100%;
     }
 
+    /* NOW SERVING label: the state is carried by the text itself - its colour and a soft halo -
+       rather than by an indicator light beside it. Two reasons it is the text and not a dot:
+       a 8px dot is the first thing to lose at a glance from across the desk, and the label was
+       already there, so colouring it costs no extra ink.
+
+       The halo BREATHES only while the backend is actually working, and it breathes on the
+       text-shadow alone - the glyphs never change colour, weight or opacity. That is the whole
+       trick: an animation that touches opacity reads as a blink no matter how slow you make it,
+       while one that only swells a shadow reads as something warm sitting behind the word.
+       3.6s with an ease on both ends is slow enough that you have to look for it deliberately.
+
+       --ml-glow / --ml-glow-dim are set inline per state, so one class serves every accent. */
+    @keyframes ml-breathe {
+      0%, 100% { text-shadow: 0 0 5px var(--ml-glow-dim), 0 0 12px transparent; }
+      50%      { text-shadow: 0 0 9px var(--ml-glow),     0 0 20px var(--ml-glow-dim); }
+    }
+    .ml-state      { text-shadow: 0 0 7px var(--ml-glow-dim); }
+    .ml-state-live { animation: ml-breathe 3.6s ease-in-out infinite; }
+    /* Honour the OS setting: the glow still carries the state, it just stops moving. */
+    @media (prefers-reduced-motion: reduce) {
+      .ml-state-live { animation: none; text-shadow: 0 0 9px var(--ml-glow); }
+    }
+
     /* fade-in animation for freshly-inserted content — scoped so periodic polls don't flicker */
     @keyframes ml-fade-in {
       from { opacity: 0; transform: translateY(2px); }

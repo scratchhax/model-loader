@@ -7,11 +7,22 @@
   is mid-generation or the machine has been idle for a day. This leads with the thing you
   actually came to check: which model is loaded, whether it is working, and how fast.
 
-  Deliberately dark in both themes - it is a readout, not a document - and deliberately still:
-  colour and a soft halo carry the state instead of anything that blinks or pulses.
+  Deliberately dark in both themes - it is a readout, not a document. State is carried by
+  colour and a soft halo rather than by an indicator light. The halo breathes while the backend
+  is working, on a 3.6s ease that touches the text-shadow and nothing else, so it swells rather
+  than blinks; the glyphs themselves never change colour or opacity, and the whole thing stops
+  moving under prefers-reduced-motion.
 #}
 {% set live = speed and speed.live %}
 {% set accent = 'emerald' if (speed and speed.state == 'generating') else ('sky' if (speed and speed.state == 'prefill') else 'slate') %}
+
+{# The one place state becomes colour. Both ends of the header row read from it, so the glowing
+   label on the left and the state word on the right cannot drift apart. Idle maps to the same
+   slate-400 the label has always been, which is deliberate: when nothing is happening the panel
+   should look exactly as it did before, and colour should mean something is. #}
+{% set state_text = {'emerald': 'text-emerald-300', 'sky': 'text-sky-300'}.get(accent, 'text-slate-400') %}
+{% set state_glow = {'emerald': 'rgba(16,185,129,0.55)', 'sky': 'rgba(14,165,233,0.55)'}.get(accent, 'transparent') %}
+{% set state_glow_dim = {'emerald': 'rgba(16,185,129,0.30)', 'sky': 'rgba(14,165,233,0.30)'}.get(accent, 'transparent') %}
 
 <div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 px-5 py-4 text-slate-100
             shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)]">
@@ -26,17 +37,14 @@
   <div class="relative">
     <div class="flex items-start justify-between gap-4">
       <div class="min-w-0">
-        <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em] text-slate-400">
-          <span class="relative flex h-2 w-2">
-            <span class="absolute inline-flex h-full w-full rounded-full
-              {% if accent == 'emerald' %}bg-emerald-400{% elif accent == 'sky' %}bg-sky-400{% else %}bg-slate-600{% endif %}"></span>
-            {% if live %}
-            <span class="absolute -inset-1 rounded-full opacity-60 blur-[3px]
-              {% if accent == 'emerald' %}bg-emerald-500{% else %}bg-sky-500{% endif %}"></span>
-            {% endif %}
-          </span>
-          now serving
-          {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-400">{{ hero_backend }}</span>{% endif %}
+        {# The dot is gone on purpose. It and the label sat 8px apart saying the same thing, and
+           the dot was the half that disappeared at arm's length. The word now carries the state
+           in its own colour, with the halo defined in base.html - see .ml-state there for why
+           the animation is on the shadow and never on the glyphs. #}
+        <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em]">
+          <span class="ml-state {% if live %}ml-state-live{% endif %} {{ state_text }} transition-colors duration-700"
+                style="--ml-glow: {{ state_glow }}; --ml-glow-dim: {{ state_glow_dim }};">now serving</span>
+          {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-500">{{ hero_backend }}</span>{% endif %}
         </div>
 
         {% if hero_model %}
@@ -63,7 +71,9 @@
       </div>
 
       <div class="shrink-0 text-right">
-        <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+        {# Same accent as the label, no halo: two glowing things in one row is one too many.
+           The colour alone is enough to tie this word to the label opposite it. #}
+        <div class="text-[10px] uppercase tracking-[0.14em] transition-colors duration-700 {{ state_text }}">
           {% if speed and speed.state == 'generating' %}generating
           {% elif speed and speed.state == 'prefill' %}reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}
           {% elif hero_model %}idle
