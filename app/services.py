@@ -491,6 +491,14 @@ class LlamaBackend:
     # mere idleness: under --models-preset with --models-max 1, "nothing loaded" is the normal
     # resting state, so nothing-loaded must never read as a failure. None = no reported failure.
     load_failed: str | None = None
+    # The model the router is bringing up right now, and how long it has been at it. Both None /
+    # 0.0 whenever nothing is loading, which is almost always. loading_since is wall-clock
+    # seconds measured by US, not by the router: /v1/models reports the state but not when it
+    # started, so the clock begins the first time a probe sees it. The probe runs every 1.5 s
+    # (_HERO_BACKENDS_TTL), so the figure can read up to ~1.5 s short of the truth - fine for a
+    # counter whose job is to prove the box is busy, not to time anything.
+    loading_model: str | None = None
+    loading_since: float = 0.0
     last_restart_error: str | None = None
     # --sleep-idle-seconds: after this many seconds without a request the server releases its
     # model's VRAM and reloads on the next one. 0 = the flag is absent, which is llama.cpp's
@@ -639,29 +647,44 @@ def _load_failure(status: dict) -> tuple[bool, int | None]:
 
 async def _probe_loaded_model(
     container_name: str, internal_port: int | None
-) -> tuple[str | None, str | None, str | None]:
-    """(loaded_model_csv, probe_error, load_failed) from a backend's /v1/models.
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """(loaded_model_csv, probe_error, load_failed, loading_model) from a backend's /v1/models.
 
     loaded_model  — comma list of ids whose status is 'loaded'.
     probe_error   — a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
     load_failed   — the first model whose last load failed, as "name (exit N)"; None otherwise.
                     The only field the dashboard alarm keys off: a real failure, not the normal
                     unloaded state. See _load_failure for what the router actually reports.
+    loading_model — the model the router is bringing up RIGHT NOW, or None.
+
+    The last of those is why this function was wrong for as long as it has existed. Measured on
+    b11206 by polling this endpoint at 120 ms through a real swap:
+
+        0.00  gemma-4-31B-it-Q6_K=loaded
+        1.11  Qwen3.8-27B-UD-Q4_K_M=loading
+        10.51 Qwen3.8-27B-UD-Q4_K_M=loaded
+
+    The outgoing model flips straight to 'unloaded' and the incoming one sits on 'loading', so
+    for the whole window NOTHING reports as loaded. Collecting only 'loaded' therefore made a
+    model swap indistinguishable from an idle box, and the overview said "nothing loaded" for
+    the entire load - 9.6 s on a 27B, 40 s on gemma-4-31B at Q6_K. The status was always on the
+    wire; it was being thrown away here.
     """
     if internal_port is None:
-        return None, None, None
+        return None, None, None, None
     url = f"http://{container_name}:{internal_port}/v1/models"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, read=3.0)) as client:
             r = await client.get(url)
             if r.status_code != 200:
-                return None, f"HTTP {r.status_code}", None
+                return None, f"HTTP {r.status_code}", None, None
             data = r.json()
             items = data.get("data") or []
             if not items:
-                return None, "no models configured", None
+                return None, "no models configured", None, None
             loaded_ids: list[str] = []
             failure: str | None = None
+            loading: str | None = None
             for it in items:
                 mid = str(it.get("id") or "")
                 # A ROUTER reports status.value per model because it loads and evicts them. A
@@ -682,17 +705,26 @@ async def _probe_loaded_model(
                 val = str(status.get("value") or "").lower()
                 if val == "loaded":
                     loaded_ids.append(mid)
+                elif val == "loading":
+                    # At --models-max 1 there can only be one, and it flips within ~0.3 s of the
+                    # request - early enough to cover the eviction of its predecessor, so this
+                    # one field spans the whole episode the user is staring at.
+                    loading = mid
                 elif failure is None:
                     failed, code = _load_failure(status)
                     if failed:
                         failure = f"{mid} (exit {code})" if code is not None else mid
             if failure is not None:
-                return ", ".join(i for i in loaded_ids if i) or None, None, failure
+                return ", ".join(i for i in loaded_ids if i) or None, None, failure, loading
             if loaded_ids:
-                return ", ".join(i for i in loaded_ids if i), None, None
-            return None, f"{len(items)} configured, none loaded", None
+                return ", ".join(i for i in loaded_ids if i), None, None, loading
+            # "none loaded" is the honest note only when nothing is on its way in. During a load
+            # it would be read as an idle box, which is exactly the confusion this fixes.
+            if loading:
+                return None, None, None, loading
+            return None, f"{len(items)} configured, none loaded", None, None
     except (httpx.HTTPError, ValueError) as e:
-        return None, f"{type(e).__name__}: {e}", None
+        return None, f"{type(e).__name__}: {e}", None, None
 
 
 def discover_llama_containers() -> list[dict]:
@@ -755,6 +787,25 @@ def _effective_container_names() -> list[str]:
 # same request rather than being a cache with a life of its own.
 _LOADED_BY_BACKEND: dict[str, str] = {}
 _LOADED_LOCK = threading.Lock()
+
+
+# When each backend's current load was FIRST seen, keyed by (backend, model). The model is
+# part of the key so that a swap straight into another swap restarts the clock instead of
+# inheriting the previous model's start time. Pruned on every observation, so it holds at
+# most one entry per backend and never needs a sweep.
+_LOADING_SINCE: dict[tuple[str, str], float] = {}
+
+
+def _note_loading(backend: str, model: str | None) -> float:
+    """Seconds this backend has been loading `model`. 0.0 when it is not loading."""
+    with _LOADED_LOCK:
+        for k in [k for k in _LOADING_SINCE
+                  if k[0] == backend and (model is None or k[1] != model)]:
+            del _LOADING_SINCE[k]
+        if not model:
+            return 0.0
+        t0 = _LOADING_SINCE.setdefault((backend, model), time.time())
+    return max(0.0, time.time() - t0)
 
 
 def last_loaded_ids(name: str) -> set[str]:
@@ -860,10 +911,12 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             *[_probe_loaded_model(n, p) for _, n, p in probe_targets],
             return_exceptions=False,
         )
-        for (i, _n, _p), (loaded, err, failed) in zip(probe_targets, results):
+        for (i, _n, _p), (loaded, err, failed, loading) in zip(probe_targets, results):
             out[i].loaded_model = loaded
             out[i].probe_error = err
             out[i].load_failed = failed
+            out[i].loading_model = loading
+            out[i].loading_since = _note_loading(out[i].name, loading)
             with _LOADED_LOCK:
                 _LOADED_BY_BACKEND[out[i].name] = loaded or ""
     return out
@@ -1508,8 +1561,10 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
         return {"ok": False, "err": "container not reachable"}
 
     # discover a loaded model id first
-    loaded, err, _failed = await _probe_loaded_model(container_name, internal_port)
+    loaded, err, _failed, loading = await _probe_loaded_model(container_name, internal_port)
     if not loaded:
+        if loading:
+            return {"ok": False, "err": f"{loading} is still loading - try again in a moment"}
         return {"ok": False, "err": err or "no model loaded on this backend"}
     model_id = loaded.split(",")[0].strip()
 

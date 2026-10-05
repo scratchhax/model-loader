@@ -243,9 +243,10 @@ async def _hero_context() -> dict:
     best: tuple[int, object, object] | None = None      # (rank, backend, speed)
     scored: list[tuple[int, object, object]] = []
     for b in backends:
-        if not b.loaded_model:
+        if not b.loaded_model and not b.loading_model:
             continue
-        sp = await services.inference_speed(b.name, b.internal_port, b.loaded_model)
+        sp = (await services.inference_speed(b.name, b.internal_port, b.loaded_model)
+              if b.loaded_model else None)
         # Three questions, in the order they matter on a box whose whole point is the cards:
         #
         #   generating now   the thing actually working always leads, GPU or not
@@ -257,8 +258,15 @@ async def _hero_context() -> dict:
         # router, llama-cpu and llama-voice - so the winner was whichever docker happened to
         # enumerate first, and the hero appeared to pick at random. In practice it would show
         # llama-cpu serving wheatley-voice while a 25 GB model sat on the cards.
+        #   is it loading        a swap in progress is the most interesting thing on the box
+        #                           after something actually generating, and it is the state
+        #                           that used to render as a blank panel for up to 40 seconds
+        #
+        # 3 puts it above any idle backend (2 + 1 at most) and below anything live (4 and up),
+        # which is the order you would read them in out loud.
         _gpu = b.vendor in ("rocm", "cuda")
-        rank = (4 if (sp and sp.live) else 0) + (2 if _gpu else 0) + (1 if b.router else 0)
+        rank = ((4 if (sp and sp.live) else 0) + (3 if b.loading_model else 0)
+                + (2 if _gpu else 0) + (1 if b.router else 0))
         scored.append((rank, b, sp))
         if best is None or rank > best[0]:
             best = (rank, b, sp)
@@ -267,7 +275,7 @@ async def _hero_context() -> dict:
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
                 "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None,
-                "hero_others": []}
+                "hero_loading": False, "hero_loading_s": 0.0, "hero_others": []}
 
     _rank, b, sp = best
 
@@ -281,7 +289,8 @@ async def _hero_context() -> dict:
             continue
         hero_others.append({
             "backend": ob.name,
-            "model": (ob.loaded_model or "").split(",")[0].strip(),
+            "model": (ob.loading_model or ob.loaded_model or "").split(",")[0].strip(),
+            "loading": bool(ob.loading_model),
             "gpu": ob.vendor in ("rocm", "cuda"),
             "live": bool(osp and osp.live),
             "state": (osp.state if osp else "idle"),
@@ -289,7 +298,12 @@ async def _hero_context() -> dict:
             "asleep": bool(getattr(ob, "asleep", False)),
         })
 
-    model_id = (b.loaded_model or "").split(",")[0].strip()
+    # Mid-swap the interesting model is the one arriving, not the nothing it replaced. Every
+    # fact below keys off model_id, so naming it here means the size, quant and context all come
+    # from the ini and the GGUF header exactly as they do for a resident model - which is the
+    # whole of what the loading panel has to say, obtained for free.
+    hero_loading = bool(b.loading_model)
+    model_id = (b.loading_model or b.loaded_model or "").split(",")[0].strip()
 
     # Fold in this backend's log before anything reads its spawn record. Rate-limited to once
     # every 20 s internally, so an HTMX poll does not re-read the log every two seconds.
@@ -341,7 +355,10 @@ async def _hero_context() -> dict:
     # deliberately. None whenever nothing is offloaded, which is the common case.
     hero_weights_split = None
     try:
-        if st.ok and st.gpu:
+        # Not mid-load: the breakdown apportions VRAM against the RUNNING model's config, and
+        # during a load the allocation on the cards belongs to neither the model leaving nor the
+        # one arriving. A number assembled from both is worse than no number.
+        if st.ok and st.gpu and not hero_loading:
             _t = _gpu_tenants()
             hero_weights_split = (vram_live.breakdown(
                 b.name, st.gpu,
@@ -359,15 +376,25 @@ async def _hero_context() -> dict:
     return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
             "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
-            "tps_spark": hw.sparkline(tps, tps_peak or None) if len(tps) > 2 else "",
-            "tps_peak": tps_peak, "tps_samples": len(tps),
+            # Blank mid-load. tps_history is per BACKEND, so the line drawn during a swap is
+            # the outgoing model's throughput sitting under the incoming model's name - the one
+            # reading of this panel that would be actively false rather than merely absent.
+            "tps_spark": ("" if hero_loading
+                          else hw.sparkline(tps, tps_peak or None) if len(tps) > 2 else ""),
+            "tps_peak": 0.0 if hero_loading else tps_peak,
+            "tps_samples": 0 if hero_loading else len(tps),
+            "hero_loading": hero_loading,
+            "hero_loading_s": b.loading_since if hero_loading else 0.0,
             # Drive the per-slot strip's row height and column wrap. Computed here rather than
             # in the template so the thresholds sit with the dataclass they describe.
             "slot_density": services.slot_density(len(sp.slots) if sp else 0),
             "slot_columns": services.slot_columns(len(sp.slots) if sp else 0),
             "hero_weights_split": hero_weights_split,
             "hero_others": hero_others,
-            "hero_mtp": _hero_mtp(b.name, model_id)}
+            # Speculation's scorecard is scraped from completed requests. There are none for a
+            # model that has not finished loading, and the rollup would hand back its
+            # predecessor's figures under the new model's name.
+            "hero_mtp": None if hero_loading else _hero_mtp(b.name, model_id)}
 
 
 def _gpu_tenants() -> list:
