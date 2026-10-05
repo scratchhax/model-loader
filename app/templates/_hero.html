@@ -14,24 +14,33 @@
   moving under prefers-reduced-motion.
 #}
 {% set live = speed and speed.live %}
-{% set accent = 'emerald' if (speed and speed.state == 'generating') else ('sky' if (speed and speed.state == 'prefill') else 'slate') %}
+{% set accent = 'amber' if hero_loading
+                else ('emerald' if (speed and speed.state == 'generating')
+                      else ('sky' if (speed and speed.state == 'prefill') else 'slate')) %}
 
 {# The one place state becomes colour. Both ends of the header row read from it, so the glowing
    label on the left and the state word on the right cannot drift apart. Idle maps to the same
    slate-400 the label has always been, which is deliberate: when nothing is happening the panel
    should look exactly as it did before, and colour should mean something is. #}
-{% set state_text = {'emerald': 'text-emerald-300', 'sky': 'text-sky-300'}.get(accent, 'text-slate-400') %}
-{% set state_glow = {'emerald': 'rgba(16,185,129,0.55)', 'sky': 'rgba(14,165,233,0.55)'}.get(accent, 'transparent') %}
-{% set state_glow_dim = {'emerald': 'rgba(16,185,129,0.30)', 'sky': 'rgba(14,165,233,0.30)'}.get(accent, 'transparent') %}
+{% set state_text = {'emerald': 'text-emerald-300', 'sky': 'text-sky-300', 'amber': 'text-amber-300'}.get(accent, 'text-slate-400') %}
+{% set state_glow = {'emerald': 'rgba(16,185,129,0.55)', 'sky': 'rgba(14,165,233,0.55)', 'amber': 'rgba(245,158,11,0.55)'}.get(accent, 'transparent') %}
+{% set state_glow_dim = {'emerald': 'rgba(16,185,129,0.30)', 'sky': 'rgba(14,165,233,0.30)', 'amber': 'rgba(245,158,11,0.30)'}.get(accent, 'transparent') %}
+
+{# Amber because it already means "a bet in progress" everywhere else in this app - the caps
+   chips and speculation's scorecard both wear it. A load is the same kind of thing: committed,
+   not yet paid off. The halo breathes during a load for the same reason it breathes while
+   generating, which is that both are the box working rather than the box waiting. #}
+{% set glowing = live or hero_loading %}
 
 <div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 px-5 py-4 text-slate-100
             shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)]">
 
   {# state wash: a wide, very soft gradient so the panel reads its own status from across the desk #}
   <div class="pointer-events-none absolute inset-0 transition-opacity duration-700
-              {% if live %}opacity-100{% else %}opacity-40{% endif %}
+              {% if glowing %}opacity-100{% else %}opacity-40{% endif %}
               {% if accent == 'emerald' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(16,185,129,0.16),transparent_55%)]
               {% elif accent == 'sky' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(14,165,233,0.16),transparent_55%)]
+              {% elif accent == 'amber' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(245,158,11,0.16),transparent_55%)]
               {% else %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(148,163,184,0.10),transparent_55%)]{% endif %}"></div>
 
   <div class="relative">
@@ -42,8 +51,8 @@
            in its own colour, with the halo defined in base.html - see .ml-state there for why
            the animation is on the shadow and never on the glyphs. #}
         <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em]">
-          <span class="ml-state {% if live %}ml-state-live{% endif %} {{ state_text }} transition-colors duration-700"
-                style="--ml-glow: {{ state_glow }}; --ml-glow-dim: {{ state_glow_dim }};">now serving</span>
+          <span class="ml-state {% if glowing %}ml-state-live{% endif %} {{ state_text }} transition-colors duration-700"
+                style="--ml-glow: {{ state_glow }}; --ml-glow-dim: {{ state_glow_dim }};">{{ 'loading' if hero_loading else 'now serving' }}</span>
           {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-500">{{ hero_backend }}</span>{% endif %}
         </div>
 
@@ -61,6 +70,31 @@
           {% if hero_size_h %}<span class="text-slate-600">·</span><span class="tabular-nums">{{ hero_size_h }}</span>{% endif %}
           {% if hero_ctx_cfg %}<span class="text-slate-600">·</span><span class="tabular-nums">ctx {{ hero_ctx_cfg }}</span>{% endif %}
         </div>
+
+        {# ---- what the box is doing, for the 10-40 s this panel used to spend blank ----
+           The router publishes "loading" and nothing else: no phase, no percentage. That is
+           fine, because a phase label would not have earned its keep either - 79% of a measured
+           9.6 s swap is the single weights step, and the share only grows with the model. So
+           this says what IS known and points at the one thing on the page that moves while you
+           wait, which is the VRAM meter filling up.
+
+           It says MOVING and not "reading from disk", because measured on this box the disk is
+           usually not involved at all. A genuine cold spawn of the 15.3 GiB Qwen3.8-27B read
+           0.0 MiB off md0 - the file was wholly in the page cache, where 125 GB of host RAM
+           keeps every model that has been touched recently. The same probe caught a 6.6 GiB
+           gemma-4-12b reading 6773 MiB off the array, because the big loads in between had
+           evicted it. Both happen, the panel cannot cheaply tell which, and claiming either one
+           would be wrong about half the time. What is true in both cases is that the bytes have
+           to get onto the cards, and that is also where the time goes: 18.1 s for that 15.3 GiB
+           load with zero disk reads. #}
+        {% if hero_loading %}
+        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-amber-200/70"
+           title="Measured on this box: the weights usually come out of the host page cache rather than off the array - a cold spawn of a 15.3 GB model read 0.0 MiB from md0 and still took 18.1 s, because the cost is moving the bytes onto the cards, not finding them. A model that has not been touched in a while, or one evicted from the cache by a bigger load, does read from the array. Note that load-mode = mlock does not change this: mlock is released when the server process exits, and it is the page cache, not mlock, that survives an eviction.">
+          Moving {% if hero_size_h %}{{ hero_size_h }} of {% endif %}weights{% if hero_loading_gpu %} onto the cards{% else %} into place{% endif %}{% if hero_ctx_cfg %},
+          then allocating the KV cache for {{ hero_ctx_cfg }} of context{% endif %}.
+          The VRAM meter below climbs as it lands.
+        </p>
+        {% endif %}
         {% else %}
         <h2 class="mt-1.5 font-mono text-xl font-semibold tracking-tight text-slate-500 sm:text-2xl">nothing loaded</h2>
         <p class="mt-1 text-[11px] text-slate-500">
@@ -74,7 +108,8 @@
         {# Same accent as the label, no halo: two glowing things in one row is one too many.
            The colour alone is enough to tie this word to the label opposite it. #}
         <div class="text-[10px] uppercase tracking-[0.14em] transition-colors duration-700 {{ state_text }}">
-          {% if speed and speed.state == 'generating' %}generating
+          {% if hero_loading %}loading{% if hero_loading_s >= 1 %} {{ hero_loading_s | round(0) | int }}s{% endif %}
+          {% elif speed and speed.state == 'generating' %}generating
           {% elif speed and speed.state == 'prefill' %}reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}
           {% elif hero_model %}idle
           {% else %}standby{% endif %}
