@@ -258,8 +258,12 @@ async def _hero_context() -> dict:
     best: tuple[int, object, object] | None = None      # (rank, backend, speed)
     scored: list[tuple[int, object, object]] = []
     for b in backends:
-        if not b.loaded_model and not b.loading_model:
+        if not b.loaded_model and not b.loading_model and not b.sleeping_model:
             continue
+        # Only a genuinely loaded model is probed. inference_speed reads /slots, and /slots
+        # both resets the idle timer and wakes a sleeper - so probing a sleeping backend would
+        # mean this page, polling every 500 ms, prevented sleep and woke whatever had managed
+        # it. A loading model has no slots to read either.
         sp = (await services.inference_speed(b.name, b.internal_port, b.loaded_model)
               if b.loaded_model else None)
         # Three questions, in the order they matter on a box whose whole point is the cards:
@@ -279,6 +283,9 @@ async def _hero_context() -> dict:
         #
         # 3 puts it above any idle backend (2 + 1 at most) and below anything live (4 and up),
         # which is the order you would read them in out loud.
+        #   is it asleep         it still owns a model and will serve it; it outranks nothing
+        #                            and loses to everything, but it beats not being shown at
+        #                            all, which is what used to happen
         _gpu = b.vendor in ("rocm", "cuda")
         rank = ((4 if (sp and sp.live) else 0) + (3 if b.loading_model else 0)
                 + (2 if _gpu else 0) + (1 if b.router else 0))
@@ -291,7 +298,8 @@ async def _hero_context() -> dict:
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
                 "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None,
                 "hero_loading": False, "hero_loading_s": 0.0,
-                "hero_foreign": _hero_foreign_only(), "hero_others": []}
+                "hero_foreign": _hero_foreign_only(), "hero_asleep": False,
+                "hero_others": []}
 
     _rank, b, sp = best
 
@@ -305,7 +313,8 @@ async def _hero_context() -> dict:
             continue
         hero_others.append({
             "backend": ob.name,
-            "model": (ob.loading_model or ob.loaded_model or "").split(",")[0].strip(),
+            "model": (ob.loading_model or ob.loaded_model
+                      or ob.sleeping_model or "").split(",")[0].strip(),
             "loading": bool(ob.loading_model),
             "gpu": ob.vendor in ("rocm", "cuda"),
             "live": bool(osp and osp.live),
@@ -319,7 +328,8 @@ async def _hero_context() -> dict:
     # from the ini and the GGUF header exactly as they do for a resident model - which is the
     # whole of what the loading panel has to say, obtained for free.
     hero_loading = bool(b.loading_model)
-    model_id = (b.loading_model or b.loaded_model or "").split(",")[0].strip()
+    hero_asleep = bool(b.sleeping_model) and not b.loaded_model and not hero_loading
+    model_id = (b.loading_model or b.loaded_model or b.sleeping_model or "").split(",")[0].strip()
 
     # Fold in this backend's log before anything reads its spawn record. Rate-limited to once
     # every 20 s internally, so an HTMX poll does not re-read the log every two seconds.
@@ -389,7 +399,7 @@ async def _hero_context() -> dict:
         # Not mid-load: the breakdown apportions VRAM against the RUNNING model's config, and
         # during a load the allocation on the cards belongs to neither the model leaving nor the
         # one arriving. A number assembled from both is worse than no number.
-        if st.ok and st.gpu and not hero_loading:
+        if st.ok and st.gpu and not hero_loading and not hero_asleep:
             _t = _gpu_tenants()
             hero_weights_split = (vram_live.breakdown(
                 b.name, st.gpu,
@@ -417,6 +427,7 @@ async def _hero_context() -> dict:
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
             "hero_foreign": hero_foreign,
+            "hero_asleep": hero_asleep,
             "hero_loading_gpu": hero_loading and b.vendor in ("rocm", "cuda"),
             # Drive the per-slot strip's row height and column wrap. Computed here rather than
             # in the template so the thresholds sit with the dataclass they describe.
