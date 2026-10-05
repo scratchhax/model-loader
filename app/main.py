@@ -221,8 +221,18 @@ def _hero_mtp(backend: str, model_id: str) -> dict | None:
             ent = (now, telemetry.Stats())
         _mtp_cache[key] = ent
     tel = ent[1]
+    # Two shapes of draft wear the same spec-type. With a draft FILE the head is a second model
+    # with its own weights and its own compute buffer - measured at 7.77 GB on the Q4_K_M. With
+    # the MTP layers inside the target GGUF there is no file, no second set of weights, and
+    # measured here no second buffer either: the per-card meter predicted card 0 at 28.80 GB
+    # against 28.8 measured, residual 0.00, while draft-mtp was running at 72% acceptance.
+    # Telling them apart matters, because the honest answer to "what does speculation cost me"
+    # is 7.8 GB for one and approximately nothing for the other.
+    draft_file = (argv.get("--model-draft") or argv.get("-md")
+                  or argv.get("--spec-draft-model") or "").strip()
     return {
         "spec_type": stype,
+        "builtin": not draft_file,
         "label": "MTP" if "mtp" in stype else ("NGRAM" if stype.startswith("ngram") else "SPEC"),
         "acc_pct": (100.0 * tel.draft_acc_p50) if tel.draft_acc_p50 is not None else None,
         "mean_len": tel.draft_len_p50 if tel.draft_len_p50 else 0.0,
