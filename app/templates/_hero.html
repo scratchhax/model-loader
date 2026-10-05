@@ -212,9 +212,18 @@
       </div>
       <div class="mt-1.5 flex justify-between text-[10px] tabular-nums text-slate-500">
         <span>{{ (speed.ctx_used / 1024) | round(1) }}k of {{ (speed.ctx_total / 1024) | round(0) | int }}k window</span>
-        {% if speed.ctx_cached %}
-        <span class="text-slate-400">{{ (100.0 * speed.ctx_cached / speed.ctx_used) | round(0) | int }}% from cache
+        {# Against the PROMPT the busy slot arrived with, not against ctx_used. ctx_used is the
+           whole KV pool - it grows as the model generates and it includes other slots holding
+           other conversations - so dividing by it made a fully cached chat appear to shed cache
+           while it answered, and mixed a second conversation's size into the ratio. #}
+        {% if speed.ctx_cached and speed.prompt_tokens %}
+        <span class="text-slate-400">{{ (100.0 * speed.ctx_cached / speed.prompt_tokens) | round(0) | int }}% from cache
           <span class="text-slate-600">· only the rest was re-read</span></span>
+        {% elif speed.prompt_tokens and speed.state in ('prefill', 'generating') %}
+        {# 0% is the interesting case, not a blank. It means this prompt missed the cache
+           entirely and every token of it is being re-read. #}
+        <span class="text-amber-300/80" title="This prompt matched nothing in any slot's cache, so all {{ '{:,}'.format(speed.prompt_tokens) }} tokens of it are being read from scratch. The usual cause here is more live conversations than slots: each slot caches exactly one, and --parallel sets how many there are.">0% from cache
+          <span class="text-amber-300/50">· the whole prompt is being re-read</span></span>
         {% endif %}
       </div>
     </div>
