@@ -204,20 +204,30 @@ def _components(name: str, vendor: str, gpu_count: int,
     # "other" residual that prompted the measurement.
     draft_s = (argv.get("--model-draft") or argv.get("-md")
                or argv.get("--spec-draft-model") or "").strip()
+    # What the head costs IN TOTAL, reported but never apportioned. The two halves land in
+    # different buckets below because they live in different places on the cards - the weights
+    # pin to the main GPU, the compute buffer is per card - and a single number cannot be split
+    # correctly across cards. So the per-card meters keep using aux/compute exactly as they did,
+    # and this is carried alongside purely so the panel can answer "what is speculation costing
+    # me", which no segment could answer once the cost had been divided between two of them.
+    draft_gb = 0.0
     if draft_s:
         try:
-            aux_gb += _host_path(draft_s).stat().st_size / (1024 ** 3) * 1.15
+            w = _host_path(draft_s).stat().st_size / (1024 ** 3) * 1.15
+            aux_gb += w
+            draft_gb += w
         except OSError:
             pass
         # The duplicate compute buffer is per card, like the target's, so it belongs with
         # compute rather than in aux - aux is apportioned to the main GPU, which would put
         # the whole of it on card 0 and skew every per-card figure beside it.
+        draft_gb += compute_gb      # the doubling below IS the draft's own buffer
         compute_gb *= 2.0
 
     if model_gb <= 0:
         return None
     return {"model_gb": model_gb, "kv_gb": kv_gb, "compute_gb": compute_gb,
-            "reserve_gb": reserve_gb, "aux_gb": aux_gb,
+            "reserve_gb": reserve_gb, "aux_gb": aux_gb, "draft_gb": draft_gb,
             "gpu_pct": gpu_pct, "ctx_total": ctx_total, "model_label": model.name,
             # Raw weight bytes and the split multiplier, kept apart so the offloaded path can
             # work backwards from measured VRAM to "how much of the model is actually here".
@@ -281,6 +291,37 @@ def _segments(model_gb, kv_gb, overhead_gb, compute_gb, other_gb, free_gb, total
         parts.append(("free", "free", free_gb, "unallocated on the card"))
     return [{"key": k, "label": lbl, "gb": round(v, 2), "pct": 100.0 * v / total_gb, "note": note}
             for k, lbl, v, note in parts if v > 0.005]
+
+
+def draft_cost(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict | None:
+    """What the speculative draft head costs, and what that VRAM would otherwise buy.
+
+    None when the running instance is not speculating. The second figure is the point: on a
+    box that is VRAM-bound, the head is not paid for in gigabytes, it is paid for in CONTEXT.
+    Converting its cost at this model's own KV rate turns "6.2 GB" - a number nobody can judge
+    - into "94k of context", which is the trade actually being made and can be weighed against
+    the acceptance rate sitting next to it.
+
+    The head is far more than its file: it runs its own context and so allocates a SECOND
+    compute buffer sized from the same ctx and ubatch as the target. Measured on
+    gemma-4-31B-it-Q6_K, 43.27 GiB without against 49.43 GiB with - 6.16 GiB, of which the
+    weights were 382 MiB per card and the duplicate buffer 2735 MiB.
+    """
+    if gpu is None or getattr(gpu, "gpu_count", 0) <= 0:
+        return None
+    comps = _cached_components(name, gpu.vendor, gpu.gpu_count, loaded_ids)
+    if not comps:
+        return None
+    gb = float(comps.get("draft_gb") or 0.0)
+    if gb <= 0:
+        return None
+    kv_gb, ctx_total = float(comps.get("kv_gb") or 0.0), int(comps.get("ctx_total") or 0)
+    # GB per token of context, from this model's own KV figure rather than any rule of thumb -
+    # quantised KV, head count and layer count all move it, so a shared constant would be
+    # wrong by a lot more than this number is worth.
+    ctx_tokens = int(gb / (kv_gb / ctx_total)) if (kv_gb > 0 and ctx_total > 0) else 0
+    return {"gb": round(gb, 2), "ctx_tokens": ctx_tokens,
+            "ctx_pct": round(100.0 * gb / kv_gb, 1) if kv_gb > 0 else 0.0}
 
 
 def breakdown(name: str, gpu, loaded_ids: frozenset[str] | None = None,

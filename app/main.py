@@ -409,6 +409,18 @@ async def _hero_context() -> dict:
     except Exception:  # noqa: BLE001 - a missing line must never cost the hero
         hero_weights_split = None
 
+    # What speculation costs, merged into the MTP box so the price sits beside the payoff.
+    # Only meaningful once there is a GPU to measure against, which is why it is here and not
+    # in _hero_mtp - that function sees telemetry and argv, never the cards.
+    hero_mtp = None if hero_loading else _hero_mtp(b.name, model_id)
+    if hero_mtp is not None and st.ok and st.gpu and not hero_asleep:
+        try:
+            hero_mtp["cost"] = vram_live.draft_cost(
+                b.name, st.gpu,
+                frozenset(i.strip() for i in (b.loaded_model or "").split(",") if i.strip()))
+        except Exception:  # noqa: BLE001 - a missing cost must never cost the hero
+            hero_mtp["cost"] = None
+
     # The sparkline is scaled to the peak in its own window, and that peak is printed beside it.
     # A fixed scale cannot work here: 27 tok/s is a busy dense model and a slow MoE one, so the
     # only honest options are a stated scale or a meaningless one.
@@ -438,7 +450,7 @@ async def _hero_context() -> dict:
             # Speculation's scorecard is scraped from completed requests. There are none for a
             # model that has not finished loading, and the rollup would hand back its
             # predecessor's figures under the new model's name.
-            "hero_mtp": None if hero_loading else _hero_mtp(b.name, model_id)}
+            "hero_mtp": hero_mtp}
 
 
 def _gpu_tenants() -> list:
