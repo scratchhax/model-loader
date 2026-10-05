@@ -87,6 +87,17 @@
            would be wrong about half the time. What is true in both cases is that the bytes have
            to get onto the cards, and that is also where the time goes: 18.1 s for that 15.3 GiB
            load with zero disk reads. #}
+        {# Asleep is not unloaded. The server still owns this model and will serve it; what it
+           has given up is the VRAM. Saying "nothing loaded" here - which is what this panel did
+           until the router's third status value turned up - makes a 29 GB model that is one
+           request away from working look like an empty box. #}
+        {% if hero_asleep %}
+        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-slate-400"
+           title="--sleep-idle-seconds released this model's VRAM after an idle period. The server still holds the model and reloads it on the next request, measured at 8-9 s on this box. Nothing is lost, and the configured context is unchanged.">
+          Idle long enough that its VRAM was released. The next request reloads it, about
+          8&ndash;9 seconds, and nothing else about it changes.
+        </p>
+        {% endif %}
         {% if hero_loading %}
         <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-amber-200/70"
            title="Measured on this box: the weights usually come out of the host page cache rather than off the array - a cold spawn of a 15.3 GB model read 0.0 MiB from md0 and still took 18.1 s, because the cost is moving the bytes onto the cards, not finding them. A model that has not been touched in a while, or one evicted from the cache by a bigger load, does read from the array. Note that load-mode = mlock does not change this: mlock is released when the server process exits, and it is the page cache, not mlock, that survives an eviction.">
@@ -111,6 +122,7 @@
           {% if hero_loading %}loading{% if hero_loading_s >= 1 %} {{ hero_loading_s | round(0) | int }}s{% endif %}
           {% elif speed and speed.state == 'generating' %}generating
           {% elif speed and speed.state == 'prefill' %}reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}
+          {% elif hero_asleep %}asleep
           {% elif hero_model %}idle
           {% else %}standby{% endif %}
           {# Our backend being idle says nothing about the cards. Something else can be running

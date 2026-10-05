@@ -499,6 +499,10 @@ class LlamaBackend:
     # counter whose job is to prove the box is busy, not to time anything.
     loading_model: str | None = None
     loading_since: float = 0.0
+    # A model the server still owns but whose VRAM it has released under --sleep-idle-seconds.
+    # Never folded into loaded_model: see _probe_loaded_model for why that would stop sleep
+    # working at all. The next request reloads it, measured at 8.2-9.4 s on this box.
+    sleeping_model: str | None = None
     last_restart_error: str | None = None
     # --sleep-idle-seconds: after this many seconds without a request the server releases its
     # model's VRAM and reloads on the next one. 0 = the flag is absent, which is llama.cpp's
@@ -647,8 +651,8 @@ def _load_failure(status: dict) -> tuple[bool, int | None]:
 
 async def _probe_loaded_model(
     container_name: str, internal_port: int | None
-) -> tuple[str | None, str | None, str | None, str | None]:
-    """(loaded_model_csv, probe_error, load_failed, loading_model) from a backend's /v1/models.
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """(loaded_model_csv, probe_error, load_failed, loading_model, sleeping_model).
 
     loaded_model  — comma list of ids whose status is 'loaded'.
     probe_error   — a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
@@ -656,6 +660,15 @@ async def _probe_loaded_model(
                     The only field the dashboard alarm keys off: a real failure, not the normal
                     unloaded state. See _load_failure for what the router actually reports.
     loading_model — the model the router is bringing up RIGHT NOW, or None.
+    sleeping_model — a model held under --sleep-idle-seconds: the server still owns it and will
+                    reload it on the next request, but its VRAM is released. Measured: 50.1 GB
+                    awake, 7.3 GB asleep on this box.
+
+    sleeping is kept OUT of loaded_model on purpose, and it is not a stylistic choice. Callers
+    treat loaded_model as "there is something here worth probing", and the probe is /slots -
+    which both resets the idle timer and wakes a sleeper. Folding the two together would mean
+    the overview page, polling every 500 ms, silently prevented any model from ever sleeping
+    and woke the one that already had. Display and liveness have to stay separate fields.
 
     The last of those is why this function was wrong for as long as it has existed. Measured on
     b11206 by polling this endpoint at 120 ms through a real swap:
@@ -671,20 +684,21 @@ async def _probe_loaded_model(
     wire; it was being thrown away here.
     """
     if internal_port is None:
-        return None, None, None, None
+        return None, None, None, None, None
     url = f"http://{container_name}:{internal_port}/v1/models"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, read=3.0)) as client:
             r = await client.get(url)
             if r.status_code != 200:
-                return None, f"HTTP {r.status_code}", None, None
+                return None, f"HTTP {r.status_code}", None, None, None
             data = r.json()
             items = data.get("data") or []
             if not items:
-                return None, "no models configured", None, None
+                return None, "no models configured", None, None, None
             loaded_ids: list[str] = []
             failure: str | None = None
             loading: str | None = None
+            sleeping: str | None = None
             for it in items:
                 mid = str(it.get("id") or "")
                 # A ROUTER reports status.value per model because it loads and evicts them. A
@@ -705,6 +719,8 @@ async def _probe_loaded_model(
                 val = str(status.get("value") or "").lower()
                 if val == "loaded":
                     loaded_ids.append(mid)
+                elif val == "sleeping":
+                    sleeping = mid
                 elif val == "loading":
                     # At --models-max 1 there can only be one, and it flips within ~0.3 s of the
                     # request - early enough to cover the eviction of its predecessor, so this
@@ -715,16 +731,18 @@ async def _probe_loaded_model(
                     if failed:
                         failure = f"{mid} (exit {code})" if code is not None else mid
             if failure is not None:
-                return ", ".join(i for i in loaded_ids if i) or None, None, failure, loading
+                return (", ".join(i for i in loaded_ids if i) or None, None, failure,
+                        loading, sleeping)
             if loaded_ids:
-                return ", ".join(i for i in loaded_ids if i), None, None, loading
-            # "none loaded" is the honest note only when nothing is on its way in. During a load
-            # it would be read as an idle box, which is exactly the confusion this fixes.
-            if loading:
-                return None, None, None, loading
-            return None, f"{len(items)} configured, none loaded", None, None
+                return ", ".join(i for i in loaded_ids if i), None, None, loading, sleeping
+            # "none loaded" is the honest note only when nothing is on its way in and nothing is
+            # merely asleep. Either of those read as an idle box, which is the confusion this
+            # whole function keeps being wrong about.
+            if loading or sleeping:
+                return None, None, None, loading, sleeping
+            return None, f"{len(items)} configured, none loaded", None, None, None
     except (httpx.HTTPError, ValueError) as e:
-        return None, f"{type(e).__name__}: {e}", None, None
+        return None, f"{type(e).__name__}: {e}", None, None, None
 
 
 def discover_llama_containers() -> list[dict]:
@@ -911,12 +929,18 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             *[_probe_loaded_model(n, p) for _, n, p in probe_targets],
             return_exceptions=False,
         )
-        for (i, _n, _p), (loaded, err, failed, loading) in zip(probe_targets, results):
+        for (i, _n, _p), (loaded, err, failed, loading, sleeping) in zip(probe_targets, results):
             out[i].loaded_model = loaded
             out[i].probe_error = err
             out[i].load_failed = failed
             out[i].loading_model = loading
             out[i].loading_since = _note_loading(out[i].name, loading)
+            out[i].sleeping_model = sleeping
+            # The router's own word beats the log scrape. _is_asleep reads the last sleep marker
+            # out of `docker logs`, which is a guess that goes stale the moment the log rotates
+            # or the marker scrolls past the tail; this is the server stating its current status.
+            if sleeping:
+                out[i].asleep = True
             with _LOADED_LOCK:
                 _LOADED_BY_BACKEND[out[i].name] = loaded or ""
     return out
@@ -1607,10 +1631,15 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
         return {"ok": False, "err": "container not reachable"}
 
     # discover a loaded model id first
-    loaded, err, _failed, loading = await _probe_loaded_model(container_name, internal_port)
+    loaded, err, _failed, loading, sleeping = await _probe_loaded_model(
+        container_name, internal_port)
     if not loaded:
         if loading:
             return {"ok": False, "err": f"{loading} is still loading - try again in a moment"}
+        if sleeping:
+            # Deliberately not woken here: a test prompt is a diagnostic, and silently paying a
+            # 9 s reload to answer one would hide the very state the caller wants to know about.
+            loaded = sleeping
         return {"ok": False, "err": err or "no model loaded on this backend"}
     model_id = loaded.split(",")[0].strip()
 
