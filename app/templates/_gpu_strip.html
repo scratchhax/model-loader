@@ -157,6 +157,10 @@
     <thead>
       <tr class="text-slate-500">
         <th class="pb-1 text-left font-normal">process</th>
+        {# Compute, not just footprint. Every other column here says what a process is HOLDING;
+           this is the only one that says whether it is doing anything, which on a box where a
+           TTS model sits on 6 GB permanently is the difference that matters. #}
+        <th class="pb-1 pl-3 text-right font-normal">compute</th>
         {% for c in cards %}
         <th class="pb-1 pl-3 text-right font-normal">card {{ c.index }}</th>
         {% endfor %}
@@ -183,6 +187,18 @@
                   title="registered with the driver but holding no VRAM - a backend child that has gone to sleep, or one that has not loaded a model yet">idle</span>
             {% endif %}
           </span>
+        </td>
+        <td class="py-1 pl-3 text-right font-mono tabular-nums">
+          {%- if not t.cu_total -%}
+            {# No CU data at all: the stats node could not be read. Unknown, which is not the
+               same claim as idle, so it gets the same dash an unused card gets. #}
+            <span class="text-slate-600" title="per-process compute occupancy is not readable here">&mdash;</span>
+          {%- elif t.working -%}
+            <span class="text-emerald-300"
+                  title="{{ t.cu_peak }} of card {{ t.cu_card }}'s {{ t.cu_total }} compute units - the busiest reading in the last 3 seconds. Sampled at 20 Hz: the kernel reports occupancy instantaneously, so a short burst falls between samples easily and this is a peak, never an average.">{{ t.cu_pct }}<span class="text-emerald-500/70">%</span></span>
+          {%- else -%}
+            <span class="text-slate-600" title="holding VRAM but running nothing in the last 3 seconds">idle</span>
+          {%- endif -%}
         </td>
         {% for gb in t.per_card %}
         <td class="py-1 pl-3 text-right font-mono tabular-nums {% if gb %}text-slate-200{% else %}text-slate-600{% endif %}">

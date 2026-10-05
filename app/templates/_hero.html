@@ -113,6 +113,13 @@
           {% elif speed and speed.state == 'prefill' %}reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}
           {% elif hero_model %}idle
           {% else %}standby{% endif %}
+          {# Our backend being idle says nothing about the cards. Something else can be running
+             kernels on them, which is the case this whole readout used to render as "idle"
+             next to a 71% utilisation bar. Named, because "busy" without a name is worse than
+             the silence it replaces. #}
+          {% if hero_foreign and not (speed and speed.live) and not hero_loading %}
+          <span class="text-violet-300">· {{ hero_foreign[0].label }} busy</span>
+          {% endif %}
         </div>
         {# ---- the counter behind the percentage ----
            A percentage alone cannot tell a 400-token prompt from an 80,000-token one, and on
@@ -197,6 +204,38 @@
                  hero_mtp.label ~ ' speculative decoding is running (' ~ hero_mtp.spec_type ~ '). ' ~ mtp_acc_txt) }}
       {% endif %}
     </div>
+
+    {# ---- anything on the cards that is not ours ----
+       Deliberately driven by cu_occupancy and not by VRAM. Chatterbox holds ~6 GB around the
+       clock and is doing nothing for almost all of it; a row that appears merely because
+       something is resident would be on screen permanently and would stop being read. This
+       appears only while a foreign process is actually running kernels.
+
+       Nothing here knows what the process IS. The kernel reports per-pid CU occupancy and
+       per-pid VRAM, so ComfyUI, a stray PyTorch script and a second llama-server all surface
+       identically with no code for any of them - the label falls back container -> comm -> pid.
+       Violet because it is the one block on this panel that is not about our own model. #}
+    {% if hero_foreign %}
+    <div class="mt-3 rounded-xl border border-violet-500/25 bg-violet-500/[0.06] px-3 py-2">
+      <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-violet-300/80">also on the cards</div>
+      <div class="mt-1.5 space-y-1">
+        {% for f in hero_foreign %}
+        <div class="flex items-center gap-2 text-[11px]">
+          <span class="min-w-0 flex-1 truncate font-mono text-violet-100">{{ f.label }}</span>
+          {% if f.card is not none %}<span class="shrink-0 text-violet-300/60">card {{ f.card }}</span>{% endif %}
+          <span class="shrink-0 tabular-nums text-violet-200/80">{{ '%.1f' % f.gb }} GB</span>
+          {% if f.cu_total %}
+          <span class="shrink-0 w-16 overflow-hidden rounded-full bg-violet-950/60"
+                title="{{ f.cu_peak }} of this card's {{ f.cu_total }} compute units, the busiest reading in the last 3 seconds. Sampled at 20 Hz because the kernel reports occupancy instantaneously - a short burst is easy to miss between samples, so this is a peak and not an average.">
+            <span class="block h-1 bg-violet-400" style="width: {{ f.cu_pct }}%"></span>
+          </span>
+          <span class="shrink-0 w-14 text-right tabular-nums text-violet-200/70">{{ f.cu_peak }}/{{ f.cu_total }} CU</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
 
     {# ---- context bar: cached share first, so a long conversation that is mostly cache reads cheap ---- #}
     {% if speed and speed.ctx_total and speed.ctx_used %}
