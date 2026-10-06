@@ -592,7 +592,17 @@ def set_container_running(name: str, start: bool) -> tuple[bool, str]:
             return True, f"{name} starting - it reloads its weights, give it a moment"
         if c.status != "running":
             return True, f"{name} is already stopped"
-        c.stop(timeout=30)
+        # No explicit timeout: an explicit one is sent as ?t= and OVERRIDES the container's
+        # own StopTimeout, so a hardcoded value here silently ignores whatever the service
+        # declared in compose. Each service knows its own shutdown cost; this does not.
+        #
+        # It matters more than it looks. comfyui's PID 1 is the image's bash entrypoint, which
+        # never execs, and bash defers a signal until its foreground child finishes - so python
+        # is never told to stop and the full grace period always elapses before SIGKILL. With 30
+        # hardcoded here, ejecting it took a measured 37 s for a container that had nothing to
+        # flush. Its compose entry sets stop_grace_period: 5s, which is only honoured if we stay
+        # out of the way.
+        c.stop()
         return True, f"{name} stopped and its VRAM released"
     except (DockerException, OSError) as e:
         return False, f"{name}: {e}"
