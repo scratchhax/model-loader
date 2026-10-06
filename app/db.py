@@ -443,7 +443,20 @@ def record_server_configs(backend: str, configs: list) -> int:
             "  alias      = CASE WHEN excluded.alias      != '' THEN excluded.alias      ELSE server_config.alias END, "
             "  model_path = CASE WHEN excluded.model_path != '' THEN excluded.model_path ELSE server_config.model_path END, "
             "  argv_json  = CASE WHEN excluded.argv_json  != '{}' THEN excluded.argv_json ELSE server_config.argv_json END, "
-            "  first_seen = CASE WHEN server_config.first_seen = 0 THEN excluded.first_seen ELSE server_config.first_seen END",
+            # max(), not "keep the old one". `instance` is the child's PID and the kernel
+            # recycles it: every id observed here lands in 32768-60993, so with a few hundred
+            # spawns a collision is expected, not unlucky. On a collision the alias, path and
+            # argv above are correctly overwritten by the new spawn - but keeping the OLD
+            # first_seen left the row carrying today's model under a timestamp from weeks ago,
+            # so `latest_server_config` (ORDER BY first_seen DESC) never surfaced it and the
+            # live VRAM meter's identity gate refused to draw. Observed 2026-10-06: the loaded
+            # Qwen3.8-27B-UD-Q4_K_M sat at a first_seen 33.8 days stale while the whole card
+            # read as an unexplained "other" residual.
+            #
+            # Re-ingesting the SAME spawn is still a no-op, which is what the old clause was
+            # protecting: first_seen is parsed from the announcement line's log timestamp, so
+            # a second pass over the same window yields an identical value and max() keeps it.
+            "  first_seen = max(excluded.first_seen, server_config.first_seen)",
             rows,
         )
     return len(rows)
