@@ -31,32 +31,44 @@ ENGINE = "strata"
 # directory read-only at /strata-pin; this app is the only writer.
 ENV_PATH = Path(os.environ.get("STRATA_ENV_PATH") or "/strata/strata.env")
 
-# A pin line: GPU=<n>, optionally exported, with whatever spacing. Anchored so a GPU= inside a
-# comment is not mistaken for the setting - the file is mostly comments explaining itself.
+# A pin line. Strata takes ONE card as --gpu N (GPU=) and several as --gpus N,M (GPUS=), and
+# the two are separate switches upstream, so the file carries whichever applies and not both.
+# Anchored so a GPU= inside a comment is not mistaken for the setting - the file is mostly
+# comments explaining itself.
 _PIN_RE = re.compile(r"^(?:export\s+)?GPU\s*=\s*(\d+)\s*$")
+_PINS_RE = re.compile(r"^(?:export\s+)?GPUS\s*=\s*(\d+(?:\s*,\s*\d+)*)\s*$")
 
 
-def read_pin(path: Path | None = None) -> int | None:
-    """The card the pin file names, or None when the file is missing or says nothing.
+def read_pin(path: Path | None = None) -> str:
+    """The card selection the file names: "1", or "1,0" for a split, or "" when it says nothing.
 
-    None is a real answer, not an error: with no GPU set, Strata's setup picks the card with
-    the most VRAM by itself. The UI has to be able to show "unpinned" rather than inventing
-    a zero.
+    A STRING, not an int, because "both cards" is a real answer here and a second card is not
+    an index. "" is also a real answer, not an error: with neither set, Strata's setup picks
+    the card with the most VRAM by itself, and the UI has to be able to say so rather than
+    inventing a zero.
+
+    GPUS wins when both are somehow present, matching the entry point, which passes --gpus
+    after --gpu and lets the later flag stand.
     """
     p = path or ENV_PATH
     try:
         text = p.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return ""
+    single = ""
     for line in text.splitlines():
-        m = _PIN_RE.match(line.strip())
+        line = line.strip()
+        m = _PINS_RE.match(line)
         if m:
-            return int(m.group(1))
-    return None
+            return ",".join(part.strip() for part in m.group(1).split(","))
+        m = _PIN_RE.match(line)
+        if m:
+            single = m.group(1)
+    return single
 
 
-def pin_in_container(attrs: dict | None) -> int | None:
-    """The card the RUNNING container was created with, from its own environment.
+def pin_in_container(attrs: dict | None) -> str:
+    """The selection the RUNNING container was created with, from its own environment.
 
     Read separately from the file on purpose. The file is what the next start will use; this
     is what the process is actually on. They differ exactly between a pin change and the
@@ -65,26 +77,37 @@ def pin_in_container(attrs: dict | None) -> int | None:
     try:
         env = ((attrs or {}).get("Config") or {}).get("Env") or []
     except AttributeError:
-        return None
+        return ""
+    single = ""
     for entry in env:
         if not isinstance(entry, str):
             continue
         key, _, val = entry.partition("=")
-        if key.strip() == "GPU" and val.strip().isdigit():
-            return int(val.strip())
-    return None
+        key, val = key.strip(), val.strip()
+        if key == "GPUS" and val:
+            return ",".join(part.strip() for part in val.split(","))
+        if key == "GPU" and val.isdigit():
+            single = val
+    return single
 
 
-def set_pin(card: int, path: Path | None = None) -> tuple[bool, str]:
-    """Rewrite the pin file to name `card`. Returns (ok, message).
+def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
+    """Rewrite the pin file to name `selection` ("1" or "1,0"). Returns (ok, message).
 
-    Rewrites the existing GPU= line in place and leaves every comment untouched, because those
-    comments are the file's explanation of why it is not HIP_VISIBLE_DEVICES - exactly the
-    thing someone reading it later needs. An append-only writer would leave two GPU= lines and
-    `sh` sourcing it would take the last; a truncating writer would throw the explanation away.
+    Rewrites the existing line in place and leaves every comment untouched, because those
+    comments are the file's record of why it is not HIP_VISIBLE_DEVICES - exactly the thing
+    someone reading it later needs. An append-only writer would leave two GPU= lines and `sh`
+    sourcing the file would take the last; a truncating writer would throw the explanation away.
+
+    Exactly one of GPU / GPUS survives. Leaving a stale GPU= beside a new GPUS= would mean the
+    file disagrees with itself, and which one won would depend on the order the entry point
+    happens to pass them.
     """
-    if card < 0:
-        return False, "card index cannot be negative"
+    cards = [c.strip() for c in str(selection).split(",") if c.strip()]
+    if not cards or not all(c.isdigit() for c in cards):
+        return False, f"not a card selection: {selection!r}"
+    if len(set(cards)) != len(cards):
+        return False, "the same card twice"
     p = path or ENV_PATH
     try:
         text = p.read_text(encoding="utf-8")
@@ -93,21 +116,29 @@ def set_pin(card: int, path: Path | None = None) -> tuple[bool, str]:
     except OSError as e:
         return False, f"cannot read {p}: {e}"
 
-    lines = text.splitlines()
-    replaced = False
-    for i, line in enumerate(lines):
-        if _PIN_RE.match(line.strip()):
-            lines[i] = f"GPU={card}"
-            replaced = True
-            break
-    if not replaced:
-        lines.append(f"GPU={card}")
+    want = f"GPU={cards[0]}" if len(cards) == 1 else "GPUS=" + ",".join(cards)
+    out: list[str] = []
+    placed = False
+    for line in text.splitlines():
+        if _PIN_RE.match(line.strip()) or _PINS_RE.match(line.strip()):
+            if not placed:          # the first pin line becomes the new one; any other is dropped
+                out.append(want)
+                placed = True
+            continue
+        out.append(line)
+    if not placed:
+        out.append(want)
 
     try:
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        p.write_text("\n".join(out) + "\n", encoding="utf-8")
     except OSError as e:
         return False, f"cannot write {p}: {e}"
-    return True, f"pinned to card {card}"
+    if len(cards) == 1:
+        return True, f"pinned to card {cards[0]}"
+    return True, (f"split across cards {', '.join(cards)} — card {cards[0]} is the main one. "
+                  "Upstream measured a split LOSING on this pair (4K prompts 1,776 -> 1,244 "
+                  "tok/s, decode ~60 -> ~51) because one 32 GB R9700 already holds every "
+                  "expert; worth measuring here, not assuming.")
 
 
 def card_count(exec_candidates=()) -> int:

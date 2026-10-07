@@ -27,14 +27,27 @@
     {% endif %}
   </div>
   {% if b.found %}
+  <div class="flex shrink-0 items-center gap-1.5">
+  {# Start / stop, not only restart. Two engines taking turns on the same cards made the
+     missing half of this an ssh session, and a llama router at --models-max 1 has no unload
+     endpoint - stopping the container is the only way to get the cards back from it. #}
+  <form hx-post="/containers/{{ b.name }}/power" hx-target="#power-out-{{ b.name }}" hx-swap="innerHTML"
+        {% if b.status == 'running' %}hx-confirm="Stop {{ b.name }}? Any in-flight completions drop and it releases its VRAM."{% endif %}>
+    <input type="hidden" name="action" value="{{ 'stop' if b.status == 'running' else 'start' }}">
+    <button class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+      {{ icon('x' if b.status == 'running' else 'play', 13) }} {{ 'Stop' if b.status == 'running' else 'Start' }}
+    </button>
+  </form>
   <button hx-post="/containers/{{ b.name }}/restart"
           hx-swap="none"
           hx-confirm="Restart {{ b.name }}? Any in-flight completions will drop; model reload can take 30–60s."
           class="inline-flex items-center gap-1.5 shrink-0 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
     {{ icon('rotate-cw', 13) }} Restart
   </button>
+  </div>
   {% endif %}
 </div>
+<div id="power-out-{{ b.name }}" class="empty:hidden mt-2"></div>
 
 {% set st = stats.get(b.name) if stats else None %}
 {% if b.found and st and st.ok %}
