@@ -2,9 +2,7 @@
 
 A browser UI for managing llama.cpp GGUF models and containers on a personal homelab box. FastAPI + HTMX + Alpine + Tailwind, no build step, one Docker container.
 
-![The Model Loader overview page: estimated power at the wall and the hottest device in the box, each with a sparkline drawn against a configured ceiling; the model currently being served with its tokens/sec, how much of its context window is in use and a line showing how much of the model is in host RAM rather than on the cards; then one panel per GPU, each breaking its VRAM into model weights, context, overhead and compute buffers alongside utilisation, temperature, power against the enforced cap and fan speed; then backend and storage summaries](docs/model_loader.png)
-
-<sub>Screenshots are refreshed less often than the app changes. This one predates the **Engine** row and the fourth hero tile described under [A second engine beside llama.cpp](#a-second-engine-beside-llamacpp).</sub>
+![The Model Loader overview page: estimated power at the wall and the hottest device in the box, each with a sparkline drawn against a configured ceiling; then the model being served — here Strata's qwen3.8-flash-next-unsloth-ud-iq4_xs, marked GENERATING — with four readouts: tokens/sec out with its own sparkline, tokens/sec in, how much of the 256k context window is in use, and this engine's expert cache hit rate at 99.9%; then one panel per GPU breaking VRAM down against utilisation, temperature, power and fan speed; then "on the cards", listing every process holding a card with its compute occupancy and per-card VRAM, an Engine row for handing the GPUs between llama.cpp and a second engine, and eject/restore chips for GPU tenants that are not backends; then backend and storage summaries](docs/model_loader.png)
 
 ## What it does
 
