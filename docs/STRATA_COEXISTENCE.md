@@ -5,6 +5,11 @@ The design and build order for letting Strata, llama.cpp and declared GPU tenant
 `feat/strata-coexistence`; `main` stays deployable and gets no commits until the feature
 is verified on the live box. Nothing is pushed until it is said so out loud.
 
+**Status: all seven phases built on the branch (commits 4fb67c6..84f7c70), unit-tested
+against fake Strata servers and fake docker objects. Live verification on this box is
+the open item — see Ground rules for why the agent cannot exercise the control paths
+itself.**
+
 ## Why the current integration stops short
 
 Strata today is a well-behaved *guest*: label discovery, a card pin, its own log reader,

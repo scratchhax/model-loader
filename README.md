@@ -259,6 +259,21 @@ startup, so starting the moment `docker stop` returns reads a stale figure and s
 fraction of the card. It polls the kernel's own per-process accounting under `/sys/class/kfd`,
 which is readable from any container.
 
+**They can also share, when the cards divide.** The soft checkbox hands a running Strata over
+by *unloading* it instead of stopping it — the same VRAM and RAM back in ~0.3 s, the container
+and page cache warm, the return trip seconds instead of a cold start — and the card grows
+**Load / Unload** buttons for exactly the state each applies to. **Share** appears when a
+running Strata is pinned to a strict subset of the cards: llama starts on the rest, nothing is
+stopped, and the fit table has already zeroed the capacity of the card Strata holds. The
+Strata card's **Time-share** fields go further: idle unload (give the cards back after N idle
+seconds), a minimum-free-VRAM floor (a 503 that says "the GPU is in use" beats dying mid-
+allocation), and a yield hook that stops the llama backends before every Strata reload so the
+reload always wins. On the RAM side, Strata's pinned expert arena is measured from its cgroup
+and subtracted from every fit budget, and the card warns inside the zone where the kernel
+would have to reclaim pinned memory — the ROCm stall zone. Declare an on-demand tenant's
+share with `ai-lab.vram-reserve-gb: "6"` on its container and the fit pool leaves it out even
+while the tenant is stopped.
+
 Backends also have **Start / Stop** beside Restart. Stopping is the only way to make a llama
 router give up its model — at `--models-max 1` it holds it until a request for a different one
 arrives, and there is no unload endpoint.
