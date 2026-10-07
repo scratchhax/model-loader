@@ -11,6 +11,16 @@
         {% else %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300{% endif %}">
         {{ b.status }}
       </span>
+      {# Engine badge, shown ONLY when it is not llama.cpp. Everything a user knows about this
+         page - models.ini sections, the autoconfig fit table, "assign to this backend" - is
+         llama.cpp's, and none of it reaches this container. An unlabelled card sitting beside
+         the llama ones is an invitation to go looking for a section that will never exist. #}
+      {% if b.engine and b.engine != 'llama' %}
+      <span class="inline-flex items-center rounded-full bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300 px-2 py-0.5 text-xs font-medium"
+            title="A different inference engine: its own model, its own placement. models.ini and autoconfig do not apply to it.">
+        {{ b.engine }}
+      </span>
+      {% endif %}
     </div>
     {% if b.found %}
     <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 truncate">{{ b.image }} · {{ b.short_id }}</div>

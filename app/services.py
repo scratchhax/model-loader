@@ -517,6 +517,15 @@ class LlamaBackend:
     # "rocm" | "cuda" | "cpu" | "unknown", from the image tag. Whether this backend can touch
     # the cards at all, which is what decides who leads the overview.
     vendor: str = ""
+    # Which inference stack this is: "llama" for every llama.cpp image, or whatever the
+    # container declares in its `ai-lab.engine` label. Strata is the first non-llama one.
+    #
+    # It exists because almost everything this app knows is llama.cpp-specific: models.ini,
+    # autoconfig's KV and compute-buffer budget, the argv vocabulary, --models-max eviction.
+    # A backend of another engine is a real backend - it holds a card, serves an OpenAI API
+    # and answers /v1/models - but none of that machinery describes it, so the code that
+    # would otherwise size it or write its arguments has to be able to ask.
+    engine: str = "llama"
 
 
 def _parse_started_at(iso: str) -> tuple[str, str]:
@@ -745,9 +754,28 @@ async def _probe_loaded_model(
         return None, f"{type(e).__name__}: {e}", None, None, None
 
 
+def _engine_label(c) -> str:
+    """The engine a container declares in its `ai-lab.engine` label, lowercased, or "".
+
+    Backends were found purely by image name, which holds exactly as long as every backend is
+    a llama.cpp tag. Strata is the first one that is not: a different stack, its own locally
+    built image, and nothing in models.ini applying to it. An explicit label is the
+    declaration. Sniffing for "strata" in an image name would be the same substring guess one
+    rung further down, and image tags are not ours to depend on.
+    """
+    try:
+        labels = ((c.attrs or {}).get("Config") or {}).get("Labels") or {}
+    except DockerException:
+        return ""
+    if not isinstance(labels, dict):
+        return ""
+    return str(labels.get("ai-lab.engine") or "").strip().lower()
+
+
 def discover_llama_containers() -> list[dict]:
-    """Return metadata for every container whose image looks like llama.cpp:server-*.
-    Includes stopped containers so the user can see and start them.
+    """Return metadata for every container that is a backend: a llama.cpp:server-* image, or
+    any container declaring an `ai-lab.engine` label. Includes stopped containers so the user
+    can see and start them.
     """
     client = _docker_client()
     if client is None:
@@ -763,10 +791,12 @@ def discover_llama_containers() -> list[dict]:
             img = (tags[0] if tags else "").lower()
         except DockerException:
             img = ""
-        if "ghcr.io/ggml-org/llama.cpp" not in img and "llama.cpp" not in img:
+        engine = _engine_label(c)
+        if not engine and "ghcr.io/ggml-org/llama.cpp" not in img and "llama.cpp" not in img:
             continue
         if c.name == "model-loader":
             continue
+        engine = engine or "llama"
         vendor = "rocm" if "rocm" in img else "cuda" if "cuda" in img else ("cpu" if "server" in img else "unknown")
         # Router or single-model server? A router is given --models-preset/--models-dir and
         # serves whatever models.ini holds; a server given -m serves exactly one file and has
@@ -779,9 +809,27 @@ def discover_llama_containers() -> list[dict]:
         except DockerException:
             cmd = []
         joined = " ".join(str(t) for t in cmd) if isinstance(cmd, list) else str(cmd)
-        is_router = "--models-preset" in joined or "--models-dir" in joined
-        out.append({"name": c.name, "image": img, "vendor": vendor, "router": is_router})
+        # Only a llama.cpp image can be a router. Another engine has no models.ini to serve
+        # and no eviction to do, so it is a one-model server by construction - the same shape
+        # as a `-m` llama server, which is exactly what `router = False` already means here.
+        is_router = engine == "llama" and ("--models-preset" in joined or "--models-dir" in joined)
+        out.append({"name": c.name, "image": img, "vendor": vendor,
+                    "router": is_router, "engine": engine})
     return out
+
+
+def engine_for(name: str) -> str:
+    """The engine of one backend by container name; "llama" when nothing says otherwise.
+
+    Defaulting to "llama" rather than "" is deliberate: every caller is llama.cpp machinery
+    asking "is this mine?", and a container that has gone missing between the snapshot and
+    the question should not silently acquire a new engine. A backend declares its way OUT of
+    llama, never into it.
+    """
+    for d in discover_llama_containers():
+        if d["name"] == name:
+            return str(d.get("engine") or "llama")
+    return "llama"
 
 
 def _effective_container_names() -> list[str]:
@@ -894,6 +942,7 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
     _discovered = discover_llama_containers()
     _routers = {d["name"]: bool(d.get("router")) for d in _discovered}
     _vendors = {d["name"]: str(d.get("vendor") or "") for d in _discovered}
+    _engines = {d["name"]: str(d.get("engine") or "llama") for d in _discovered}
 
     for i, name in enumerate(effective):
         b = LlamaBackend(name=name, found=False, status="not_found")
@@ -914,6 +963,7 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             b.sleep_idle_s = _sleep_idle_seconds(attrs)
             b.router = _routers.get(name, True)
             b.vendor = _vendors.get(name, "")
+            b.engine = _engines.get(name, "llama")
             if b.sleep_idle_s > 0 and b.status == "running":
                 b.asleep = _is_asleep(c)
         except NotFound:

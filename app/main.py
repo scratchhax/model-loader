@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from . import autoconfig
 from . import telemetry
 from . import bench, db, gguf_meta, gpu_procs, hf, hw, ini, services, vram_live
+from . import strata as strata_engine
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -1945,6 +1946,14 @@ def _backend_list() -> list[dict]:
     """
     out = []
     for bn in services._effective_container_names():
+        # Autoconfig's whole budget is llama.cpp's: GPU-resident weights, its KV cache layout,
+        # its per-card compute buffers, its argv. A backend of another engine holds a card and
+        # is a real backend, but none of those numbers describe it - Strata streams experts
+        # from host RAM against a cache it sizes itself - so listing it here would produce a
+        # confident fit table for a stack that does not work that way, and an "assign to" that
+        # writes llama arguments nothing will read.
+        if services.engine_for(bn) != "llama":
+            continue
         vram = hw.vram_gb_for(bn)
         if vram <= 0:
             continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
@@ -2377,7 +2386,69 @@ async def containers_page(request: Request) -> HTMLResponse:
         # Raw model ids a backend reports — what OpenWebUI's model_ids whitelist matches on.
         # Every llama backend serves the same models.ini, so the section names are the list.
         "all_model_ids": sorted(ini.section_names()),
+        "strata_pin": _strata_pin_state(backends),
     })
+
+
+def _strata_pin_state(backends) -> dict | None:
+    """Which card Strata is pinned to, which one it is actually running on, and the choices.
+
+    None when there is no Strata backend at all, which is the normal case on a box without
+    one and is what keeps the card out of the template.
+
+    `file` and `live` are read from different places deliberately: the file is what the next
+    start will use, `live` is what the running container was created with. They are equal
+    except between a pin change and the restart that applies it, and saying so is the whole
+    point of showing both.
+    """
+    b = next((x for x in backends if getattr(x, "engine", "llama") == strata_engine.ENGINE), None)
+    if b is None:
+        return None
+    attrs = {}
+    try:
+        client = services._docker_client()
+        if client is not None:
+            attrs = client.containers.get(b.name).attrs or {}
+    except Exception:  # noqa: BLE001 - a missing container just means no live pin to compare
+        attrs = {}
+    # Exec candidates for the topology read: this app has no /dev/kfd, so the card count comes
+    # from a container that does. Any GPU-bearing backend will answer, Strata included.
+    cands = [x.name for x in backends if x.status == "running" and x.vendor in ("rocm", "cuda")]
+    n = strata_engine.card_count(tuple(cands))
+    return {
+        "backend": b.name,
+        "file": strata_engine.read_pin(),
+        "live": strata_engine.pin_in_container(attrs),
+        "cards": list(range(n)) if n else [],
+        "running": b.status == "running",
+    }
+
+
+@app.post("/containers/{name}/strata-pin", response_class=HTMLResponse)
+def containers_strata_pin(name: str, card: int = Form(...)) -> HTMLResponse:
+    """Pin Strata to one card, and restart it so the pin takes effect.
+
+    The restart is part of the action rather than a second button because the file alone
+    changes nothing: the engine reads it at start. Leaving the user to notice that is how a
+    setting looks applied while the process is still on the old card.
+    """
+    if services.engine_for(name) != strata_engine.ENGINE:
+        return HTMLResponse(
+            '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 '
+            'px-3 py-2 text-sm">not a Strata backend</div>'
+        )
+    ok, msg = strata_engine.set_pin(card)
+    if not ok:
+        return HTMLResponse(
+            f'<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 '
+            f'px-3 py-2 text-sm">{msg}</div>'
+        )
+    services.restart_llama_backend(name)
+    return HTMLResponse(
+        f'<div class="rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 '
+        f'px-3 py-2 text-sm">{msg} — restarting {name}. It reloads ~55 GB into RAM, so give it '
+        f'a minute or two before the port answers.</div>'
+    )
 
 
 @app.post("/containers/sync-openwebui", response_class=HTMLResponse)

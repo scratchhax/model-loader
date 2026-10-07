@@ -14,6 +14,60 @@
 
     {# everything below is static — never touched by the auto-refresh above #}
 
+    {# ---- Strata: the card pin ----
+       Only this engine gets a pin control here. A llama backend's placement is a models.ini
+       question (split-mode / main-gpu / tensor-split) and belongs on the config page with the
+       rest of the section; Strata has no section, so its one placement knob is the container's
+       own and this is the only place it can live.
+
+       `file` vs `live` are shown apart because they are different facts: the file is what the
+       next start uses, `live` is the card the process is on. A pin saved but not yet restarted
+       is the one state where getting this wrong wastes real time. #}
+    {% if b.engine == 'strata' and strata_pin and strata_pin.backend == b.name %}
+    <div class="mt-4 rounded-lg border border-slate-200 dark:border-slate-800 p-3">
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">GPU pin</div>
+        <div class="text-xs text-slate-500 dark:text-slate-400">
+          {% if strata_pin.live is not none and strata_pin.running %}
+            running on <span class="font-mono text-slate-700 dark:text-slate-200">card {{ strata_pin.live }}</span>
+            {% if strata_pin.file is not none and strata_pin.file != strata_pin.live %}
+              · <span class="text-amber-700 dark:text-amber-400">card {{ strata_pin.file }} saved, needs a restart</span>
+            {% endif %}
+          {% elif strata_pin.file is not none %}
+            stopped · will start on <span class="font-mono text-slate-700 dark:text-slate-200">card {{ strata_pin.file }}</span>
+          {% else %}
+            unpinned · it picks the card with the most VRAM
+          {% endif %}
+        </div>
+      </div>
+      {% if strata_pin.cards %}
+      <form hx-post="/containers/{{ b.name }}/strata-pin"
+            hx-target="#strata-pin-out-{{ b.name }}" hx-swap="innerHTML"
+            class="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <select name="card"
+                class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 font-mono">
+          {% for c in strata_pin.cards %}
+          <option value="{{ c }}" {% if strata_pin.file == c %}selected{% endif %}>card {{ c }}</option>
+          {% endfor %}
+        </select>
+        <button class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 hover:bg-slate-50 dark:hover:bg-slate-800">
+          Pin and restart
+        </button>
+        <span class="text-slate-500 dark:text-slate-400">
+          one card only — a split pays nothing here while 32 GB holds every expert
+        </span>
+      </form>
+      {% else %}
+      <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Card list unknown: the KFD topology is only readable from a container with
+        <span class="font-mono">/dev/kfd</span>, and none is running to borrow it from.
+        Start a GPU backend and reload.
+      </p>
+      {% endif %}
+      <div id="strata-pin-out-{{ b.name }}" class="mt-2"></div>
+    </div>
+    {% endif %}
+
     {% if b.status == 'running' and b.loaded_model %}
     <details class="mt-4">
       <summary class="cursor-pointer text-xs text-slate-500 dark:text-slate-400">Test prompt</summary>

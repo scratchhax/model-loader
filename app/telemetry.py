@@ -370,6 +370,14 @@ def ingest(container_names: list[str], *, force: bool = False) -> int:
 
     total = 0
     for name in container_names:
+        # Only llama.cpp logs are parseable here. Every pattern in parse_log is a llama.cpp
+        # server line, so another engine's log is a 20k-line read per pass that can only
+        # return nothing - and `tail` plus a regex sweep over an unrelated log is exactly the
+        # shape of thing that one day matches something by accident and writes a bogus spawn
+        # record. The ingest loop also silently narrows the tail window for the backends that
+        # DO have records to find, which already bit us once.
+        if services.engine_for(name) != "llama":
+            continue
         try:
             client = services._docker_client()
             if client is None:
