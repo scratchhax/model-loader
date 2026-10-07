@@ -1004,10 +1004,15 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
 # "mtp: buffers do not fit (0 MiB of 32624 MiB VRAM free on this GPU)". Making them exclusive
 # is the only arrangement where either one gets the hardware it was configured for.
 #
-# The switch therefore stops EVERY container holding a GPU except the one being activated,
-# including GPU tenants that are not backends. Predictable beats clever: "stop everything else"
-# is a rule a user can hold in their head, where "stop just enough to fit" needs them to know
-# what each thing wants before they can predict what the button will do.
+# The switch stops every OTHER BACKEND that was given a GPU, plus any non-backend GPU tenant
+# that is actually holding VRAM right now.
+#
+# The two halves have different tests for a reason. A backend is stopped even when it holds
+# nothing, because holding nothing is its idle state and the next request would take the cards
+# straight back. A tenant is stopped only when it is measurably in the way, because plenty of
+# containers are handed /dev/kfd and allocate nothing - gpu-monitor is one, and the first
+# version of this stopped it, SIGKILLed it when its shutdown ran past the grace period, and
+# left the box without its monitoring sidecar to free zero bytes.
 
 # What the current switch is doing, for the panel to render. One at a time by construction -
 # the lock is held for the whole run, so a second request is rejected rather than interleaved.
@@ -1090,6 +1095,24 @@ def engine_switch_state() -> dict:
     return dict(_switch_state)
 
 
+def _vram_by_container() -> dict[str, float]:
+    """{container name: GB of VRAM its processes hold right now}.
+
+    From the kernel's own per-process accounting under /sys/class/kfd, which is world-readable
+    from any container. This app has no /dev/kfd and cannot run rocm-smi, and the container it
+    would otherwise exec into for that is often the one about to be stopped.
+    """
+    from . import gpu_procs
+    out: dict[str, float] = {}
+    try:
+        for t in gpu_procs.tenants():
+            if t.container:
+                out[t.container] = out.get(t.container, 0.0) + t.total_gb
+    except Exception:  # noqa: BLE001 - an unreadable topology must not wedge the switch
+        return {}
+    return out
+
+
 def _vram_held_gb(exclude: set[str]) -> float:
     """GB of VRAM held by processes belonging to containers NOT in `exclude`.
 
@@ -1122,10 +1145,19 @@ def activate_engine(engine: str) -> tuple[bool, str]:
         return False, f"already switching to {cur}"
 
     targets = set(engines[engine]["names"])
-    others = [r for r in gpu_holders() if r["name"] not in targets and r["running"]]
+    live = _vram_by_container()
+    others = []
+    skipped = []
+    for r in gpu_holders():
+        if r["name"] in targets or not r["running"]:
+            continue
+        if r["backend"] or live.get(r["name"], 0.0) > 0.005:
+            others.append(r)
+        else:
+            skipped.append(r["name"])
     _switch_state.clear()
     _switch_state.update(engine=engine, phase="stopping", msg="", t0=time.time(),
-                         stopped=[r["name"] for r in others], started=[])
+                         stopped=[r["name"] for r in others], skipped=skipped, started=[])
 
     def _run() -> None:
         try:
@@ -1170,7 +1202,9 @@ def activate_engine(engine: str) -> tuple[bool, str]:
 
     threading.Thread(target=_run, daemon=True).start()
     stopping = ", ".join(r["name"] for r in others) or "nothing"
-    return True, f"switching to {engine}: stopping {stopping}, then starting {', '.join(sorted(targets))}"
+    note = f" (left {', '.join(skipped)} alone — holding no VRAM)" if skipped else ""
+    return True, (f"switching to {engine}: stopping {stopping}, then starting "
+                  f"{', '.join(sorted(targets))}{note}")
 
 
 def set_backend_running(name: str, start: bool) -> tuple[bool, str]:
