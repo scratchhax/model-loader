@@ -38,6 +38,24 @@
       {{ icon('x' if b.status == 'running' else 'play', 13) }} {{ 'Stop' if b.status == 'running' else 'Start' }}
     </button>
   </form>
+  {# Load / Unload: the Strata lifecycle between Start and Stop. They move the same VRAM and
+     pinned RAM that Stop does, but in ~0.3 s and without losing the container or the OS page
+     cache - which is what turns handing the cards over and back from a 90 s cold start into
+     a click. Unload refuses (and says so) while a request is in flight. #}
+  {% if b.engine == 'strata' and b.status == 'running' and b.unloaded_model %}
+  <form hx-post="/containers/{{ b.name }}/strata-load" hx-target="#power-out-{{ b.name }}" hx-swap="innerHTML">
+    <button class="inline-flex items-center gap-1.5 rounded-md border border-sky-300 dark:border-sky-800 px-3 py-1.5 text-xs text-sky-700 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-950">
+      {{ icon('play', 13) }} Load
+    </button>
+  </form>
+  {% elif b.engine == 'strata' and b.status == 'running' and b.loaded_model %}
+  <form hx-post="/containers/{{ b.name }}/strata-unload" hx-target="#power-out-{{ b.name }}" hx-swap="innerHTML"
+        hx-confirm="Unload the model? VRAM and RAM go back now; the next request - or Load - brings it back in seconds.">
+    <button class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+      {{ icon('x', 13) }} Unload
+    </button>
+  </form>
+  {% endif %}
   <button hx-post="/containers/{{ b.name }}/restart"
           hx-swap="none"
           hx-confirm="Restart {{ b.name }}? Any in-flight completions will drop; model reload can take 30–60s."
@@ -48,6 +66,9 @@
   {% endif %}
 </div>
 <div id="power-out-{{ b.name }}" class="empty:hidden mt-2"></div>
+{% if strata_error %}
+<div class="mt-2 rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-xs">{{ strata_error }}</div>
+{% endif %}
 
 {% set st = stats.get(b.name) if stats else None %}
 {% if b.found and st and st.ok %}

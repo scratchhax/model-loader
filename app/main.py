@@ -2468,6 +2468,35 @@ def containers_strata_pin(name: str, card: str = Form(...)) -> HTMLResponse:
     )
 
 
+@app.post("/containers/{name}/strata-load", response_class=HTMLResponse)
+def containers_strata_load(name: str) -> HTMLResponse:
+    """Load Strata's parked model without touching the container.
+
+    The whole point of the park/load pair: a container restart re-reads ~55 GB of experts
+    and costs 90 s, while /load comes back from the OS page cache in seconds. Fire-and-
+    forget - the endpoint blocks until the model answers - so the card's own poll is what
+    shows the flip, and a refusal (usually "the GPU is in use by another program") surfaces
+    on the card via services.strata_error().
+    """
+    if services.engine_for(name) != strata_engine.ENGINE:
+        return _toast(False, "not a Strata backend")
+    ok, msg = services.strata_load(name)
+    return _toast(ok, msg)
+
+
+@app.post("/containers/{name}/strata-unload", response_class=HTMLResponse)
+def containers_strata_unload(name: str) -> HTMLResponse:
+    """Park Strata: VRAM and pinned RAM back now, container and page cache left warm.
+
+    The soft counterpart of Stop. It refuses (409) while a request is in flight rather than
+    pulling the model out from under it, which is the right answer and worth seeing.
+    """
+    if services.engine_for(name) != strata_engine.ENGINE:
+        return _toast(False, "not a Strata backend")
+    ok, msg = services.strata_unload(name)
+    return _toast(ok, msg)
+
+
 @app.post("/containers/sync-openwebui", response_class=HTMLResponse)
 def containers_sync_openwebui() -> HTMLResponse:
     ok, msg = services.sync_openwebui_endpoints()
@@ -2607,6 +2636,11 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     return templates.TemplateResponse("_container_dashboard.html", {
         "request": request, "b": b, "stats": _stats_by_name(), "perf": _perf_by_name(),
         "speed": speed, "vram_breakdown": vram_breakdown, "vb_heading": vb_heading,
+        # A failed /load or /unload (usually the 503 "the GPU is in use by another program")
+        # has nowhere else to surface: the load itself is fire-and-forget, so the card that
+        # asked is the one that has to say why it is still parked. Clears itself once the
+        # model is visibly loaded again.
+        "strata_error": services.strata_error(name, loaded=bool(b.loaded_model)),
     })
 
 
@@ -2632,15 +2666,20 @@ def gpu_tenant_power(name: str, action: str) -> HTMLResponse:
 
 
 @app.post("/engines/{engine}/activate", response_class=HTMLResponse)
-def engines_activate(engine: str) -> HTMLResponse:
-    """Hand the cards to one engine: stop everything else holding a GPU, then start it.
+def engines_activate(engine: str, soft: str = Form("")) -> HTMLResponse:
+    """Hand the cards to one engine: release everything else holding a GPU, then start it.
 
     This exists because the two engines here cannot share the hardware and the only way to
     make one let go was an ssh session. A control that needs a terminal is not a control, and
     a llama router at --models-max 1 has no unload endpoint on this build - stopping the
     container is the only thing that makes it give the cards back.
+
+    `soft` (the checkbox on the Engine row) asks backends that support it to unload instead:
+    Strata gives the same VRAM and RAM back in ~0.3 s and stays warm, so the return trip is
+    seconds. Hard remains the default because a parked server can still be woken by a stray
+    request, and "who owns the cards" deserves an answer that cannot change its mind.
     """
-    ok, msg = services.activate_engine(engine)
+    ok, msg = services.activate_engine(engine, soft=soft == "1")
     return _toast(ok, msg)
 
 

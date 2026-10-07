@@ -1225,7 +1225,7 @@ def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
     return False, f"{name} started but {url} did not answer within {int(timeout)}s"
 
 
-def activate_engine(engine: str) -> tuple[bool, str]:
+def activate_engine(engine: str, soft: bool = False) -> tuple[bool, str]:
     """Make `engine` the only thing holding the cards. Fire-and-forget; progress in _switch_state.
 
     Returns immediately because the whole sequence takes tens of seconds - stopping a router
@@ -1233,6 +1233,13 @@ def activate_engine(engine: str) -> tuple[bool, str]:
     reads ~55 GB of experts into RAM. A request that blocked on all that would time out in the
     browser long before it finished, and the GPU strip is already polling, so the panel shows
     the phases on its own.
+
+    `soft` asks each displaced backend that supports it to UNLOAD instead of stopping: today
+    that is Strata alone (a llama router at --models-max 1 has no unload endpoint, which is
+    the whole reason this switch exists). Unload gives back the same VRAM and RAM in ~0.3 s
+    and keeps the container and the OS page cache warm, so the way back costs seconds instead
+    of a 90 s cold start. The trade is that a parked-but-running server can be woken by a
+    stray request, so hard remains the default and soft is what the checkbox asks for.
     """
     engines = {e["engine"]: e for e in gpu_engines()}
     if engine not in engines:
@@ -1243,23 +1250,38 @@ def activate_engine(engine: str) -> tuple[bool, str]:
 
     targets = set(engines[engine]["names"])
     live = _vram_by_container()
+    holders = {r["name"]: r for r in gpu_holders()}
     others = []
     skipped = []
-    for r in gpu_holders():
+    for r in holders.values():
         if r["name"] in targets or not r["running"]:
             continue
         if r["backend"] or live.get(r["name"], 0.0) > 0.005:
             others.append(r)
         else:
             skipped.append(r["name"])
+    # A target that is already running is a PARKED Strata being asked back: docker start is a
+    # no-op there and /load is the ask. (A running llama target needs nothing; _wait_ready
+    # confirms it either way.)
+    running_targets = {n for n in targets if holders.get(n, {}).get("running")}
+    plan_unload = [r for r in others if soft and r["engine"] == "strata" and r["running"]]
+    plan_stop = [r for r in others if r not in plan_unload]
     _switch_state.clear()
     _switch_state.update(engine=engine, phase="stopping", msg="", t0=time.time(),
-                         stopped=[r["name"] for r in others], skipped=skipped, started=[])
+                         stopped=[r["name"] for r in plan_stop],
+                         unloaded=[r["name"] for r in plan_unload],
+                         skipped=skipped, started=[])
 
     def _run() -> None:
         try:
             from . import gpu_procs
-            for r in others:
+            for r in plan_unload:
+                ok, msg = strata_unload(r["name"])
+                if not ok:
+                    _switch_state.update(phase="failed",
+                                         msg=f"could not unload {r['name']}: {msg}")
+                    return
+            for r in plan_stop:
                 ok, msg = gpu_procs.set_container_running(r["name"], start=False)
                 if not ok:
                     _switch_state.update(phase="failed", msg=f"could not stop {r['name']}: {msg}")
@@ -1286,6 +1308,17 @@ def activate_engine(engine: str) -> tuple[bool, str]:
 
             _switch_state.update(phase="starting", msg="")
             for name in sorted(targets):
+                if name in running_targets:
+                    # Up but parked (the only way a target is both this engine's and already
+                    # running): /load is the ask, and _wait_ready below - which polls /health
+                    # on Strata - is what proves it.
+                    if engine_for(name) == "strata":
+                        ok, msg = strata_load(name)
+                        if not ok:
+                            _switch_state.update(phase="failed", msg=f"could not load {name}: {msg}")
+                            return
+                    _switch_state["started"].append(name)
+                    continue
                 ok, msg = gpu_procs.set_container_running(name, start=True)
                 if not ok:
                     _switch_state.update(phase="failed", msg=f"could not start {name}: {msg}")
@@ -1308,9 +1341,12 @@ def activate_engine(engine: str) -> tuple[bool, str]:
             _switch_lock.release()
 
     threading.Thread(target=_run, daemon=True).start()
-    stopping = ", ".join(r["name"] for r in others) or "nothing"
+    giving = " and ".join(x for x in (
+        ("unloading " + ", ".join(r["name"] for r in plan_unload)) if plan_unload else "",
+        ("stopping " + ", ".join(r["name"] for r in plan_stop)) if plan_stop else "",
+    ) if x) or "nothing"
     note = f" (left {', '.join(skipped)} alone — holding no VRAM)" if skipped else ""
-    return True, (f"switching to {engine}: stopping {stopping}, then starting "
+    return True, (f"switching to {engine}: {giving}, then starting "
                   f"{', '.join(sorted(targets))}{note}")
 
 
@@ -1355,6 +1391,110 @@ def restart_llama_backend(name: str) -> tuple[bool, str]:
 
     threading.Thread(target=_do, daemon=True, name=f"restart-{name}").start()
     return True, "restart queued"
+
+
+# ---------- Strata load control ----------
+
+# Strata's server keeps its model between two states the rest of this app has no word for:
+# loaded, and parked - port open, VRAM free, model files resident in the OS page cache,
+# seconds from serving again. POST /unload moves it to parked in ~0.3 s and gives back BOTH
+# the VRAM and the pinned expert arena; POST /load brings it back, and blocks until the
+# model answers - so the caller either waits on it or polls /health, never a browser request.
+# This is the difference between a handover that costs a container restart (~90 s, 55 GB
+# re-read) and one that costs a click.
+#
+# The Content-Type is not decoration: the server rejects anything else on these two paths
+# (415) as a CSRF guard, and checks Origin for the same reason - a plain form POST from any
+# web page must not be able to unload the model. This app sends JSON with no Origin header,
+# which is exactly what that guard lets through.
+
+_strata_errors: dict[str, str] = {}
+_strata_errors_lock = threading.Lock()
+
+
+def _strata_control(name: str, path: str, timeout: float) -> tuple[bool, str]:
+    """POST one of Strata's control endpoints. (ok, status-or-reason).
+
+    The refusals are the interesting part and each has its own shape upstream: 409 when a
+    request is running or queued (it will not unload mid-request), 503 when the GPU it would
+    load onto is busy (min_free_vram_mib) or the engine is stuck. Both are worth relaying
+    verbatim - "the GPU is in use by another program" is the coexistence answer this whole
+    feature exists to make possible.
+    """
+    client = _docker_client()
+    if client is None:
+        return False, "docker unreachable"
+    try:
+        attrs = client.containers.get(name).attrs or {}
+    except (NotFound, DockerException) as e:
+        return False, f"{name}: {e}"
+    _, port = _extract_ports(attrs)
+    if port is None:
+        return False, f"{name} exposes no API port"
+    url = f"http://{name}:{port}{path}"
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as c:
+            r = c.post(url, headers={"Content-Type": "application/json"}, content=b"{}")
+    except httpx.HTTPError as e:
+        return False, f"{url}: {e}"
+    if r.status_code == 200:
+        try:
+            return True, str((r.json() or {}).get("status") or "ok")
+        except ValueError:
+            return True, "ok"
+    if r.status_code == 409:
+        return False, "a request is running or queued - Strata will not unload mid-request"
+    if r.status_code == 503:
+        try:
+            msg = str(((r.json() or {}).get("error") or {}).get("message"))
+        except ValueError:
+            msg = "GPU busy or engine stuck"
+        return False, msg
+    return False, f"HTTP {r.status_code} from {url}"
+
+
+def strata_unload(name: str) -> tuple[bool, str]:
+    """Park a running Strata: VRAM and pinned RAM back now, container and page cache warm.
+
+    Synchronous on purpose - it takes ~0.3 s, and its two refusals (a request in flight, a
+    stuck engine) are only useful if the caller hears them right now.
+    """
+    with _strata_errors_lock:
+        _strata_errors.pop(name, None)
+    return _strata_control(name, "/unload", timeout=10.0)
+
+
+def strata_load(name: str) -> tuple[bool, str]:
+    """Load a parked Strata. Fire-and-forget.
+
+    The endpoint blocks until the model answers - seconds from the page cache, up to two
+    minutes cold - and a request that waited on that would time out in the browser long
+    before it finished. The card's own 2 s poll shows the flip; a failure (usually the 503
+    "the GPU is in use") lands in strata_error() for the card to name.
+    """
+    with _strata_errors_lock:
+        _strata_errors.pop(name, None)
+
+    def _do() -> None:
+        ok, msg = _strata_control(name, "/load", timeout=420.0)
+        with _strata_errors_lock:
+            if ok:
+                _strata_errors.pop(name, None)
+            else:
+                _strata_errors[name] = msg
+
+    threading.Thread(target=_do, daemon=True, name=f"strata-load-{name}").start()
+    return True, ("loading — seconds from the page cache, up to two minutes cold; "
+                  "the card flips when the model answers")
+
+
+def strata_error(name: str, loaded: bool = False) -> str:
+    """The last failed load/unload for this backend, "" when none. Clears itself once the
+    model is visibly loaded again, so a stale 503 cannot outlive the state that caused it."""
+    with _strata_errors_lock:
+        if loaded:
+            _strata_errors.pop(name, None)
+        return _strata_errors.get(name, "")
 
 
 def _fit_backends() -> dict[str, float]:

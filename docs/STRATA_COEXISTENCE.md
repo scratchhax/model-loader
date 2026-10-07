@@ -78,3 +78,7 @@ appears when setup's file changed underneath.
 - The running `model-loader` container is never rebuilt or restarted for development;
   verification is a throwaway `docker build` + a test container on another port.
 - One commit per phase; every commit boots the app standalone.
+- **The Strata container on this box serves the agent doing this work.** It is never
+  stopped, restarted, or sent `/unload` or `/load` during development - that takes the
+  agent offline mid-task. GET endpoints (`/health`, `/v1/models`, `/metrics`) are safe
+  to read; every control-path test runs against a fake Strata server on localhost.
