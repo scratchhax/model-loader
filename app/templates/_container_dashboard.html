@@ -74,6 +74,14 @@
   <dt class="text-slate-500 dark:text-slate-400">Loaded model</dt>
   <dd class="font-mono truncate">
     {% if b.loaded_model %}{{ b.loaded_model }}
+    {% elif b.unloaded_model %}{{ b.unloaded_model }}
+    {# Parked: the Strata counterpart of "asleep" below, and a different mechanism - the
+       server never owned the model after an unload, the files just sit in the OS page cache,
+       so coming back takes seconds, not the 90 s a container start costs. Worth saying on the
+       card because "none loaded" (what this row used to say) reads identical to an idle llama
+       router, and the two are one very different distance from serving. #}
+    <span class="ml-1 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
+          title="Parked: the server is up but holds no model, so its card VRAM is free. The model files are in the page cache - a request, or Load, brings it back in seconds.">parked</span>
     {% elif b.probe_error %}<span class="text-amber-600 dark:text-amber-400">{{ b.probe_error }}</span>
     {% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
   </dd>

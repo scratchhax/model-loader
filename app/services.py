@@ -503,6 +503,12 @@ class LlamaBackend:
     # Never folded into loaded_model: see _probe_loaded_model for why that would stop sleep
     # working at all. The next request reloads it, measured at 8.2-9.4 s on this box.
     sleeping_model: str | None = None
+    # A parked single-model server (Strata): the port answers, the model says "unloaded", the
+    # VRAM is free and the files are in the page cache - seconds from serving, one request or
+    # one POST /load away. Distinct from sleeping (which is llama's --sleep-idle-seconds, where
+    # the server still owns the model) and from an idle router (which lists every models.ini
+    # section as unloaded and is not one button from serving). See _probe_loaded_model.
+    unloaded_model: str | None = None
     last_restart_error: str | None = None
     # --sleep-idle-seconds: after this many seconds without a request the server releases its
     # model's VRAM and reloads on the next one. 0 = the flag is absent, which is llama.cpp's
@@ -660,8 +666,8 @@ def _load_failure(status: dict) -> tuple[bool, int | None]:
 
 async def _probe_loaded_model(
     container_name: str, internal_port: int | None
-) -> tuple[str | None, str | None, str | None, str | None, str | None]:
-    """(loaded_model_csv, probe_error, load_failed, loading_model, sleeping_model).
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+    """(loaded_model_csv, probe_error, load_failed, loading_model, sleeping_model, unloaded_model).
 
     loaded_model  — comma list of ids whose status is 'loaded'.
     probe_error   — a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
@@ -672,6 +678,13 @@ async def _probe_loaded_model(
     sleeping_model — a model held under --sleep-idle-seconds: the server still owns it and will
                     reload it on the next request, but its VRAM is released. Measured: 50.1 GB
                     awake, 7.3 GB asleep on this box.
+    unloaded_model — a single-model server (Strata) whose port answers while its one model says
+                    "unloaded": the VRAM is free and a request - or POST /load - brings it back
+                    in seconds, because the model files stay in the OS page cache. Only set when
+                    the server lists EXACTLY ONE model and that one says unloaded. A llama router
+                    lists every models.ini section that way, and for it "N configured, none
+                    loaded" is the honest note - a parked Strata and an idle router are different
+                    states and only one of them is one button away from serving.
 
     sleeping is kept OUT of loaded_model on purpose, and it is not a stylistic choice. Callers
     treat loaded_model as "there is something here worth probing", and the probe is /slots -
@@ -693,18 +706,19 @@ async def _probe_loaded_model(
     wire; it was being thrown away here.
     """
     if internal_port is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     url = f"http://{container_name}:{internal_port}/v1/models"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, read=3.0)) as client:
             r = await client.get(url)
             if r.status_code != 200:
-                return None, f"HTTP {r.status_code}", None, None, None
+                return None, f"HTTP {r.status_code}", None, None, None, None
             data = r.json()
             items = data.get("data") or []
             if not items:
-                return None, "no models configured", None, None, None
+                return None, "no models configured", None, None, None, None
             loaded_ids: list[str] = []
+            unloaded_ids: list[str] = []
             failure: str | None = None
             loading: str | None = None
             sleeping: str | None = None
@@ -735,23 +749,34 @@ async def _probe_loaded_model(
                     # request - early enough to cover the eviction of its predecessor, so this
                     # one field spans the whole episode the user is staring at.
                     loading = mid
+                elif val == "unloaded" and not _load_failure(status)[0]:
+                    # A FAILED llama model reads value "unloaded" too, with the flag set -
+                    # so the failure check has to keep seeing those, and only a clean
+                    # unloaded lands here.
+                    unloaded_ids.append(mid)
                 elif failure is None:
                     failed, code = _load_failure(status)
                     if failed:
                         failure = f"{mid} (exit {code})" if code is not None else mid
             if failure is not None:
                 return (", ".join(i for i in loaded_ids if i) or None, None, failure,
-                        loading, sleeping)
+                        loading, sleeping, None)
             if loaded_ids:
-                return ", ".join(i for i in loaded_ids if i), None, None, loading, sleeping
+                return ", ".join(i for i in loaded_ids if i), None, None, loading, sleeping, None
             # "none loaded" is the honest note only when nothing is on its way in and nothing is
             # merely asleep. Either of those read as an idle box, which is the confusion this
             # whole function keeps being wrong about.
             if loading or sleeping:
-                return None, None, None, loading, sleeping
-            return None, f"{len(items)} configured, none loaded", None, None, None
+                return None, None, None, loading, sleeping, None
+            # One model, and it says unloaded: that is not an idle router with an ini full of
+            # candidates, it is a parked single-model server - VRAM free, files in the page
+            # cache, seconds from serving. Saying "1 configured, none loaded" made it read as
+            # the router case and hid the one fact that distinguishes them.
+            if len(items) == 1 and len(unloaded_ids) == 1:
+                return None, None, None, None, None, unloaded_ids[0]
+            return None, f"{len(items)} configured, none loaded", None, None, None, None
     except (httpx.HTTPError, ValueError) as e:
-        return None, f"{type(e).__name__}: {e}", None, None, None
+        return None, f"{type(e).__name__}: {e}", None, None, None, None
 
 
 def _engine_label(c) -> str:
@@ -1004,13 +1029,14 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             *[_probe_loaded_model(n, p) for _, n, p in probe_targets],
             return_exceptions=False,
         )
-        for (i, _n, _p), (loaded, err, failed, loading, sleeping) in zip(probe_targets, results):
+        for (i, _n, _p), (loaded, err, failed, loading, sleeping, unloaded) in zip(probe_targets, results):
             out[i].loaded_model = loaded
             out[i].probe_error = err
             out[i].load_failed = failed
             out[i].loading_model = loading
             out[i].loading_since = _note_loading(out[i].name, loading)
             out[i].sleeping_model = sleeping
+            out[i].unloaded_model = unloaded
             # The router's own word beats the log scrape. _is_asleep reads the last sleep marker
             # out of `docker logs`, which is a guess that goes stale the moment the log rotates
             # or the marker scrolls past the tail; this is the server stating its current status.
@@ -1154,7 +1180,7 @@ def _vram_held_gb(exclude: set[str]) -> float:
 
 
 def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
-    """Poll one backend's /v1/models until it answers 200. (ready, note).
+    """Poll one backend until it is actually serving. (ready, note).
 
     `docker start` returning is not "serving", and the gap is not small: Strata reads ~55 GB of
     experts into RAM before its port opens - measured at 90 s here - and a llama router is 10-40 s
@@ -1162,10 +1188,14 @@ def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
     seeing "done", finding nothing on the port and concluding it had not worked. That is exactly
     what happened.
 
-    /v1/models rather than /health, because it is the one endpoint both engines answer the same
-    way: llama.cpp's /health returns 503 "Loading model" while loading (and curl does not fail on
-    a 503, so a naive poll measures a model mid-load), while Strata does not open the port at all
-    until the model is in. A 200 from /v1/models means serving on both.
+    The question is per-engine, because "200" means different things. On llama it is /v1/models:
+    llama.cpp's /health returns 503 "Loading model" while loading (and curl does not fail on a
+    503, so a naive poll measures a model mid-load), while /v1/models only answers once the
+    router is up. On Strata it is /health, because /v1/models answers 200 with the model listed
+    as "unloaded" - a 200 there can mean "up and serving nothing", which is precisely the state a
+    POST /load passes through on its way to loaded. /health carries the one bool that settles it
+    ({"loaded": true}), and during a cold start the port is closed until the model is in, so the
+    same poll covers cold start and warm /load alike.
     """
     client = _docker_client()
     if client is None:
@@ -1177,18 +1207,20 @@ def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
     _, port = _extract_ports(attrs)
     if port is None:
         return True, f"{name} exposes no API port — not waiting"
-    url = f"http://{name}:{port}/v1/models"
+    strata = engine_for(name) == "strata"
+    url = f"http://{name}:{port}/{'health' if strata else 'v1/models'}"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
-                if c.get(url).status_code == 200:
+                r = c.get(url)
+                if r.status_code == 200 and (not strata or bool(r.json().get("loaded"))):
                     return True, ""
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ValueError):
             pass
         _switch_state.update(phase="loading",
                              msg=f"{name} up {int(time.time() - _switch_state.get('t0', time.time()))}s, "
-                                 "port not answering yet")
+                                 + ("model not loaded yet" if strata else "port not answering yet"))
         time.sleep(2.0)
     return False, f"{name} started but {url} did not answer within {int(timeout)}s"
 
@@ -2128,7 +2160,7 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
         return {"ok": False, "err": "container not reachable"}
 
     # discover a loaded model id first
-    loaded, err, _failed, loading, sleeping = await _probe_loaded_model(
+    loaded, err, _failed, loading, sleeping, unloaded = await _probe_loaded_model(
         container_name, internal_port)
     if not loaded:
         if loading:
@@ -2137,6 +2169,12 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
             # Deliberately not woken here: a test prompt is a diagnostic, and silently paying a
             # 9 s reload to answer one would hide the very state the caller wants to know about.
             loaded = sleeping
+        elif unloaded:
+            # Same reasoning as sleeping: a request WOULD load it (measured 4.6 s warm), but a
+            # diagnostic that silently pays a reload - or a 503 when another engine holds the
+            # card - reports the wrong thing. Name the state; let the caller decide to pay.
+            return {"ok": False, "err": f"{unloaded} is unloaded - the server is up but holds "
+                                        "no model; press Load or send a real request"}
         return {"ok": False, "err": err or "no model loaded on this backend"}
     model_id = loaded.split(",")[0].strip()
 
