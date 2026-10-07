@@ -4,6 +4,8 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 
 ![The Model Loader overview page: estimated power at the wall and the hottest device in the box, each with a sparkline drawn against a configured ceiling; the model currently being served with its tokens/sec, how much of its context window is in use and a line showing how much of the model is in host RAM rather than on the cards; then one panel per GPU, each breaking its VRAM into model weights, context, overhead and compute buffers alongside utilisation, temperature, power against the enforced cap and fan speed; then backend and storage summaries](docs/model_loader.png)
 
+<sub>Screenshots are refreshed less often than the app changes. This one predates the **Engine** row and the fourth hero tile described under [A second engine beside llama.cpp](#a-second-engine-beside-llamacpp).</sub>
+
 ## What it does
 
 - **Search + download GGUFs from Hugging Face** — parallel-range downloader (8 chunks by default), live per-chunk speed sparklines, resume-on-restart, HF token stored locally for gated repos.
@@ -212,6 +214,69 @@ If you don't have a compose file yet, the **Containers** page has ready-made ser
 ![The Add another backend panel: a warning that inference flags on the container command line override models.ini, above tabs for NVIDIA CUDA, AMD ROCm, CPU only and Vulkan, each with a copyable compose service block](docs/add_a_backend.png)
 
 The panel repeats the warning above, because it is the mistake that costs the most time: flags like `-ngl`, `-fa`, `-ctk`, `-np` and `-sm` on the container command line **override** `models.ini` rather than acting as defaults, and a preset that disagrees is silently discarded. Keep the command to `--models-preset`, `--host`, `--port` and `--models-max`, and set everything per-model in the config form.
+
+### A second engine beside llama.cpp
+
+Everything above is llama.cpp. A backend of a **different inference engine** can sit beside it,
+and the app treats it as a real backend — VRAM meters, loaded-model probe, per-process GPU
+attribution, logs, lifecycle — while keeping it out of the machinery that is llama-specific.
+
+Declare it with a label. Discovery used to key on the image name, which holds exactly as long as
+every backend is a llama.cpp tag:
+
+```yaml
+  strata:
+    image: ai-lab/strata:rocm7       # whatever you built or pulled
+    labels:
+      ai-lab.engine: strata          # this is what makes it a backend
+    restart: "no"                    # see below
+    devices: [/dev/kfd, /dev/dri]
+    ports: ["8085:8080"]
+```
+
+The engine only has to serve an OpenAI-compatible `/v1/models`. If it reports `status.value` per
+model the way llama-server's router does, the loaded-model probe works with no further code.
+
+**What it is excluded from, and why:**
+
+| | |
+|---|---|
+| **Autoconfig** | Its fit table budgets llama.cpp's GPU-resident weights, KV layout and per-card compute buffers. Another engine does not allocate that way, so sizing it there would print a confident table for a stack that does not work like that — and an "assign to" that writes arguments nothing reads. |
+| **Telemetry** | Every pattern in the log parser is a llama.cpp server line. |
+| **`models.ini`** | A non-llama engine has no section. The container card carries a coloured engine badge precisely so an unlabelled card beside the llama ones does not send you hunting for one. |
+
+**Per-engine token rates.** The speedometer reads each engine's own log, dispatched on the label.
+An engine whose log is not understood reports no rates rather than guessing. If it exposes a
+metric llama has no equivalent for — an expert cache hit rate, say — it can earn its own hero
+tile.
+
+**Engines take turns on the cards.** Two inference engines generally cannot share GPUs: a
+llama.cpp router at `--models-max 1` holds its model until something evicts it, and an engine
+that sizes a cache against *free* VRAM at startup gets whatever is left. The overview's **Engine**
+row makes one of them the owner — it stops every other container holding a GPU, **waits for the
+driver to actually release the VRAM**, then starts that engine's backends.
+
+That wait is the part that matters. Both kinds of engine size themselves against free VRAM at
+startup, so starting the moment `docker stop` returns reads a stale figure and silently gets a
+fraction of the card. It polls the kernel's own per-process accounting under `/sys/class/kfd`,
+which is readable from any container.
+
+Backends also have **Start / Stop** beside Restart. Stopping is the only way to make a llama
+router give up its model — at `--models-max 1` it holds it until a request for a different one
+arrives, and there is no unload endpoint.
+
+**`restart: "no"` is usually right for the guest engine.** If it needs a card something else has
+to give up first, failing to start is its *normal* failure and retrying is always wrong — an
+engine that reads tens of gigabytes before discovering there is no room will do it again on every
+restart, evicting page cache belonging to the backend that holds the card. Stop and eject still
+work under `no`; what you give up is coming back by itself after a reboot, which you did not want
+here anyway.
+
+**Config the app owns.** A setting that belongs to the engine rather than to a model — which card
+it is pinned to, for instance — can live in an env file the app is the only writer of, the same
+relationship it has with `models.ini`. Point the service at it with `env_file:` **and** re-read it
+from the entry point on every start: compose bakes `env_file` in at *create* time, so without the
+second half a change needs a recreate and a plain restart silently keeps the old value.
 
 ## Install
 
