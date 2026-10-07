@@ -48,13 +48,15 @@ appears when setup's file changed underneath.
 
 ## Phases
 
-- [ ] **1. Load-state awareness.** `_probe_loaded_model` learns `unloaded` as a distinct
+- [x] **1. Load-state awareness.** `_probe_loaded_model` learns `unloaded` as a distinct
       state ("parked — loads in seconds") instead of "1 configured, none loaded"; the
       Strata card shows it; `_wait_ready` polls `/health` `"loaded"` for Strata because
-      `/v1/models` answers 200 while unloaded.
-- [ ] **2. Load/Unload without losing the page cache.** `POST /containers/{name}/strata-load|unload`
+      `/v1/models` answers 200 while unloaded. (commit 4fb67c6)
+- [x] **2. Load/Unload without losing the page cache.** `POST /containers/{name}/strata-load|unload`
       routes + card buttons; the Engine switch gains a soft variant (unload + kfd drain
-      wait, container stays warm).
+      wait, container stays warm); a parked target is asked back with /load instead of a
+      no-op docker start; refusals surface on the card via `services.strata_error()`.
+      (commit e024926)
 - [ ] **3. Config JSON ownership.** merge writer in `app/strata.py` (atomic replace,
       rolling backups, the `ini.py` pattern), `CONFIG=` line in the env file, drift note.
 - [ ] **4. Card split.** when Strata is pinned/running on card N, autoconfig zeroes card N
