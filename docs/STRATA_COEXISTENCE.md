@@ -84,9 +84,11 @@ does not yet say what the settings say.
       queues) on a 10 s TTL; `usable_ram_gb` and the fit table's `host_ram_gb` subtract it;
       the hero shows "X GB RAM (Y pinned by strata)"; the card warns inside the reclaim-
       stall zone (arena pinned and MemAvailable under 8 GB).
-- [ ] **7. Polish.** speedometer/hero from `GET /metrics` (log regex demoted to fallback);
-      Open WebUI sync registers Strata opt-in with known-ids from its own `/v1/models`;
-      `ai-lab.vram-reserve-gb` label so declared tenants are subtracted from fit budgets.
+- [x] **7. Polish.** speedometer reads `GET /metrics` (tok_s, decode_tok_s, hit_rate,
+      monotonic completed count) with the log regex demoted to fallback for old engines;
+      Open WebUI sync registers Strata only when its container carries `ai-lab.openwebui=1`
+      and counts Strata's own `/v1/models` ids as known; `ai-lab.vram-reserve-gb` on any
+      container subtracts a declared on-demand tenant's share from the fit pool.
 
 ## Ground rules
 

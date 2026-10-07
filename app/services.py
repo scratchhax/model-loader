@@ -1425,6 +1425,58 @@ def restart_llama_backend(name: str) -> tuple[bool, str]:
 _strata_errors: dict[str, str] = {}
 _strata_errors_lock = threading.Lock()
 
+# /metrics is read on the speedometer's 2 s cadence; a 2 s TTL means each poll costs at
+# most one request even when several panels want it in the same tick.
+_strata_metrics_cache: dict[str, tuple[float, "dict | None"]] = {}
+
+
+def strata_metrics(name: str) -> dict | None:
+    """GET /metrics as a dict, cached for 2 seconds; None when it does not answer.
+
+    The speedometer used to scrape Strata's log because that was the only place the rates
+    lived. /metrics carries the same numbers as data - tok_s while generating,
+    decode_tok_s and hit_rate for the last request, a monotonic completed count - and
+    unlike a log regex it cannot drift out of date when the log format moves.
+    """
+    now = time.time()
+    t, val = _strata_metrics_cache.get(name, (0.0, None))
+    if now - t < 2.0:
+        return val
+    val = None
+    client = _docker_client()
+    if client is not None:
+        try:
+            attrs = client.containers.get(name).attrs or {}
+            _, port = _extract_ports(attrs)
+            if port is not None:
+                with httpx.Client(timeout=httpx.Timeout(2.0)) as c:
+                    r = c.get(f"http://{name}:{port}/metrics")
+                if r.status_code == 200:
+                    val = r.json()
+        except (NotFound, DockerException, httpx.HTTPError, ValueError):
+            val = None
+    _strata_metrics_cache[name] = (now, val)
+    return val
+
+
+def strata_model_ids(name: str) -> list[str]:
+    """The model ids a running Strata serves, from its own /v1/models. [] when unreachable."""
+    client = _docker_client()
+    if client is None:
+        return []
+    try:
+        attrs = client.containers.get(name).attrs or {}
+        _, port = _extract_ports(attrs)
+        if port is None:
+            return []
+        with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
+            r = c.get(f"http://{name}:{port}/v1/models")
+        if r.status_code != 200:
+            return []
+        return [str(m.get("id")) for m in (r.json() or {}).get("data") or [] if m.get("id")]
+    except (NotFound, DockerException, httpx.HTTPError, ValueError):
+        return []
+
 
 def _strata_control(name: str, path: str, timeout: float) -> tuple[bool, str]:
     """POST one of Strata's control endpoints. (ok, status-or-reason).
@@ -1585,14 +1637,44 @@ def strata_yield() -> str:
     return "stopped " + ", ".join(stopped) if stopped else "nothing to stop"
 
 
+def declared_reserves_gb() -> float:
+    """Sum of `ai-lab.vram-reserve-gb` labels over every container, running or not.
+
+    A declared tenant (chatterbox, comfyui) is on-demand: it holds nothing most of the
+    time, and the label's whole point is that its share stays reserved while it is stopped,
+    so llama's fit never takes the last free GB and then has to evict the tenant that
+    starts next. The container declares what it needs; the fit math believes it.
+    """
+    client = _docker_client()
+    if client is None:
+        return 0.0
+    total = 0.0
+    try:
+        for c in client.containers.list(all=True):
+            raw = ((c.labels or {}).get("ai-lab.vram-reserve-gb") or "").strip()
+            if not raw:
+                continue
+            try:
+                total += max(0.0, float(raw))
+            except ValueError:
+                continue
+    except DockerException:
+        return 0.0
+    return round(total, 1)
+
+
 def _fit_backends() -> dict[str, float]:
     """{backend_name: total VRAM GiB} for everything we can actually plan against.
 
     Prefers the live probe over settings.gpu_vram_map. The static map is an optional
     override and is empty by default — relying on it alone silently disabled the fit
     chips entirely once the hardcoded example values were removed.
+
+    Declared tenant reserves (ai-lab.vram-reserve-gb) come off the pool: the number a
+    plan may spend, not the number the card has.
     """
     from . import hw
+    reserves = declared_reserves_gb()
     out: dict[str, float] = {}
     for name in _effective_container_names():
         vram = float(settings.gpu_vram_map.get(name, 0) or 0)
@@ -1601,7 +1683,7 @@ def _fit_backends() -> dict[str, float]:
             if st.ok and st.gpu and st.gpu.vram_total_gb > 0:
                 vram = float(st.gpu.vram_total_gb)
         if vram > 0:
-            out[name] = vram
+            out[name] = round(max(0.0, vram - reserves), 1)
     return out
 
 
@@ -2078,6 +2160,35 @@ def _rates_from_log_strata(name: str) -> dict:
            "cur_pp_done": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
            "open_task": None, "open_slot": 0, "expert_hit_pct": None}
+
+    # /metrics first: the same numbers as data instead of as prose. The log scrape below
+    # stays as the fallback for a Strata too old to have the endpoint.
+    m = strata_metrics(name)
+    if m:
+        live = m.get("live") or {}
+        last = (m.get("requests") or [{}])[0]
+        totals = m.get("totals") or {}
+        state = live.get("state") or "idle"
+        out["cur_gen_tps"] = float(live.get("tok_s") or 0.0)
+        out["cur_gen_tokens"] = int(live.get("generated") or 0)
+        if state == "reading":
+            out["cur_pp_tps"] = float(live.get("prefill_tok_s_mean") or 0.0)
+            pt, pr = live.get("prompt_total"), live.get("prompt_read")
+            if pt:
+                out["cur_pp_pct"] = round(100.0 * (pr or 0) / pt)
+                out["cur_pp_done"] = int(pr or 0)
+        out["last_gen_tps"] = float(last.get("decode_tok_s") or 0.0)
+        out["last_gen_tokens"] = int(last.get("output_tokens") or 0)
+        if last.get("prompt_ms"):
+            out["last_pp_tps"] = round((last.get("prompt_tokens") or 0)
+                                       / (last["prompt_ms"] / 1000.0), 1)
+        hr = last.get("hit_rate")
+        out["expert_hit_pct"] = round(hr * 100.0, 1) if isinstance(hr, (int, float)) else None
+        n = totals.get("requests")
+        out["open_task"] = str(n) if n is not None else None
+        out["newest"] = state
+        return out
+
     ok, text = container_logs(name, tail=400, current_run_only=True)
     if not ok:
         return out
@@ -2552,6 +2663,26 @@ def openwebui_state() -> dict:
         if not any(u in current_urls for u in candidate_urls):
             missing.append({"name": d["name"], "vendor": d.get("vendor", ""), "url": candidate_urls[0]})
 
+    # A non-llama engine is not a router and never appears in discover_llama_containers, so
+    # it joins the missing list only when its container says so: ai-lab.openwebui=1 is the
+    # opt-in. Strata serves one real chat model out of a 60 GB arena; whether that belongs
+    # in the chat picker is a decision, not a discovery.
+    for c in client.containers.list(all=True):
+        labels = c.labels or {}
+        if (labels.get("ai-lab.engine") or "").strip().lower() != strata_engine.ENGINE:
+            continue
+        if (labels.get("ai-lab.openwebui") or "").strip().lower() not in ("1", "true", "yes", "on"):
+            continue
+        port = next((e.split("=", 1)[1] for e in
+                     ((c.attrs.get("Config") or {}).get("Env") or [])
+                     if e.startswith("PORT=")), "8080") or "8080"
+        candidate_urls = [f"http://{c.name}:{port}/v1"]
+        svc = _compose_service_of(client, c.name)
+        if svc:
+            candidate_urls.append(f"http://{svc}:{port}/v1")
+        if not any(u in current_urls for u in candidate_urls):
+            missing.append({"name": c.name, "vendor": strata_engine.ENGINE, "url": candidate_urls[0]})
+
     # Detect stale entries — URLs pointing at compose-local hosts that no longer exist
     valid_hosts: set[str] = set()
     try:
@@ -2601,6 +2732,12 @@ def openwebui_state() -> dict:
     # what it renders — so the model appears in the picker and then fails with "model not
     # found" on first use. That is invisible from both ends unless something names it here.
     known_ids = set(ini.section_names())
+    # A Strata connection's whitelist ids are its own /v1/models, not ini sections - without
+    # them every Strata model id reads as unknown here while working fine in the picker.
+    for c in client.containers.list(all=True):
+        if ((c.labels or {}).get("ai-lab.engine") or "").strip().lower() == strata_engine.ENGINE \
+                and c.status == "running":
+            known_ids.update(strata_model_ids(c.name))
     conns: list[dict] = []
     for i, u in enumerate(current_urls):
         c = cfgs.get(str(i)) or {}
