@@ -259,6 +259,20 @@
         {%- if e.running %} <span class="text-[10px] text-fuchsia-400/70">active</span>{% endif %}
       </button>
       </form>
+      {# Share: start this engine, displace nothing. Offered only when the cards divide -
+         the note names the division, because a button that silently OOMs one engine is
+         worse than no button, and the honest note is what makes clicking it informed. #}
+      {% if not e.running and share and share.get(e.engine) %}
+      <form class="contents"
+            hx-post="/engines/{{ e.engine }}/activate"
+            hx-target="#engine-switch-toast" hx-swap="innerHTML"
+            hx-confirm="Share the cards? {{ e.names|join(', ') }} starts and nothing is stopped — {{ share[e.engine] }}.">
+      <button class="inline-flex items-center rounded-lg border border-emerald-800 bg-emerald-950/30 px-2 py-1.5 text-[10px] font-mono text-emerald-300 hover:bg-emerald-900/40"
+              title="Starts {{ e.names|join(', ') }} without stopping or unloading anything: {{ share[e.engine] }}.">
+        share
+      </button>
+      </form>
+      {% endif %}
       {% endfor %}
       {#
         The phase is shown for everything except 'done'. 'loading' is the one that earns its

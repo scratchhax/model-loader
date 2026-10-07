@@ -17,6 +17,7 @@ from docker.errors import APIError, DockerException, NotFound
 
 from . import ini
 from . import diagnose
+from . import strata as strata_engine
 from .config import settings
 from .utils import human_bytes, shard_key
 
@@ -1225,7 +1226,7 @@ def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
     return False, f"{name} started but {url} did not answer within {int(timeout)}s"
 
 
-def activate_engine(engine: str, soft: bool = False) -> tuple[bool, str]:
+def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tuple[bool, str]:
     """Make `engine` the only thing holding the cards. Fire-and-forget; progress in _switch_state.
 
     Returns immediately because the whole sequence takes tens of seconds - stopping a router
@@ -1240,6 +1241,12 @@ def activate_engine(engine: str, soft: bool = False) -> tuple[bool, str]:
     and keeps the container and the OS page cache warm, so the way back costs seconds instead
     of a 90 s cold start. The trade is that a parked-but-running server can be woken by a
     stray request, so hard remains the default and soft is what the checkbox asks for.
+
+    `share` displaces nothing: it starts the engine's backends and leaves every other holder
+    exactly where it is. That is only honest when the cards are actually dividable - the
+    caller decides when to offer it (a running Strata pinned to one card leaves the other
+    for llama) - and the fit table has already been sized against the remaining cards, so
+    the start is not a gamble.
     """
     engines = {e["engine"]: e for e in gpu_engines()}
     if engine not in engines:
@@ -1253,8 +1260,12 @@ def activate_engine(engine: str, soft: bool = False) -> tuple[bool, str]:
     holders = {r["name"]: r for r in gpu_holders()}
     others = []
     skipped = []
+    shared = []
     for r in holders.values():
         if r["name"] in targets or not r["running"]:
+            continue
+        if share:
+            shared.append(r["name"])
             continue
         if r["backend"] or live.get(r["name"], 0.0) > 0.005:
             others.append(r)
@@ -1270,7 +1281,7 @@ def activate_engine(engine: str, soft: bool = False) -> tuple[bool, str]:
     _switch_state.update(engine=engine, phase="stopping", msg="", t0=time.time(),
                          stopped=[r["name"] for r in plan_stop],
                          unloaded=[r["name"] for r in plan_unload],
-                         skipped=skipped, started=[])
+                         shared=shared, skipped=skipped, started=[])
 
     def _run() -> None:
         try:
@@ -1346,6 +1357,9 @@ def activate_engine(engine: str, soft: bool = False) -> tuple[bool, str]:
         ("stopping " + ", ".join(r["name"] for r in plan_stop)) if plan_stop else "",
     ) if x) or "nothing"
     note = f" (left {', '.join(skipped)} alone — holding no VRAM)" if skipped else ""
+    if share:
+        with_ = f", leaving {', '.join(sorted(shared))} up" if shared else ""
+        return True, f"sharing the cards: starting {', '.join(sorted(targets))}{with_}"
     return True, (f"switching to {engine}: {giving}, then starting "
                   f"{', '.join(sorted(targets))}{note}")
 
@@ -1495,6 +1509,29 @@ def strata_error(name: str, loaded: bool = False) -> str:
         if loaded:
             _strata_errors.pop(name, None)
         return _strata_errors.get(name, "")
+
+
+def strata_held_cards() -> tuple[int, ...]:
+    """The cards a RUNNING Strata backend holds, per its own container environment. () when
+    no Strata runs, or it runs unpinned.
+
+    The container's environment and not the pin file: the file is what the next start will
+    use, and a fit table that zeroed out cards the running process never took would be
+    sizing against a claim instead of a fact. Empty on any failure - whole cards are the
+    conservative answer when the truth is unknown, and it is the answer the app gave before
+    Strata existed at all.
+    """
+    try:
+        client = _docker_client()
+        if client is None:
+            return ()
+        for c in client.containers.list(filters={"label": f"ai-lab.engine={strata_engine.ENGINE}"}):
+            sel = strata_engine.pin_in_container(c.attrs)
+            if sel:
+                return tuple(int(x) for x in sel.split(","))
+    except Exception:  # noqa: BLE001
+        return ()
+    return ()
 
 
 def _fit_backends() -> dict[str, float]:

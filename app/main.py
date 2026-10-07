@@ -617,9 +617,49 @@ def _gpu_strip_context() -> dict:
             # a 503 from a service that looks like it started fine.
             tight=bool(not row["running"] and want > 0.005 and free_gb < want * 1.15),
             free_gb=free_gb))
+    engines = services.gpu_engines()
     return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
             "tenants": _tenant_rows(tenants, cards), "ejectable": ejectable,
-            "engines": services.gpu_engines(), "engine_switch": services.engine_switch_state()}
+            "engines": engines, "engine_switch": services.engine_switch_state(),
+            "share": _share_options(engines, cards)}
+
+
+def _share_options(engines: list, cards: list) -> dict[str, str]:
+    """Engines that could start without displacing anyone, each with its honest one-liner.
+
+    Sharing is on the table only when the cards demonstrably divide:
+
+      * a running Strata pinned to a strict subset of the cards leaves the rest for llama -
+        the pin is read from the container's own environment, so it names what the process
+        actually holds, not what a file once said it would;
+      * a stopped Strata whose pin file names one card can join a running llama - it sizes
+        its expert cache against free VRAM at start, so the pin is the whole contract, and
+        until min_free_vram_mib is set a wrong pin means a failed start, not a squeeze.
+
+    Anything else - Strata across both cards, an unpinned Strata, a llama whose card
+    membership is not readable from outside - shares nothing and gets no button, because a
+    Share that silently OOMs one engine is worse than no button.
+    """
+    running = [e for e in engines if e["running"]]
+    n = len(cards)
+    if len(running) != 1 or n < 2:
+        return {}
+    out: dict[str, str] = {}
+    if running[0]["engine"] == strata_engine.ENGINE:
+        held = services.strata_held_cards()
+        if held and len(held) < n and all(0 <= h < n for h in held):
+            note = f"card {'+'.join(str(h) for h in held)} stays with strata"
+            for e in engines:
+                if not e["running"]:
+                    out[e["engine"]] = note
+    elif running[0]["engine"] == "llama":
+        pin = strata_engine.read_pin()
+        if pin.isdigit() and "," not in pin and int(pin) < n:
+            for e in engines:
+                if not e["running"] and e["engine"] == strata_engine.ENGINE:
+                    out[e["engine"]] = (f"strata takes card {pin} and sizes itself against "
+                                        "that card's free VRAM at start")
+    return out
 
 
 def _tenant_rows(tenants: list, cards: list) -> list[dict]:
@@ -1438,6 +1478,23 @@ _QUEUED_CHIP = (
 )
 
 
+def _fit_card_vram(bn: str) -> list[float]:
+    """Per-card VRAM for the fit table, with the cards a running Strata holds zeroed out.
+
+    The table is a promise about placement, and a card whose VRAM is spoken for by another
+    engine's expert cache is not available for llama layers no matter what the free figure
+    says - "free" on that card is Strata's next expert, not llama's next layer. Zeroing the
+    cap rather than shrinking it keeps the arithmetic honest downstream: _split_feasible
+    fills cards in order and a zero-cap card simply takes no layers, which is exactly the
+    placement llama's own fitter will also arrive at once it sees the card is full.
+    """
+    caps = hw.card_vram_gb_for(bn)
+    held = services.strata_held_cards()
+    if not held or not caps:
+        return caps
+    return [0.0 if i in held else c for i, c in enumerate(caps)]
+
+
 def _preset_estimates(summary: dict, size_bytes: int, mmproj_gb: float = 0.0) -> list[dict]:
     """Fast / Balanced / Long-ctx context estimates for a model we have NOT downloaded.
 
@@ -1450,7 +1507,7 @@ def _preset_estimates(summary: dict, size_bytes: int, mmproj_gb: float = 0.0) ->
     for name, vram in services._fit_backends().items():
         backends.append({
             "name": name, "vendor": "cuda", "vram_gb": vram,
-            "gpu_count": hw.gpu_count_for(name), "card_vram_gb": hw.card_vram_gb_for(name),
+            "gpu_count": hw.gpu_count_for(name), "card_vram_gb": _fit_card_vram(name),
             "host_ram_gb": hw.host_ram_gb(),
             "baseline": {},
         })
@@ -2017,7 +2074,7 @@ def _backend_list() -> list[dict]:
         cmd = _container_baseline(bn)
         base = autoconfig.parse_baseline(cmd) if cmd else {}
         out.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
-                    "gpu_count": hw.gpu_count_for(bn), "card_vram_gb": hw.card_vram_gb_for(bn),
+                    "gpu_count": hw.gpu_count_for(bn), "card_vram_gb": _fit_card_vram(bn),
                     "host_ram_gb": hw.host_ram_gb(),
                     "baseline": base})
     return out
@@ -2707,7 +2764,7 @@ def gpu_tenant_power(name: str, action: str) -> HTMLResponse:
 
 
 @app.post("/engines/{engine}/activate", response_class=HTMLResponse)
-def engines_activate(engine: str, soft: str = Form("")) -> HTMLResponse:
+def engines_activate(engine: str, soft: str = Form(""), share: str = Form("")) -> HTMLResponse:
     """Hand the cards to one engine: release everything else holding a GPU, then start it.
 
     This exists because the two engines here cannot share the hardware and the only way to
@@ -2719,8 +2776,12 @@ def engines_activate(engine: str, soft: str = Form("")) -> HTMLResponse:
     Strata gives the same VRAM and RAM back in ~0.3 s and stays warm, so the return trip is
     seconds. Hard remains the default because a parked server can still be woken by a stray
     request, and "who owns the cards" deserves an answer that cannot change its mind.
+
+    `share` (the Share button, offered only when a running engine demonstrably holds a
+    strict subset of the cards) starts this engine and displaces nothing - the cards are
+    divided, not handed over.
     """
-    ok, msg = services.activate_engine(engine, soft=soft == "1")
+    ok, msg = services.activate_engine(engine, soft=soft == "1", share=share == "1")
     return _toast(ok, msg)
 
 

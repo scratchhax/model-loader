@@ -68,9 +68,11 @@ does not yet say what the settings say.
       start, drift note on the card. No `CONFIG=` env line — the image has no such hook;
       the app writes the coexistence keys into setup's own run config, which upstream
       keeps across re-setups (#629).
-- [ ] **4. Card split.** when Strata is pinned/running on card N, autoconfig zeroes card N
-      in `card_caps` so llama placement never touches it; Engine row gains a **Share**
-      action that starts both engines and stops neither.
+- [x] **4. Card split.** when Strata is running on card N, autoconfig sees card N's capacity
+      as zero (`_fit_card_vram`) so llama placement never counts it; the Engine row gains a
+      **Share** button — offered only when the cards demonstrably divide (running Strata on
+      a strict subset, or a stopped Strata pinned to one card beside a running llama) —
+      that starts the engine and stops neither.
 - [ ] **5. Time-share mode (opt-in).** app-managed `min_free_vram_mib` (503 beats OOM),
       `idle_unload_s` (auto give-back), and `before_load` → `POST /internal/yield` on
       model-loader, which stops the llama container so Strata's reload always wins. Pair
