@@ -30,21 +30,27 @@ skips non-router backends.
 
 ## Control matrix with the stock image (no fork)
 
-The stock `docker-entrypoint.sh` maps `GPU`/`GPUS`/`LAYER_SPLIT`/`CONFIG` env vars and,
-on every start, runs `setup.py` which launches `serve/server.py` with the config JSON.
+The stock `docker-entrypoint.sh` (verified inside the image, 2026-10) has **no `CONFIG=`
+hook**: it sources `strata-pin/strata.env` (exporting only `GPU`/`GPUS`), runs `setup.py`,
+which always launches `serve/server.py` with `$STRATA_DATA/config/strata-<tag>.json`.
+That is simpler than the plan assumed — one config, and upstream explicitly blesses
+foreign keys in it: `SETUP_KEYS` names what setup writes itself and `carry_over()`
+(#629) keeps every other key across a re-setup.
 
 | Knob | Mechanism |
 | --- | --- |
 | Card pin | existing `strata.env` → `GPU=`/`GPUS=` (unchanged) |
-| `--vram-reserve-mib`, `--expert-cache`, … | `args` array in a config JSON the app owns |
-| `idle_unload_s`, `min_free_vram_mib`, `before_load` | same config JSON (server-level keys) |
+| `--vram-reserve-mib`, `--expert-cache`, … | `args` array in the run config (setup's file) |
+| `idle_unload_s`, `min_free_vram_mib`, `before_load` | same file, top-level server keys |
 | `STRATA_ARENA_PIN_GIB` etc. | extra lines in `strata.env` |
 | `/load` `/unload` `/health` `/metrics` | HTTP on the compose network |
 
-The app writes its **own** config file (`strata-<tag>-loader.json` = setup's config with
-coexistence keys merged in) and points `CONFIG=` at it from the env file — single writer,
-and `setup.py --setup` reruns can never clobber it. A "drifted from base config" note
-appears when setup's file changed underneath.
+The app is a second, honest writer of exactly the keys it names: `STRATA_CONFIG_KEYS`
+(a JSON object in `config.py`) is merged into the run config at app start — atomic
+replace, rolling `.bak-*`, never touching setup's keys. The path is derived from docker
+inspect twice (the strata container's `$STRATA_DATA` mount, then this app's own mounts
+translating the host path). A one-line note on the card shows the delta while the file
+does not yet say what the settings say.
 
 ## Phases
 
@@ -57,8 +63,11 @@ appears when setup's file changed underneath.
       wait, container stays warm); a parked target is asked back with /load instead of a
       no-op docker start; refusals surface on the card via `services.strata_error()`.
       (commit e024926)
-- [ ] **3. Config JSON ownership.** merge writer in `app/strata.py` (atomic replace,
-      rolling backups, the `ini.py` pattern), `CONFIG=` line in the env file, drift note.
+- [x] **3. Config JSON ownership.** merge writer in `app/strata.py` (atomic replace,
+      rolling backups, the `ini.py` pattern), `STRATA_CONFIG_KEYS` setting applied at app
+      start, drift note on the card. No `CONFIG=` env line — the image has no such hook;
+      the app writes the coexistence keys into setup's own run config, which upstream
+      keeps across re-setups (#629).
 - [ ] **4. Card split.** when Strata is pinned/running on card N, autoconfig zeroes card N
       in `card_caps` so llama placement never touches it; Engine row gains a **Share**
       action that starts both engines and stops neither.

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import os
+import socket
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +45,41 @@ def _startup() -> None:
     db.init()
     db.seed_bench_prompts()
     hw.start_sampler()
+    threading.Thread(target=_reconcile_strata_config, daemon=True, name="strata-config").start()
+
+
+def _strata_own_attrs(client) -> dict:
+    """This app's own inspect data. Its mounts are the second half of the path translation:
+    a host path only means something here once it has been mapped through what this
+    container mounts where. Outside Docker there is nothing to translate."""
+    try:
+        return client.containers.get(socket.gethostname()).attrs or {}
+    except Exception:  # noqa: BLE001 - a name docker does not know just means "no mapping"
+        return {}
+
+
+def _reconcile_strata_config() -> None:
+    """Once at startup, ensure the coexistence keys are in every Strata backend's run config.
+
+    Startup rather than every poll: the engine reads the config at start, so a key that
+    appeared since then only matters for the next start anyway - and the card's note says
+    exactly that meanwhile. A thread because the docker calls must not hold up the first
+    request, and silent because the card reports the delta either way.
+    """
+    keys = settings.strata_config_key_map
+    if not keys:
+        return
+    try:
+        client = services._docker_client()
+        if client is None:
+            return
+        own = _strata_own_attrs(client)
+        for c in client.containers.list(all=True, filters={"label": f"ai-lab.engine={strata_engine.ENGINE}"}):
+            path = strata_engine.run_config_path(c.attrs, own)
+            if path is not None:
+                strata_engine.merge_run_config(path, keys)
+    except Exception:  # noqa: BLE001 - no docker socket is a normal state for a dev checkout
+        pass
 
 
 @app.get("/palette.json")
@@ -2413,10 +2450,12 @@ def _strata_pin_state(backends) -> dict | None:
     if b is None:
         return None
     attrs = {}
+    own = {}
     try:
         client = services._docker_client()
         if client is not None:
             attrs = client.containers.get(b.name).attrs or {}
+            own = _strata_own_attrs(client)
     except Exception:  # noqa: BLE001 - a missing container just means no live pin to compare
         attrs = {}
     # Exec candidates for the topology read: this app has no /dev/kfd, so the card count comes
@@ -2438,6 +2477,8 @@ def _strata_pin_state(backends) -> dict | None:
         "live": strata_engine.pin_in_container(attrs),
         "choices": choices,
         "running": b.status == "running",
+        "config_note": strata_engine.config_note(
+            strata_engine.run_config_path(attrs, own), settings.strata_config_key_map),
     }
 
 

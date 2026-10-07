@@ -20,8 +20,11 @@ on every start, which is what makes a restart enough. Both halves read this one 
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
+import time
 from pathlib import Path
 
 # The engine name a container declares in its `ai-lab.engine` label.
@@ -158,3 +161,158 @@ def card_count(exec_candidates=()) -> int:
         return len(gpu_procs.card_index_by_gpu_id(exec_candidates))
     except Exception:  # noqa: BLE001 - an unreadable topology is "unknown", never an error page
         return 0
+
+
+# ---------------------------------------------------------------------------
+# The run config: the second file this module owns.
+#
+# setup.py records each installed model as $STRATA_DATA/config/strata-<tag>.json and
+# serve/server.py reads its server-level keys (idle_unload_s, min_free_vram_mib,
+# before_load, vram_elastic) from that same file. Upstream explicitly blesses foreign
+# keys in it: SETUP_KEYS names what setup writes itself, and carry_over() (#629) keeps
+# everything else across a re-setup. So the coexistence knobs live in the real config,
+# and this app is a second writer of exactly the keys it names - never of setup's.
+#
+# The entry point has no CONFIG= hook (that was the plan's assumption; the stock
+# docker-entrypoint.sh always uses $STRATA_DATA/config/strata-<tag>.json), which turns
+# out to be simpler: no env line, no shadow file, one config, two honest writers.
+# ---------------------------------------------------------------------------
+
+BACKUPS_TO_KEEP = 5
+
+
+def _env_of(attrs: dict | None) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for entry in ((attrs or {}).get("Config") or {}).get("Env") or []:
+        if isinstance(entry, str) and "=" in entry:
+            k, _, v = entry.partition("=")
+            env[k.strip()] = v.strip()
+    return env
+
+
+def config_tag(attrs: dict | None) -> str:
+    """The config name tag the entry point derives: FAMILY=unsloth, MODEL=UD-IQ4_XS ->
+    "unsloth-ud-iq4_xs" (qwen has an empty family tag, like the entry point's case)."""
+    env = _env_of(attrs)
+    model = (env.get("MODEL") or "").lower()
+    if not model:
+        return ""
+    family = (env.get("FAMILY") or "qwen").lower()
+    return model if family == "qwen" else f"{family}-{model}"
+
+
+def run_config_path(attrs: dict | None, own_attrs: dict | None = None) -> Path | None:
+    """The run config file of this Strata container, as THIS app can reach it. None if unknown.
+
+    Two hops, both from docker inspect: the strata container's mount for $STRATA_DATA gives
+    the HOST path of its /data, and this app's own mounts translate that host path into the
+    path visible here (/home/jason/ai-lab/strata is /strata inside model-loader and /data's
+    parent inside strata - the same directory, seen twice). With no matching mount - running
+    on the host, say - the host path is used as-is, which is right there too.
+    """
+    env = _env_of(attrs)
+    tag = config_tag(attrs)
+    if not tag:
+        return None
+    data = env.get("STRATA_DATA") or "/data"
+    host = ""
+    for m in (attrs or {}).get("Mounts") or []:
+        if (m or {}).get("Destination") == data:
+            host = m.get("Source") or ""
+            break
+    if not host:
+        return None
+    path = host
+    best, mapped = "", host
+    for m in (own_attrs or {}).get("Mounts") or []:
+        s = (m or {}).get("Source") or ""
+        d = (m or {}).get("Destination") or ""
+        if s and d and (host == s or host.startswith(s.rstrip("/") + "/")) and len(s) > len(best):
+            best, mapped = s, d.rstrip("/") + host[len(s):]
+    return Path(mapped) / "config" / f"strata-{tag}.json"
+
+
+def _backup(path: Path) -> None:
+    """One rolling backup per write, the ini.py discipline: timestamped, pruned, best-effort."""
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(path.name + f".bak-{ts}")
+    n = 1
+    while backup.exists():
+        backup = path.with_name(path.name + f".bak-{ts}-{n}")
+        n += 1
+    try:
+        shutil.copy(path, backup)
+    except OSError:
+        pass
+    try:
+        backups = sorted(path.parent.glob(path.name + ".bak-*"), reverse=True)
+        for old in backups[BACKUPS_TO_KEEP:]:
+            try:
+                old.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def merge_run_config(path: Path, keys: dict) -> tuple[bool, str]:
+    """Ensure `keys` in the run config, touching nothing else. Returns (ok, message).
+
+    A value of None removes the key. The file is re-read first and written whole only if
+    something actually differs, so a restart with no change leaves no backup and no mtime
+    bump. Atomic tmp + os.replace, indent=1 - byte-compatible with what setup.py's own
+    write_config would produce, so the file never ping-pongs in style between the writers.
+    """
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return False, f"{path.name} is not there yet — the model's setup writes it first"
+    except (OSError, ValueError) as e:
+        return False, f"cannot read {path.name}: {e}"
+    if not isinstance(cfg, dict):
+        return False, f"{path.name} is not a config object"
+    changed = []
+    for k, v in keys.items():
+        if v is None:
+            if k in cfg:
+                del cfg[k]
+                changed.append(k)
+        elif cfg.get(k) != v:
+            cfg[k] = v
+            changed.append(k)
+    if not changed:
+        return True, "no change"
+    _backup(path)
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        return False, f"cannot write {path.name}: {e}"
+    return True, "applied " + ", ".join(sorted(changed))
+
+
+def config_note(path: Path | None, keys: dict) -> str:
+    """One line for the card when the run config does not yet say what the settings say.
+
+    "" whenever there is nothing to say: no keys configured, or they are all in place.
+    The note is deliberately about the DELTA, not the file - the config is mostly setup's,
+    and a note about keys this app does not own would be noise.
+    """
+    if not keys:
+        return ""
+    if path is None:
+        return "coexistence keys set, but this container's run config path is unknown"
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return "coexistence keys saved, but the run config does not exist yet — it applies when the model is set up"
+    except (OSError, ValueError) as e:
+        return f"coexistence keys not applied: {e}"
+    if not isinstance(cfg, dict):
+        return f"coexistence keys not applied: {path.name} is not a config object"
+    missing = sorted(k for k, v in keys.items() if v is not None and cfg.get(k) != v)
+    if missing:
+        return ("coexistence keys saved but not in the run config yet: "
+                + ", ".join(missing) + " — they are applied at app start; restart the app to re-apply")
+    return ""

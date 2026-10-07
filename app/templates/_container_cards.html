@@ -65,6 +65,12 @@
       </p>
       {% endif %}
       <div id="strata-pin-out-{{ b.name }}" class="mt-2"></div>
+      {% if strata_pin.config_note %}
+      {# The run config and the settings disagree. Usually transient - the keys are applied
+         at app start and the engine reads them at container start - but it is also exactly
+         what a hand-edited or re-set-up config looks like, so it stays on screen. #}
+      <p class="mt-2 text-xs text-amber-700 dark:text-amber-400">{{ strata_pin.config_note }}</p>
+      {% endif %}
     </div>
     {% endif %}
 
