@@ -243,9 +243,17 @@
         {%- if e.running %} <span class="text-[10px] text-fuchsia-400/70">active</span>{% endif %}
       </button>
       {% endfor %}
-      {% if engine_switch and engine_switch.phase and engine_switch.phase not in ('done',) %}
+      {#
+        The phase is shown for everything except 'done'. 'loading' is the one that earns its
+        place: the container is up but the model is not in yet - 90 s on Strata, which reads
+        ~55 GB of experts into RAM before its port opens - and without this the panel looked
+        idle for a minute and a half while the switch was working perfectly.
+      #}
+      {% if engine_switch and engine_switch.phase and engine_switch.phase != 'done' %}
       <span class="text-[11px] {% if engine_switch.phase == 'failed' %}text-red-400{% else %}text-amber-400{% endif %}">
-        {{ engine_switch.phase }} &rarr; {{ engine_switch.engine }}{% if engine_switch.msg %} · {{ engine_switch.msg }}{% endif %}
+        {%- if engine_switch.phase == 'loading' %}loading the model on {{ engine_switch.engine }}
+        {%- else %}{{ engine_switch.phase }} &rarr; {{ engine_switch.engine }}{% endif %}
+        {%- if engine_switch.msg %} · {{ engine_switch.msg }}{% endif %}
       </span>
       {% endif %}
     </div>
