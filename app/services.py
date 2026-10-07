@@ -1489,6 +1489,14 @@ class InferenceSpeed:
     ctx_cached: int = 0        # of ctx_used, how many came from cache instead of being re-read
     live: bool = False         # rates describe work happening NOW, not the last run
     slots: list = field(default_factory=list)   # list[SlotSpeed], one per live slot
+    # Strata only: the share of routed experts served from the GPU's cache on the last request,
+    # which its `done:` line reports. There is no llama.cpp equivalent - llama has no expert
+    # cache - so this is None on every other engine and the tile is simply absent.
+    #
+    # It is the number that decides whether this engine is fast, more than tok/s is: at 99.9%
+    # almost nothing crosses PCIe, and on this box PCIe measured 6.6 GB/s against a 0.55
+    # pcie_frac default. A drop here is the first sign a context or cache change went too far.
+    expert_hit_pct: float | None = None
 
 
 def slot_density(n: int) -> str:
@@ -1738,6 +1746,137 @@ async def _props_state(container_name: str, internal_port: int, model_id: str) -
     return out
 
 
+# Strata's progress lines. A different engine logs a different vocabulary, and none of
+# llama.cpp's patterns appear in it - which is exactly why the speedometer read as permanently
+# idle for this backend: _rates_from_log found no task launches, so `open_task` stayed None and
+# /slots was never even asked.
+#
+# What it writes to stdout, with thousands separators, one line every second or so:
+#
+#   [strata] reading the prompt: 32,619 of 32,624 tokens, 2 s so far
+#   [strata] thinking: 328 of max 32000 tokens, 60.1 tok/s, 8 s
+#   [strata] answering: 283 of max 32000 tokens, 75.3 tok/s, 4 s
+#   [strata] writing a tool call: bash: 471 of max 32000 tokens, 62.5 tok/s, 10 s
+#   [strata] done: 383 tokens in 6 s (71.9 tok/s) (stop, cancel=False), expert cache 99.9% hit
+#
+# thinking / answering / writing a tool call are all GENERATING - the phase differs, the rate
+# does not - so they share one pattern. Keeping them apart would make a reasoning model look
+# idle for the whole of its reasoning, which on a thinking model is most of the request.
+_RE_ST_PROMPT = re.compile(r"reading the prompt:\s*([\d,]+)\s+of\s+([\d,]+)\s+tokens,\s*(\d+)\s*s")
+_RE_ST_GEN = re.compile(r"(?:thinking|answering|writing a tool call[^:]*):\s*([\d,]+)\s+of\s+max\s+"
+                        r"[\d,]+\s+tokens,\s*([\d.]+)\s*tok/s")
+_RE_ST_DONE = re.compile(r"done:\s*([\d,]+)\s+tokens\s+in\s+\d+\s*s\s*\(([\d.]+)\s*tok/s\)")
+_RE_ST_HIT = re.compile(r"expert cache\s+([\d.]+)%\s+hit")
+
+
+def _int_c(txt: str) -> int:
+    """An integer that may carry thousands separators. Strata writes 32,619; int() would raise."""
+    try:
+        return int(str(txt).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rates_from_log_strata(name: str) -> dict:
+    """The same dict _rates_from_log returns, read from Strata's log instead.
+
+    `open_task` has to be a value that CHANGES per request, because the caller uses it both as
+    "is anything in flight" and as the key for its settled-task marker. Strata logs no task ids,
+    so the count of completed requests in the window stands in: it is monotonic within a run and
+    only advances when a request finishes, which is exactly the property the marker needs.
+
+    In flight means the newest progress line is newer than the newest `done:`. Comparing
+    positions rather than timestamps keeps this correct when several requests land in the same
+    second, which they do under an agent client.
+    """
+    out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
+           "cur_pp_done": 0,
+           "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
+           "open_task": None, "open_slot": 0, "expert_hit_pct": None}
+    ok, text = container_logs(name, tail=400, current_run_only=True)
+    if not ok:
+        return out
+    lines = text.splitlines()
+
+    done_n = 0
+    last_done_at = -1
+    newest_gen = newest_prompt = None
+    newest_gen_at = newest_prompt_at = -1
+    for i, line in enumerate(lines):
+        if (m := _RE_ST_DONE.search(line)):
+            done_n += 1
+            last_done_at = i
+            out["last_gen_tokens"] = _int_c(m.group(1))
+            try:
+                out["last_gen_tps"] = float(m.group(2))
+            except ValueError:
+                pass
+            if (h := _RE_ST_HIT.search(line)):
+                try:
+                    out["expert_hit_pct"] = float(h.group(1))
+                except ValueError:
+                    pass
+            continue
+        if (m := _RE_ST_GEN.search(line)):
+            newest_gen, newest_gen_at = m, i
+            continue
+        if (m := _RE_ST_PROMPT.search(line)):
+            newest_prompt, newest_prompt_at = m, i
+
+    # Nothing after the last completion: idle, and the last_* figures are what the card dims.
+    if max(newest_gen_at, newest_prompt_at) <= last_done_at:
+        return out
+
+    out["open_task"] = done_n + 1
+    if newest_gen is not None and newest_gen_at > newest_prompt_at:
+        out["cur_gen_tokens"] = _int_c(newest_gen.group(1))
+        try:
+            out["cur_gen_tps"] = float(newest_gen.group(2))
+        except ValueError:
+            pass
+        out["newest"] = "generating"
+    elif newest_prompt is not None:
+        done, total = _int_c(newest_prompt.group(1)), _int_c(newest_prompt.group(2))
+        secs = _int_c(newest_prompt.group(3))
+        out["cur_pp_done"] = done
+        out["cur_pp_pct"] = min(100, round(done * 100 / total)) if total else 0
+        # "N s so far" is whole seconds and starts at 0, so the first sample of a short prompt
+        # would divide by zero. Reporting no rate beats reporting an infinite one.
+        out["cur_pp_tps"] = (done / secs) if secs > 0 else 0.0
+        out["newest"] = "prefill"
+    return out
+
+
+def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
+    """Strata's /slots mapped onto SlotSpeed, filling only what it actually reports.
+
+    Its shape is its own and much smaller than llama's:
+
+        [{"id": 0, "n_ctx": 262144, "is_processing": false, "n_prompt_tokens": 33137}]
+
+    There is no n_prompt_tokens_cache / n_prompt_tokens_processed, so the cache-ratio and
+    per-slot prefill readouts have no input here. They are left at 0 DELIBERATELY - an absent
+    measurement rendered as 0% cached is a claim, and a wrong one. The rates come from the log
+    instead, which for a one-slot server describes that slot exactly.
+    """
+    out: list[SlotSpeed] = []
+    for i, sl in enumerate(raw):
+        busy = bool(sl.get("is_processing"))
+        state = "idle"
+        if busy:
+            state = "prefill" if r.get("newest") == "prefill" else "generating"
+        out.append(SlotSpeed(
+            index=int(sl.get("id") or i), state=state,
+            gen_tps=r["cur_gen_tps"] if state == "generating" else 0.0,
+            decoded=r["cur_gen_tokens"] if state == "generating" else 0,
+            ctx_used=_int_c(sl.get("n_prompt_tokens") or 0),
+            ctx_total=_int_c(sl.get("n_ctx") or 0),
+            prefill_pct=r["cur_pp_pct"] if state == "prefill" else 0,
+            prefill_done=r["cur_pp_done"] if state == "prefill" else 0,
+        ))
+    return out
+
+
 def _rates_from_log(name: str) -> dict:
     """Occupancy and throughput from the current run's log tail.
 
@@ -1843,7 +1982,11 @@ async def inference_speed(container_name: str, internal_port: int | None,
     if cached_rates and (time.time() - cached_rates[0]) < _RATES_TTL:
         r = cached_rates[1]
     else:
-        r = await asyncio.to_thread(_rates_from_log, container_name)
+        # Per ENGINE, because the log is the engine's own vocabulary. Dispatching here rather
+        # than teaching one parser both means neither grows patterns it can match by accident.
+        _reader = (_rates_from_log_strata if engine_for(container_name) == "strata"
+                   else _rates_from_log)
+        r = await asyncio.to_thread(_reader, container_name)
         _rates_cache[container_name] = (time.time(), r)
 
     # Only ask /slots when a task is actually in flight. An idle model must be left alone or it
@@ -1869,7 +2012,10 @@ async def inference_speed(container_name: str, internal_port: int | None,
 
     if raw_slots:
         _prune_slot_state(container_name, {int(s.get("id") or 0) for s in raw_slots})
-        slots = [_slot_speed(container_name, s, r, now) for s in raw_slots]
+        if engine_for(container_name) == "strata":
+            slots = _slots_strata(raw_slots, r)
+        else:
+            slots = [_slot_speed(container_name, s, r, now) for s in raw_slots]
         _last_slots[ctx_key] = [(sl.ctx_used, sl.ctx_total) for sl in slots]
     else:
         # Idle, and /slots was deliberately not read. Rebuild the strip from the last busy
@@ -1937,7 +2083,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         prefill_done=prefill_done, prefill_total=prefill_total,
         prompt_tokens=prompt_tokens,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
-        live=busy, slots=slots,
+        live=busy, slots=slots, expert_hit_pct=r.get("expert_hit_pct"),
     )
     _speed_cache[container_name] = (time.time(), out)
     return out

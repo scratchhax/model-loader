@@ -155,7 +155,11 @@
     </div>
 
     {# ---- the three numbers that matter, plus speculation's score when it runs ---- #}
-    <div class="mt-4 grid {{ 'grid-cols-4' if hero_mtp else 'grid-cols-3' }} gap-3">
+{# One extra column when there is a fourth tile to put in it. Two engines can contribute one:
+   llama's MTP acceptance, or Strata's expert cache hit rate. Never both - they are different
+   engines and only one holds the cards at a time - so one extra column covers it. #}
+{% set hero_hit = speed.expert_hit_pct if speed and speed.expert_hit_pct is not none else none %}
+    <div class="mt-4 grid {{ 'grid-cols-4' if (hero_mtp or hero_hit is not none) else 'grid-cols-3' }} gap-3">
       {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n, tip='') %}
       <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
                   {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}"
@@ -233,6 +237,24 @@
       {{ readout(('%0.f' % hero_mtp.acc_pct) if hero_mtp.acc_pct is not none else '—',
                  '% accepted', mtp_label, true, 'amber', '', 0, 0,
                  hero_mtp.label ~ ' speculative decoding is running (' ~ hero_mtp.spec_type ~ '). ' ~ mtp_acc_txt) }}
+      {% endif %}
+
+      {# Strata's expert cache hit rate, from its own `done:` line. There is no llama.cpp
+         equivalent - llama has no expert cache - so this tile exists only for that engine.
+
+         It earns a hero tile because on this architecture it decides whether the box is fast,
+         more than tok/s does. An expert that misses the cache crosses PCIe, measured here at
+         6.6 GB/s against the 0.55 pcie_frac the design assumes, so the difference between 99%
+         and 90% is not 9% of anything - it is the difference between reading experts from VRAM
+         and reading them over a slow bus. Emerald rather than amber: unlike speculation this
+         is not a bet, it is a measurement of how well the ranked profile fits the cards. #}
+      {% if hero_hit is not none %}
+      {{ readout('%.1f' % hero_hit, '% cached', 'expert cache', true, 'emerald', '', 0, 0,
+                 'Of the experts routed on the last completed request, the share served from the GPU'
+                 ~ ' cache rather than fetched over PCIe. Strata reports it on its own done line.'
+                 ~ ' This is the number to watch after any context or expert-cache change: a drop'
+                 ~ ' here is the first sign the ranked profile no longer fits the cards, and it'
+                 ~ ' shows up long before tok/s does.') }}
       {% endif %}
     </div>
 
