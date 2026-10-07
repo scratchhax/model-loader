@@ -557,7 +557,14 @@ def _gpu_strip_context() -> dict:
     live = {t.container: t.total_gb for t in tenants if t.foreign and t.container}
     free_gb = sum(max(0.0, c.vram_total_gb - c.vram_used_gb) for c in cards) if cards else 0.0
     ejectable = []
-    for row in gpu_procs.gpu_capable_containers(services._effective_container_names()):
+    # Exclude the LLAMA backends only, not every backend. A llama backend is excluded because
+    # it has its own controls and its VRAM is the thing being broken down; a backend of another
+    # engine is exactly what this button is for - it holds a whole card against a model the
+    # router cannot evict, so taking the card back means stopping the container. Strata is the
+    # first of those, and passing the full backend list here would have silently dropped it.
+    _llama = [n for n in services._effective_container_names()
+              if services.engine_for(n) == "llama"]
+    for row in gpu_procs.gpu_capable_containers(_llama):
         # A RUNNING container earns a row only by actually holding VRAM. Plenty of things are
         # given /dev/kfd and allocate nothing - gpu-monitor is one - and offering to eject them
         # is noise that makes the real control harder to find. A STOPPED one always shows,
