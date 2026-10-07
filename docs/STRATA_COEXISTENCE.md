@@ -73,10 +73,12 @@ does not yet say what the settings say.
       **Share** button — offered only when the cards demonstrably divide (running Strata on
       a strict subset, or a stopped Strata pinned to one card beside a running llama) —
       that starts the engine and stops neither.
-- [ ] **5. Time-share mode (opt-in).** app-managed `min_free_vram_mib` (503 beats OOM),
-      `idle_unload_s` (auto give-back), and `before_load` → `POST /internal/yield` on
-      model-loader, which stops the llama container so Strata's reload always wins. Pair
-      with llama `--sleep-idle-seconds` so both engines yield when idle.
+- [x] **5. Time-share mode (opt-in).** Three fields on the Strata card write the run config
+      through the phase-3 writer — `idle_unload_s` (auto give-back), `min_free_vram_mib`
+      (503 beats OOM), and the yield hook `before_load` → `POST /internal/yield`, which
+      stops the llama backends so Strata's reload always wins. Settings live in the db,
+      apply on Strata's next start, and off deletes the key from the config. Pair with
+      llama `--sleep-idle-seconds` so both engines yield when idle.
 - [ ] **6. RAM coordination.** subtract Strata's live RSS from the RAM pool in autoconfig's
       CPU sizing (today only the static `HOST_RAM_RESERVE_GB`), show the pinned arena in
       the overview, warn near the ROCm reclaim-stall zone.

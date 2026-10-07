@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # the config. setup.py keeps keys it does not own (#629), so these survive a re-setup.
     strata_config_keys: str = ""
 
+    # Where Strata's before_load hook asks for the cards back: a POST here stops the llama
+    # backends so Strata's reload always wins. The default is the compose service name; the
+    # hook only exists at all when time-share is switched on on the Strata card.
+    strata_yield_url: str = "http://model-loader:8090/internal/yield"
+
     @property
     def strata_config_key_map(self) -> dict:
         try:

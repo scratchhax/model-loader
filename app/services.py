@@ -1534,6 +1534,57 @@ def strata_held_cards() -> tuple[int, ...]:
     return ()
 
 
+def strata_timeshare_keys() -> dict:
+    """The time-share keys the Strata card's settings ask for, None where switched off.
+
+    The None entries are the point as much as the values: the merge writer deletes them
+    from the run config, so switching idle unload OFF actually takes `idle_unload_s` out
+    of the file instead of leaving a parked-server timer nobody asked for anymore.
+    """
+    from . import db
+    keys: dict = {}
+    v = db.get_setting("strata_idle_unload_s", "")
+    keys["idle_unload_s"] = int(v) if v.isdigit() and int(v) > 0 else None
+    v = db.get_setting("strata_min_free_vram_mib", "")
+    keys["min_free_vram_mib"] = int(v) if v.isdigit() and int(v) > 0 else None
+    # The hook is a shell command Strata runs (timeout 120 s) before every load, and a
+    # failed hook is a warning in its log, not a refused load - so the curl gets a timeout
+    # shorter than Strata's own and the whole thing degrades to "load anyway", which is
+    # what a box with nothing to yield wants.
+    keys["before_load"] = (f"curl -fsS -m 110 -X POST {settings.strata_yield_url}"
+                           if db.get_setting("strata_yield_on_load", "") == "1" else None)
+    return keys
+
+
+def strata_desired_keys() -> dict:
+    """Everything this app wants in the run config: the env baseline, then the card's
+    time-share settings on top - the UI is the more recent, more deliberate writer."""
+    return {**settings.strata_config_key_map, **strata_timeshare_keys()}
+
+
+def strata_yield() -> str:
+    """Stop every running backend that is not Strata, so its reload gets the cards.
+    One line back.
+
+    Called by Strata's before_load hook, which runs before the engine starts and waits
+    15 s for the VRAM to actually appear - so this only has to stop things, not prove they
+    are gone. Stopping (not unloading) is the only thing a llama router at --models-max 1
+    answers to, and that is the same fact the Engine switch was built on.
+    """
+    from . import gpu_procs
+    stopped = []
+    for r in gpu_holders():
+        if not r["running"] or not r["backend"]:
+            continue
+        if r["engine"] == strata_engine.ENGINE:
+            continue          # never touch Strata from Strata's own hook
+        ok, msg = gpu_procs.set_container_running(r["name"], start=False)
+        if not ok:
+            return f"could not stop {r['name']}: {msg}"
+        stopped.append(r["name"])
+    return "stopped " + ", ".join(stopped) if stopped else "nothing to stop"
+
+
 def _fit_backends() -> dict[str, float]:
     """{backend_name: total VRAM GiB} for everything we can actually plan against.
 

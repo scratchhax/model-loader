@@ -66,7 +66,7 @@ def _reconcile_strata_config() -> None:
     exactly that meanwhile. A thread because the docker calls must not hold up the first
     request, and silent because the card reports the delta either way.
     """
-    keys = settings.strata_config_key_map
+    keys = services.strata_desired_keys()
     if not keys:
         return
     try:
@@ -2535,7 +2535,12 @@ def _strata_pin_state(backends) -> dict | None:
         "choices": choices,
         "running": b.status == "running",
         "config_note": strata_engine.config_note(
-            strata_engine.run_config_path(attrs, own), settings.strata_config_key_map),
+            strata_engine.run_config_path(attrs, own), services.strata_desired_keys()),
+        "timeshare": {
+            "idle_s": db.get_setting("strata_idle_unload_s", ""),
+            "min_free": db.get_setting("strata_min_free_vram_mib", ""),
+            "yield_on": db.get_setting("strata_yield_on_load", "") == "1",
+        },
     }
 
 
@@ -2564,6 +2569,66 @@ def containers_strata_pin(name: str, card: str = Form(...)) -> HTMLResponse:
         f'px-3 py-2 text-sm">{msg} — restarting {name}. It reloads ~55 GB into RAM, so give it '
         f'a minute or two before the port answers.</div>'
     )
+
+
+def _strata_config_toast(ok: bool, msg: str) -> HTMLResponse:
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    return HTMLResponse(
+        f'<div class="rounded-md {cls} px-3 py-2 text-sm">{msg}</div>'
+    )
+
+
+@app.post("/containers/{name}/strata-timeshare", response_class=HTMLResponse)
+def containers_strata_timeshare(name: str, idle_s: str = Form(""), min_free_mib: str = Form(""),
+                                yield_on: str = Form("")) -> HTMLResponse:
+    """Save the time-share settings and write them into the run config now.
+
+    The write happens here, the effect happens at Strata's next start - server.py reads
+    these keys when it boots. Nothing restarts Strata from this route, on purpose: the
+    button that would apply the settings immediately is also the button that would drop
+    whatever model is answering on that box right now, and that is the pin route's
+    deliberate, warned-about job, not a side effect of Save.
+    """
+    if services.engine_for(name) != strata_engine.ENGINE:
+        return _strata_config_toast(False, "not a Strata backend")
+    vals = {}
+    for key, raw in (("strata_idle_unload_s", idle_s.strip()),
+                     ("strata_min_free_vram_mib", min_free_mib.strip())):
+        if raw and (not raw.isdigit() or int(raw) <= 0):
+            return _strata_config_toast(False, f"{key.split('strata_')[-1]}: a positive whole number, or empty for off")
+        vals[key] = raw if raw and int(raw) > 0 else ""
+    for key, val in vals.items():
+        db.set_setting(key, val)
+    db.set_setting("strata_yield_on_load", "1" if yield_on == "1" else "")
+
+    keys = services.strata_desired_keys()
+    try:
+        client = services._docker_client()
+        attrs = client.containers.get(name).attrs or {}
+        path = strata_engine.run_config_path(attrs, _strata_own_attrs(client))
+    except Exception as e:  # noqa: BLE001 - saved in the db either way; the note on the card covers the rest
+        return _strata_config_toast(True, "saved — but the run config could not be reached "
+                                          f"({e}); it will be applied at app start")
+    if path is None:
+        return _strata_config_toast(True, "saved — run config path unknown; it will be applied at app start")
+    ok, msg = strata_engine.merge_run_config(path, keys)
+    if not ok:
+        return _strata_config_toast(True, f"saved — but not in the run config yet: {msg}")
+    return _strata_config_toast(True, f"saved — run config: {msg}. Takes effect on {name}'s next start.")
+
+
+@app.post("/internal/yield")
+def internal_yield() -> Response:
+    """Strata's before_load endpoint: give up the cards, because a reload is coming.
+
+    No auth, like everything here (LAN-only tool, see the README) - and the worst a stray
+    POST does is stop the llama backends, which is a pressable button elsewhere. The hook
+    only exists at all while the Strata card has yield switched on, and a failed hook is a
+    warning in Strata's log, not a refused load: a box with nothing to yield degrades to
+    "load anyway".
+    """
+    return Response(services.strata_yield() + "\n", media_type="text/plain")
 
 
 @app.post("/containers/{name}/strata-load", response_class=HTMLResponse)

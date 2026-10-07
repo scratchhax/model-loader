@@ -65,6 +65,40 @@
       </p>
       {% endif %}
       <div id="strata-pin-out-{{ b.name }}" class="mt-2"></div>
+      {% if strata_pin.timeshare %}
+      {# Time-share: the run config's server keys, as three fields. They apply on Strata's
+         NEXT start (server.py reads them at boot), which the form says - Save never
+         restarts the engine that may be answering the room. Empty number = off, and off
+         deletes the key from the config rather than leaving a stale timer running. #}
+      <form hx-post="/containers/{{ b.name }}/strata-timeshare"
+            hx-target="#strata-ts-out-{{ b.name }}" hx-swap="innerHTML"
+            class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-slate-200 pt-2.5 text-xs dark:border-slate-800">
+        <span class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Time-share</span>
+        <label class="flex items-center gap-1 text-slate-500 dark:text-slate-400"
+               title="Strata gives its VRAM and pinned RAM back after this many idle seconds; a request then reloads it in seconds from the page cache instead of a cold start. Empty = hold the cards.">
+          idle unload
+          <input name="idle_s" value="{{ strata_pin.timeshare.idle_s }}" placeholder="off"
+                 class="w-16 rounded-md border border-slate-300 dark:border-slate-700 bg-white px-1.5 py-1 font-mono text-slate-700 dark:bg-slate-950 dark:text-slate-200"> s
+        </label>
+        <label class="flex items-center gap-1 text-slate-500 dark:text-slate-400"
+               title="Refuse to load (503) unless at least this much VRAM is free - a 503 that says 'the GPU is in use' beats dying mid-allocation on 'mtp: buffers do not fit'.">
+          min free
+          <input name="min_free_mib" value="{{ strata_pin.timeshare.min_free }}" placeholder="off"
+                 class="w-16 rounded-md border border-slate-300 dark:border-slate-700 bg-white px-1.5 py-1 font-mono text-slate-700 dark:bg-slate-950 dark:text-slate-200"> MiB
+        </label>
+        <label class="flex items-center gap-1.5 text-slate-500 dark:text-slate-400"
+               title="Before every Strata reload, it asks model-loader to stop the llama backends, so the reload always finds the cards. Adds a before_load hook to the run config; without this box checked nothing is hooked and nothing is yielded.">
+          <input type="checkbox" name="yield_on" value="1"
+                 class="accent-fuchsia-600" {% if strata_pin.timeshare.yield_on %}checked{% endif %}>
+          yield llama on reload
+        </label>
+        <button class="rounded-md border border-slate-300 px-2.5 py-1 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">
+          Save
+        </button>
+        <span class="text-slate-400 dark:text-slate-500">applies on next start</span>
+      </form>
+      <div id="strata-ts-out-{{ b.name }}" class="mt-2"></div>
+      {% endif %}
       {% if strata_pin.config_note %}
       {# The run config and the settings disagree. Usually transient - the keys are applied
          at app start and the engine reads them at container start - but it is also exactly
