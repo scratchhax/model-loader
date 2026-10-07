@@ -98,6 +98,17 @@
         <span class="text-slate-400 dark:text-slate-500">applies on next start</span>
       </form>
       <div id="strata-ts-out-{{ b.name }}" class="mt-2"></div>
+      {% if strata_pin.reclaim and strata_pin.reclaim.warn %}
+      {# The reclaim-stall zone, named before it happens: with the arena pinned, RAM under
+         a few GB of MemAvailable means the next allocation on the box is reclaimed from
+         the engine, and ROCm answers that by suspending GPU queues. #}
+      <p class="mt-2 text-xs text-amber-700 dark:text-amber-400">
+        {{ '%.0f' % strata_pin.reclaim.arena }} GB pinned by strata and only
+        {{ '%.0f' % strata_pin.reclaim.available }} GB of RAM left to reclaim —
+        near the ROCm stall zone (queues suspend when pinned memory is taken back).
+        Idle unload or a smaller resident budget moves you out of it.
+      </p>
+      {% endif %}
       {% endif %}
       {% if strata_pin.config_note %}
       {# The run config and the settings disagree. Usually transient - the keys are applied

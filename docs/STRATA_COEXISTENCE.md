@@ -79,9 +79,11 @@ does not yet say what the settings say.
       stops the llama backends so Strata's reload always wins. Settings live in the db,
       apply on Strata's next start, and off deletes the key from the config. Pair with
       llama `--sleep-idle-seconds` so both engines yield when idle.
-- [ ] **6. RAM coordination.** subtract Strata's live RSS from the RAM pool in autoconfig's
-      CPU sizing (today only the static `HOST_RAM_RESERVE_GB`), show the pinned arena in
-      the overview, warn near the ROCm reclaim-stall zone.
+- [x] **6. RAM coordination.** `hw.strata_arena_gb()` reads the Strata container's cgroup
+      anon line (the pinned arena, not page cache — the distinction is what stalls KFD
+      queues) on a 10 s TTL; `usable_ram_gb` and the fit table's `host_ram_gb` subtract it;
+      the hero shows "X GB RAM (Y pinned by strata)"; the card warns inside the reclaim-
+      stall zone (arena pinned and MemAvailable under 8 GB).
 - [ ] **7. Polish.** speedometer/hero from `GET /metrics` (log regex demoted to fallback);
       Open WebUI sync registers Strata opt-in with known-ids from its own `/v1/models`;
       `ai-lab.vram-reserve-gb` label so declared tenants are subtracted from fit budgets.

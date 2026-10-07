@@ -207,7 +207,9 @@ def _host_line() -> str:
         bits.append(isa)
     ram = hw.host_ram_gb()
     if ram:
-        bits.append(f"{ram:.0f} GB RAM")
+        arena = hw.strata_arena_gb()
+        bits.append(f"{ram:.0f} GB RAM ({arena:.0f} pinned by strata)" if arena > 0
+                    else f"{ram:.0f} GB RAM")
     return " · ".join(bits) if bits else "Everything live at a glance."
 
 
@@ -1478,6 +1480,17 @@ _QUEUED_CHIP = (
 )
 
 
+def _fit_host_ram() -> float:
+    """RAM the fit math may count on: the host total minus a running Strata's pinned arena.
+
+    The static HOST_RAM_RESERVE_GB covers the OS and its habits; the arena is a measured
+    tenant on top of that, and 35-55 GB of pinned experts is well past what a 32 GB reserve
+    was ever meant to absorb. Unchanged when no Strata runs, so a llama-only box sees
+    exactly what it always saw.
+    """
+    return round(max(0.0, hw.host_ram_gb() - hw.strata_arena_gb()), 1)
+
+
 def _fit_card_vram(bn: str) -> list[float]:
     """Per-card VRAM for the fit table, with the cards a running Strata holds zeroed out.
 
@@ -1508,7 +1521,7 @@ def _preset_estimates(summary: dict, size_bytes: int, mmproj_gb: float = 0.0) ->
         backends.append({
             "name": name, "vendor": "cuda", "vram_gb": vram,
             "gpu_count": hw.gpu_count_for(name), "card_vram_gb": _fit_card_vram(name),
-            "host_ram_gb": hw.host_ram_gb(),
+                    "host_ram_gb": _fit_host_ram(),
             "baseline": {},
         })
     if not backends or not summary:
@@ -2075,7 +2088,7 @@ def _backend_list() -> list[dict]:
         base = autoconfig.parse_baseline(cmd) if cmd else {}
         out.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
                     "gpu_count": hw.gpu_count_for(bn), "card_vram_gb": _fit_card_vram(bn),
-                    "host_ram_gb": hw.host_ram_gb(),
+            "host_ram_gb": _fit_host_ram(),
                     "baseline": base})
     return out
 
@@ -2528,6 +2541,9 @@ def _strata_pin_state(backends) -> dict | None:
     if n > 1:
         split = ",".join(str(i) for i in range(n - 1, -1, -1))   # highest first = main card
         choices.append({"value": split, "label": f"both ({split} split)"})
+    ts_idle = db.get_setting("strata_idle_unload_s", "")
+    arena = hw.strata_arena_gb()
+    avail = hw.host_ram_available_gb()
     return {
         "backend": b.name,
         "file": strata_engine.read_pin(),
@@ -2537,10 +2553,16 @@ def _strata_pin_state(backends) -> dict | None:
         "config_note": strata_engine.config_note(
             strata_engine.run_config_path(attrs, own), services.strata_desired_keys()),
         "timeshare": {
-            "idle_s": db.get_setting("strata_idle_unload_s", ""),
+            "idle_s": ts_idle,
             "min_free": db.get_setting("strata_min_free_vram_mib", ""),
             "yield_on": db.get_setting("strata_yield_on_load", "") == "1",
         },
+        # The reclaim-stall zone: with the arena pinned, RAM the kernel can still take back
+        # without touching GPU queues is what MemAvailable says it has. Under a few GB,
+        # the next allocation of anyone else on the box is reclaimed FROM THE ENGINE, and
+        # ROCm's reaction to that is to suspend KFD queues - the `verify: timed out` stall.
+        "reclaim": {"arena": arena, "available": avail,
+                    "warn": arena > 0 and 0 < avail < 8.0},
     }
 
 

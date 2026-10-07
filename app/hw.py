@@ -863,15 +863,70 @@ def host_ram_gb() -> float:
 
 
 def usable_ram_gb() -> float:
-    """Host RAM minus the reserve the OS and everything else need.
+    """Host RAM minus the reserve the OS and everything else need, minus Strata's arena.
 
     This, not MemTotal, is what a model may actually occupy. Sizing against total RAM plans
     for memory that is already spoken for by the page cache, the other containers on the box
     and the kernel itself — the result loads, then swaps or gets OOM-killed.
 
-    Reserve defaults to 32 GB and is set with HOST_RAM_RESERVE_GB.
+    Reserve defaults to 32 GB and is set with HOST_RAM_RESERVE_GB. On top of it, a running
+    Strata's pinned expert arena (35-55 GB of anonymous memory) is subtracted as measured
+    fact, not guessed reserve: it is the single largest tenant of this box's RAM whenever
+    Strata is up, and unlike page cache it does not give itself back.
     """
     total = host_ram_gb()
     if total <= 0:
         return 0.0
-    return round(max(0.0, total - float(settings.host_ram_reserve_gb)), 1)
+    return round(max(0.0, total - float(settings.host_ram_reserve_gb) - strata_arena_gb()), 1)
+
+
+def host_ram_available_gb() -> float:
+    """MemAvailable from /proc/meminfo, in GiB - what the kernel says it could actually
+    hand out now, cache included. 0.0 when unreadable."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return round(int(line.split()[1]) / 1024 / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
+# The arena probe is a docker exec, and the arena moves on the timescale of a model load,
+# not a poll - a 10 s TTL keeps it off the hot path without ever showing a stale load.
+_STRATA_ARENA_TTL_S = 10.0
+_strata_arena_cache: tuple[float, float] = (0.0, 0.0)
+
+
+def strata_arena_gb() -> float:
+    """Anonymous memory of the running Strata container in GiB: the pinned expert arena.
+
+    Read from the container's own cgroup (memory.stat's anon line, or v1's rss line) via
+    docker exec, because the distinction is the whole point: page cache is reclaimable and
+    harmless, while the pinned arena is what suspends KFD queues when the kernel takes its
+    pages back - the documented `verify: timed out` stall. 0.0 when there is no Strata, no
+    docker, or the cgroup says nothing: a failed probe must never under-count usable RAM
+    by inventing an arena.
+    """
+    global _strata_arena_cache
+    now = time.time()
+    t, gb = _strata_arena_cache
+    if now - t < _STRATA_ARENA_TTL_S:
+        return gb
+    gb = 0.0
+    client = _client()
+    if client is not None:
+        try:
+            for c in client.containers.list(filters={"label": "ai-lab.engine=strata"}):
+                r = c.exec_run(
+                    ["sh", "-c", "awk '/^anon /{print $2; exit} /^rss /{print $2; exit}' "
+                                 "/sys/fs/cgroup/memory.stat 2>/dev/null"],
+                    demux=False)
+                if r.exit_code == 0 and r.output:
+                    gb = int(r.output.decode(errors="replace").strip() or 0) / 1024 ** 3
+                    break
+        except (DockerException, ValueError, AttributeError):
+            gb = 0.0
+    _strata_arena_cache = (now, round(gb, 1))
+    return _strata_arena_cache[1]
