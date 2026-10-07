@@ -581,7 +581,8 @@ def _gpu_strip_context() -> dict:
             tight=bool(not row["running"] and want > 0.005 and free_gb < want * 1.15),
             free_gb=free_gb))
     return {"cards": cards, "gpu_history": history, "card_breakdowns": card_breakdowns,
-            "tenants": _tenant_rows(tenants, cards), "ejectable": ejectable}
+            "tenants": _tenant_rows(tenants, cards), "ejectable": ejectable,
+            "engines": services.gpu_engines(), "engine_switch": services.engine_switch_state()}
 
 
 def _tenant_rows(tenants: list, cards: list) -> list[dict]:
@@ -2422,17 +2423,26 @@ def _strata_pin_state(backends) -> dict | None:
     # from a container that does. Any GPU-bearing backend will answer, Strata included.
     cands = [x.name for x in backends if x.status == "running" and x.vendor in ("rocm", "cuda")]
     n = strata_engine.card_count(tuple(cands))
+    # The choices, as the values the form posts. Single cards first, then the split - which is
+    # offered rather than recommended: upstream measured it LOSING on this exact pair, because
+    # one 32 GB R9700 already holds every expert and the split only pays when no single card
+    # does. Offering it anyway because that is a claim worth checking on hardware whose memory
+    # bandwidth is half the box it was measured on.
+    choices = [{"value": str(i), "label": f"card {i}"} for i in range(n)]
+    if n > 1:
+        split = ",".join(str(i) for i in range(n - 1, -1, -1))   # highest first = main card
+        choices.append({"value": split, "label": f"both ({split} split)"})
     return {
         "backend": b.name,
         "file": strata_engine.read_pin(),
         "live": strata_engine.pin_in_container(attrs),
-        "cards": list(range(n)) if n else [],
+        "choices": choices,
         "running": b.status == "running",
     }
 
 
 @app.post("/containers/{name}/strata-pin", response_class=HTMLResponse)
-def containers_strata_pin(name: str, card: int = Form(...)) -> HTMLResponse:
+def containers_strata_pin(name: str, card: str = Form(...)) -> HTMLResponse:
     """Pin Strata to one card, and restart it so the pin takes effect.
 
     The restart is part of the action rather than a second button because the file alone
@@ -2618,6 +2628,33 @@ def gpu_tenant_power(name: str, action: str) -> HTMLResponse:
     if action not in ("eject", "restore"):
         return _toast(False, f"unknown action {action}")
     ok, msg = gpu_procs.set_container_running(name, start=(action == "restore"))
+    return _toast(ok, msg)
+
+
+@app.post("/engines/{engine}/activate", response_class=HTMLResponse)
+def engines_activate(engine: str) -> HTMLResponse:
+    """Hand the cards to one engine: stop everything else holding a GPU, then start it.
+
+    This exists because the two engines here cannot share the hardware and the only way to
+    make one let go was an ssh session. A control that needs a terminal is not a control, and
+    a llama router at --models-max 1 has no unload endpoint on this build - stopping the
+    container is the only thing that makes it give the cards back.
+    """
+    ok, msg = services.activate_engine(engine)
+    return _toast(ok, msg)
+
+
+@app.post("/containers/{name}/power", response_class=HTMLResponse)
+def containers_power(name: str, action: str = Form(...)) -> HTMLResponse:
+    """Start or stop one backend. The lifecycle control a backend card was missing.
+
+    Restart was the only button, which is fine until two engines take turns on the same cards.
+    Kept separate from the engine switch on purpose: this one touches exactly what it is told
+    to and nothing else, which is what you want when the question is "is it this container".
+    """
+    if action not in ("start", "stop"):
+        return _toast(False, f"unknown action {action}")
+    ok, msg = services.set_backend_running(name, start=(action == "start"))
     return _toast(ok, msg)
 
 

@@ -28,33 +28,33 @@
       <div class="flex flex-wrap items-baseline justify-between gap-2">
         <div class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">GPU pin</div>
         <div class="text-xs text-slate-500 dark:text-slate-400">
-          {% if strata_pin.live is not none and strata_pin.running %}
+          {% if strata_pin.live and strata_pin.running %}
             running on <span class="font-mono text-slate-700 dark:text-slate-200">card {{ strata_pin.live }}</span>
-            {% if strata_pin.file is not none and strata_pin.file != strata_pin.live %}
+            {% if strata_pin.file and strata_pin.file != strata_pin.live %}
               · <span class="text-amber-700 dark:text-amber-400">card {{ strata_pin.file }} saved, needs a restart</span>
             {% endif %}
-          {% elif strata_pin.file is not none %}
+          {% elif strata_pin.file %}
             stopped · will start on <span class="font-mono text-slate-700 dark:text-slate-200">card {{ strata_pin.file }}</span>
           {% else %}
             unpinned · it picks the card with the most VRAM
           {% endif %}
         </div>
       </div>
-      {% if strata_pin.cards %}
+      {% if strata_pin.choices %}
       <form hx-post="/containers/{{ b.name }}/strata-pin"
             hx-target="#strata-pin-out-{{ b.name }}" hx-swap="innerHTML"
             class="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <select name="card"
                 class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 font-mono">
-          {% for c in strata_pin.cards %}
-          <option value="{{ c }}" {% if strata_pin.file == c %}selected{% endif %}>card {{ c }}</option>
+          {% for c in strata_pin.choices %}
+          <option value="{{ c.value }}" {% if strata_pin.file == c.value %}selected{% endif %}>{{ c.label }}</option>
           {% endfor %}
         </select>
         <button class="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 hover:bg-slate-50 dark:hover:bg-slate-800">
           Pin and restart
         </button>
         <span class="text-slate-500 dark:text-slate-400">
-          one card only — a split pays nothing here while 32 GB holds every expert
+          a split is offered, not advised: upstream measured it slower on this pair
         </span>
       </form>
       {% else %}

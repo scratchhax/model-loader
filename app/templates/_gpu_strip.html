@@ -210,6 +210,48 @@
     </tbody>
   </table>
 
+  {#
+    ENGINE SWITCH.
+
+    The two engines cannot share these cards. A llama.cpp router at --models-max 1 holds its
+    model until something evicts it, and Strata sizes its expert cache against free VRAM at
+    startup - so whichever starts second gets the scraps, or dies outright on "mtp: buffers do
+    not fit". Exclusivity is the only arrangement where either gets the hardware it was sized
+    for.
+
+    One button per engine rather than a stop button per container, because the thing being
+    chosen is which engine owns the box, and doing that by hand is three clicks with a wait in
+    the middle that has to be judged by eye.
+  #}
+  {% if engines and engines|length > 1 %}
+  <div class="mt-3 border-t border-slate-800 pt-2.5">
+    <div id="engine-switch-toast" class="empty:hidden mb-2"></div>
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="text-[10px] uppercase tracking-wide text-slate-500">Engine</span>
+      {% for e in engines %}
+      <button class="inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-mono
+                     {% if e.running %}border-fuchsia-700 bg-fuchsia-950/40 text-fuchsia-300
+                     {% else %}border-slate-800 bg-slate-900/60 text-slate-300 hover:bg-slate-800{% endif %}"
+              {% if not e.running %}
+              hx-post="/engines/{{ e.engine }}/activate"
+              hx-target="#engine-switch-toast" hx-swap="innerHTML"
+              hx-confirm="Hand the cards to {{ e.engine }}? This STOPS every other container holding a GPU, waits for the driver to actually release the VRAM, then starts {{ e.names|join(', ') }}."
+              title="Stops every other GPU container, waits for the VRAM to actually come back, then starts {{ e.names|join(', ') }}."
+              {% else %}disabled title="Already holding the cards."{% endif %}>
+        <span class="h-2 w-2 shrink-0 rounded-sm {% if e.running %}bg-fuchsia-600{% else %}bg-slate-700{% endif %}"></span>
+        {{ e.engine }}
+        {%- if e.running %} <span class="text-[10px] text-fuchsia-400/70">active</span>{% endif %}
+      </button>
+      {% endfor %}
+      {% if engine_switch and engine_switch.phase and engine_switch.phase not in ('done',) %}
+      <span class="text-[11px] {% if engine_switch.phase == 'failed' %}text-red-400{% else %}text-amber-400{% endif %}">
+        {{ engine_switch.phase }} &rarr; {{ engine_switch.engine }}{% if engine_switch.msg %} · {{ engine_switch.msg }}{% endif %}
+      </span>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   {% if ejectable %}
   {#
     EJECT / RESTORE for GPU-capable containers that are not llama backends.
