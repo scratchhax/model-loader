@@ -1128,6 +1128,46 @@ def _vram_held_gb(exclude: set[str]) -> float:
         return 0.0
 
 
+def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
+    """Poll one backend's /v1/models until it answers 200. (ready, note).
+
+    `docker start` returning is not "serving", and the gap is not small: Strata reads ~55 GB of
+    experts into RAM before its port opens - measured at 90 s here - and a llama router is 10-40 s
+    depending on the model. Reporting the switch done at `docker start` meant clicking the button,
+    seeing "done", finding nothing on the port and concluding it had not worked. That is exactly
+    what happened.
+
+    /v1/models rather than /health, because it is the one endpoint both engines answer the same
+    way: llama.cpp's /health returns 503 "Loading model" while loading (and curl does not fail on
+    a 503, so a naive poll measures a model mid-load), while Strata does not open the port at all
+    until the model is in. A 200 from /v1/models means serving on both.
+    """
+    client = _docker_client()
+    if client is None:
+        return False, "docker unreachable"
+    try:
+        attrs = client.containers.get(name).attrs or {}
+    except (NotFound, DockerException) as e:
+        return False, f"{name}: {e}"
+    _, port = _extract_ports(attrs)
+    if port is None:
+        return True, f"{name} exposes no API port — not waiting"
+    url = f"http://{name}:{port}/v1/models"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
+                if c.get(url).status_code == 200:
+                    return True, ""
+        except httpx.HTTPError:
+            pass
+        _switch_state.update(phase="loading",
+                             msg=f"{name} up {int(time.time() - _switch_state.get('t0', time.time()))}s, "
+                                 "port not answering yet")
+        time.sleep(2.0)
+    return False, f"{name} started but {url} did not answer within {int(timeout)}s"
+
+
 def activate_engine(engine: str) -> tuple[bool, str]:
     """Make `engine` the only thing holding the cards. Fire-and-forget; progress in _switch_state.
 
@@ -1194,6 +1234,16 @@ def activate_engine(engine: str) -> tuple[bool, str]:
                     _switch_state.update(phase="failed", msg=f"could not start {name}: {msg}")
                     return
                 _switch_state["started"].append(name)
+            # Not done until it ANSWERS. See _wait_ready: `docker start` returning is 90 s short
+            # of serving on Strata, and reporting done there is what made a working switch look
+            # like a broken button.
+            for name in sorted(targets):
+                ready, note = _wait_ready(name)
+                if not ready:
+                    # "slow", not "failed": the container is up and may still come good. Saying
+                    # it failed would send someone looking for a crash that has not happened.
+                    _switch_state.update(phase="slow", msg=note)
+                    return
             _switch_state.update(phase="done", msg="", t1=time.time())
         except Exception as e:  # noqa: BLE001 - a thread that dies silently leaves the panel lying
             _switch_state.update(phase="failed", msg=f"{type(e).__name__}: {e}")
