@@ -818,6 +818,34 @@ def discover_llama_containers() -> list[dict]:
     return out
 
 
+# The engine map, cached. An engine cannot change without a container being recreated, so this
+# is near-static data - but the first version of engine_for() re-enumerated EVERY container over
+# the docker socket on every call, and it is called from the GPU strip (once per backend), from
+# inference_speed (twice per backend) and from telemetry. The overview polls the strip every
+# 500 ms, and _gpu_strip_context is synchronous, so all of that ran ON the event loop.
+#
+# The symptom was not slowness, it was wrong answers: the loop stalled for over two seconds at a
+# time, the async probes in snapshot_llama_backends hit their 2 s CONNECT timeout, and every
+# backend reported ConnectTimeout while host curl answered the same endpoints in 0.7 ms. The
+# overview showed "nothing loaded" on roughly three polls in four. Worth remembering as a shape:
+# a blocked event loop presents as unreachable services, not as a slow page.
+_ENGINE_TTL = 10.0
+_engine_cache: tuple[float, dict[str, str]] | None = None
+_engine_lock = threading.Lock()
+
+
+def engine_map() -> dict[str, str]:
+    """{container name: engine} for every discovered backend, cached for _ENGINE_TTL."""
+    global _engine_cache
+    with _engine_lock:
+        if _engine_cache and (time.time() - _engine_cache[0]) < _ENGINE_TTL:
+            return _engine_cache[1]
+    fresh = {d["name"]: str(d.get("engine") or "llama") for d in discover_llama_containers()}
+    with _engine_lock:
+        _engine_cache = (time.time(), fresh)
+    return fresh
+
+
 def engine_for(name: str) -> str:
     """The engine of one backend by container name; "llama" when nothing says otherwise.
 
@@ -826,10 +854,7 @@ def engine_for(name: str) -> str:
     the question should not silently acquire a new engine. A backend declares its way OUT of
     llama, never into it.
     """
-    for d in discover_llama_containers():
-        if d["name"] == name:
-            return str(d.get("engine") or "llama")
-    return "llama"
+    return engine_map().get(name, "llama")
 
 
 def _effective_container_names() -> list[str]:
@@ -1976,6 +2001,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         return cached[1]
 
     model_id = loaded_model.split(",")[0].strip()
+    _engine = engine_for(container_name)
 
     # The log read comes FIRST now, because it is what decides whether /slots may be touched.
     cached_rates = _rates_cache.get(container_name)
@@ -1984,8 +2010,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     else:
         # Per ENGINE, because the log is the engine's own vocabulary. Dispatching here rather
         # than teaching one parser both means neither grows patterns it can match by accident.
-        _reader = (_rates_from_log_strata if engine_for(container_name) == "strata"
-                   else _rates_from_log)
+        _reader = (_rates_from_log_strata if _engine == "strata" else _rates_from_log)
         r = await asyncio.to_thread(_reader, container_name)
         _rates_cache[container_name] = (time.time(), r)
 
@@ -2012,7 +2037,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
 
     if raw_slots:
         _prune_slot_state(container_name, {int(s.get("id") or 0) for s in raw_slots})
-        if engine_for(container_name) == "strata":
+        if _engine == "strata":
             slots = _slots_strata(raw_slots, r)
         else:
             slots = [_slot_speed(container_name, s, r, now) for s in raw_slots]
