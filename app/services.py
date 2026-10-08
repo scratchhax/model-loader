@@ -1303,19 +1303,27 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
             # does the same; starting the moment docker returns means reading a stale figure
             # and silently getting a fraction of the card. Measured on this box, the drop is
             # not instant after the process is gone.
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                held = _vram_held_gb(targets)
-                if held < 0.5:
-                    break
-                _switch_state.update(phase="draining", msg=f"{held:.1f} GB still held")
-                time.sleep(1.0)
+            #
+            # Only when something was actually released. The drain asks "has the VRAM the
+            # switch is reclaiming come back", and share reclaims nothing - the other
+            # engine's 30+ GB is the point of the mode, so waiting for it to drop waits
+            # sixty seconds and then fails with "something outside docker is holding them".
+            if not (plan_unload or plan_stop):
+                held = 0.0
             else:
-                _switch_state.update(
-                    phase="failed",
-                    msg=f"{_vram_held_gb(targets):.1f} GB still on the cards after 60 s — "
-                        "something outside docker is holding them")
-                return
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    held = _vram_held_gb(targets)
+                    if held < 0.5:
+                        break
+                    _switch_state.update(phase="draining", msg=f"{held:.1f} GB still held")
+                    time.sleep(1.0)
+                else:
+                    _switch_state.update(
+                        phase="failed",
+                        msg=f"{_vram_held_gb(targets):.1f} GB still on the cards after 60 s — "
+                            "something outside docker is holding them")
+                    return
 
             _switch_state.update(phase="starting", msg="")
             for name in sorted(targets):
