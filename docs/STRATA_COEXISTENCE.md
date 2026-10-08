@@ -5,10 +5,15 @@ The design and build order for letting Strata, llama.cpp and declared GPU tenant
 `feat/strata-coexistence`; `main` stays deployable and gets no commits until the feature
 is verified on the live box. Nothing is pushed until it is said so out loud.
 
-**Status: all seven phases built on the branch (commits 4fb67c6..84f7c70), unit-tested
-against fake Strata servers and fake docker objects. Live verification on this box is
-the open item — see Ground rules for why the agent cannot exercise the control paths
-itself.**
+**Status: built, unit-tested, and verified live on this box (checks 1–6 green: yield,
+time-share save, unload/auto-reload, single-card pin, share, soft and hard engine
+switch). Live verification found three bugs that every unit test had passed — the
+share form never sent `share=1` (HTMX posts the form's inputs; it had none, so the
+click was a hard take-over wearing a green badge), the VRAM drain waited sixty seconds
+in share mode for Strata's memory to drop, which is the one thing share guarantees it
+won't, and the 1 s strip poll re-checked the handover checkbox every swap. All three
+fixed and re-verified; the lesson is that a stubbed function is exactly the one that
+lies. Check 7 (the `ai-lab.openwebui` label) waits on the next Strata recreate.**
 
 ## Why the current integration stops short
 
