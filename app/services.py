@@ -563,23 +563,34 @@ def _parse_started_at(iso: str) -> tuple[str, str]:
 
 
 def _extract_ports(attrs: dict) -> tuple[list[str], int | None]:
-    """Return (['8082->8080/tcp'], 8080)."""
+    """Return (['8082->8080/tcp'], 8080).
+
+    The internal port is one that ACTUALLY has a host binding. Multi-port
+    containers used to get whichever port docker enumerated last - including an
+    unbound one - and the probes then targeted a closed port and reported
+    "nothing loaded" for a server that was fine.
+    """
     ports_map = (attrs.get("NetworkSettings") or {}).get("Ports") or {}
     result: list[str] = []
     internal: int | None = None
+    any_port: int | None = None
     for cont_port, bindings in ports_map.items():
         # cont_port like "8080/tcp"
         try:
-            internal = int(cont_port.split("/")[0])
+            port = int(cont_port.split("/")[0])
         except ValueError:
-            pass
+            continue
+        if any_port is None:
+            any_port = port
         if not bindings:
             continue
+        if internal is None:
+            internal = port
         for b in bindings:
             hp = b.get("HostPort")
             if hp:
                 result.append(f"{hp}->{cont_port}")
-    return result, internal
+    return result, (internal if internal is not None else any_port)
 
 
 def _api_key_from_attrs(attrs: dict) -> str:

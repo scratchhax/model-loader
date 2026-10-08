@@ -11,7 +11,7 @@ import docker
 from docker.errors import DockerException, NotFound
 
 from .config import settings
-from .utils import docker_client
+from .utils import docker_client, timed_shell
 
 
 @dataclass
@@ -161,7 +161,7 @@ def _read_nvidia(container) -> GpuStats | None:
         "--format=csv,noheader,nounits"
     )
     try:
-        r = container.exec_run(cmd, demux=False)
+        r = container.exec_run(timed_shell(cmd), demux=False)
     except DockerException:
         return None
     if r.exit_code != 0:
@@ -313,7 +313,7 @@ def _read_amd_power(container) -> dict[str, tuple[float, float]]:
     Returns {} if the call fails, and the caller falls back to the bundled figures.
     """
     try:
-        r = container.exec_run("rocm-smi --showpower --showmaxpower --json", demux=False)
+        r = container.exec_run(timed_shell("rocm-smi --showpower --showmaxpower --json"), demux=False)
     except DockerException:
         return {}
     if r.exit_code != 0:
@@ -358,7 +358,7 @@ def _read_amd(container, container_name: str) -> GpuStats | None:
     data: dict | None = None
     for cmd in cmds:
         try:
-            r = container.exec_run(cmd, demux=False)
+            r = container.exec_run(timed_shell(cmd), demux=False)
         except DockerException:
             return None
         if r.exit_code != 0:
@@ -465,8 +465,9 @@ fi; done; \
 [ "$rss" -gt 0 ] && echo "$rss $mm" """ % q
     try:
         # sh -c, not the bare string: the SDK shlex-splits strings and execs them with no
-        # shell, which turns redirections and $() into argv and dies at 127.
-        r = container.exec_run(["sh", "-c", cmd], demux=False)
+        # shell, which turns redirections and $() into argv and dies at 127. Generous
+        # timeout: smaps of a 30 GB process is the slowest read in this module.
+        r = container.exec_run(timed_shell(cmd, 15), demux=False)
     except DockerException:
         return 0.0, 0.0
     if r.exit_code != 0:
@@ -920,8 +921,8 @@ def strata_arena_gb() -> float:
         try:
             for c in client.containers.list(filters={"label": "ai-lab.engine=strata"}):
                 r = c.exec_run(
-                    ["sh", "-c", "awk '/^anon /{print $2; exit} /^rss /{print $2; exit}' "
-                                 "/sys/fs/cgroup/memory.stat 2>/dev/null"],
+                    timed_shell("awk '/^anon /{print $2; exit} /^rss /{print $2; exit}' "
+                                "/sys/fs/cgroup/memory.stat 2>/dev/null"),
                     demux=False)
                 if r.exit_code == 0 and r.output:
                     gb = int(r.output.decode(errors="replace").strip() or 0) / 1024 ** 3

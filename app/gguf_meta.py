@@ -46,42 +46,65 @@ class GgufMetaError(Exception):
 _CACHE: dict[str, dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
+# Arrays are the parser's only recursion; a crafted header nesting them would
+# otherwise end in RecursionError, which the per-KV handler does not catch.
+_MAX_DEPTH = 16
+
+
+def _seek(f, off: int) -> None:
+    """Relative seek that reports a corrupt length as a parse error.
+
+    Lengths come straight out of the file: >= 2**63 makes seek() itself raise
+    ValueError/OverflowError, and a truncated stream makes it OSError. All three
+    are "this header is lying", which is what GgufMetaError means.
+    """
+    try:
+        f.seek(off, 1)
+    except (OSError, ValueError, OverflowError) as e:
+        raise GgufMetaError(f"bad offset {off}: {e}") from e
+
 
 def _read_string(f) -> str:
     n = struct.unpack("<Q", f.read(8))[0]
     if n > MAX_STRING_LEN:
-        chunk = f.read(n)
-        return chunk[:MAX_STRING_LEN].decode("utf-8", errors="replace") + "…[truncated]"
+        # Read only the part kept and seek past the rest. f.read(n) with an
+        # attacker-controlled 64-bit length is a memory bomb - this parser runs
+        # on remote headers fetched from huggingface, not just local files.
+        chunk = f.read(MAX_STRING_LEN)
+        _seek(f, n - MAX_STRING_LEN)
+        return chunk.decode("utf-8", errors="replace") + "…[truncated]"
     return f.read(n).decode("utf-8", errors="replace")
 
 
 def _skip_string(f) -> None:
     n = struct.unpack("<Q", f.read(8))[0]
-    f.seek(n, 1)
+    _seek(f, n)
 
 
-def _read_value(f, vtype: int):
+def _read_value(f, vtype: int, _depth: int = 0):
     if vtype in _SCALAR_FMT:
         fmt, size = _SCALAR_FMT[vtype]
         return struct.unpack(fmt, f.read(size))[0]
     if vtype == _STRING:
         return _read_string(f)
     if vtype == _ARRAY:
+        if _depth >= _MAX_DEPTH:
+            raise GgufMetaError(f"arrays nested deeper than {_MAX_DEPTH}")
         subtype = struct.unpack("<I", f.read(4))[0]
         count = struct.unpack("<Q", f.read(8))[0]
         if count > MAX_ARRAY_ELEMENTS_KEPT:
-            sample = [_read_value(f, subtype) for _ in range(MAX_ARRAY_ELEMENTS_KEPT)]
+            sample = [_read_value(f, subtype, _depth + 1) for _ in range(MAX_ARRAY_ELEMENTS_KEPT)]
             remaining = count - MAX_ARRAY_ELEMENTS_KEPT
             if subtype == _STRING:
                 for _ in range(remaining):
                     _skip_string(f)
             elif subtype in _SCALAR_FMT:
                 _, size = _SCALAR_FMT[subtype]
-                f.seek(size * remaining, 1)
+                _seek(f, size * remaining)
             else:
                 raise GgufMetaError(f"unsupported nested array subtype {subtype}")
             return {"_array": True, "count": count, "sample": sample}
-        return [_read_value(f, subtype) for _ in range(count)]
+        return [_read_value(f, subtype, _depth + 1) for _ in range(count)]
     raise GgufMetaError(f"unknown value type {vtype}")
 
 
