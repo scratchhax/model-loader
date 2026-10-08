@@ -7,12 +7,21 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 
 from .config import settings
 
 BACKUPS_TO_KEEP = 10
+
+# One ini writer at a time. The routes that mutate models.ini are a mix of async
+# (event loop) and sync (threadpool), so a save and a delete can genuinely overlap,
+# and read-modify-write across two of them is a lost update. os.replace makes the
+# final swap atomic; this makes the whole read->modify->write sequence atomic, and
+# it also keeps two writers off the same temp file.
+_WRITE_LOCK = threading.Lock()
 
 # ---- field schema: drives form + serialization ----
 
@@ -629,6 +638,15 @@ def suggest_defaults(summary: dict) -> tuple[dict[str, str], list[str]]:
 def upsert_section(name: str, values: dict[str, str], extras_text: str) -> None:
     """Create or replace a section. `values` = known form fields (empty strings skipped).
     `extras_text` = raw 'key = value' lines, one per line, appended (last-wins per key)."""
+    if not valid_section_name(name):
+        # The routes validate first, but the writer is the thing that must not emit
+        # `[bad\nname]` - a corrupt header here takes every backend's config down.
+        raise ValueError(f"invalid section name: {name!r}")
+    with _WRITE_LOCK:
+        _upsert_section(name, values, extras_text)
+
+
+def _upsert_section(name: str, values: dict[str, str], extras_text: str) -> None:
     cp = read_ini()
     if cp.has_section(name):
         cp.remove_section(name)
@@ -658,27 +676,29 @@ def upsert_section(name: str, values: dict[str, str], extras_text: str) -> None:
 
 
 def delete_section(name: str) -> bool:
-    cp = read_ini()
-    if not cp.has_section(name):
-        return False
-    cp.remove_section(name)
-    _atomic_write(cp)
-    return True
+    with _WRITE_LOCK:
+        cp = read_ini()
+        if not cp.has_section(name):
+            return False
+        cp.remove_section(name)
+        _atomic_write(cp)
+        return True
 
 
 def rename_section(old: str, new: str) -> bool:
     if not valid_section_name(new):
         return False
-    cp = read_ini()
-    if not cp.has_section(old) or cp.has_section(new):
-        return False
-    items = list(cp.items(old))
-    cp.remove_section(old)
-    cp.add_section(new)
-    for k, v in items:
-        cp.set(new, k, v)
-    _atomic_write(cp)
-    return True
+    with _WRITE_LOCK:
+        cp = read_ini()
+        if not cp.has_section(old) or cp.has_section(new):
+            return False
+        items = list(cp.items(old))
+        cp.remove_section(old)
+        cp.add_section(new)
+        for k, v in items:
+            cp.set(new, k, v)
+        _atomic_write(cp)
+        return True
 
 
 def _atomic_write(cp: configparser.ConfigParser) -> None:
@@ -702,9 +722,24 @@ def _atomic_write(cp: configparser.ConfigParser) -> None:
     cp.write(buf, space_around_delimiters=True)
     text = buf.getvalue()
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # Unique temp name: a fixed models.ini.tmp meant two writers racing past the
+    # (now-locked) critical section would write into the SAME temp and publish an
+    # interleaving of both. mkstemp also removes the symlink/precedence games a
+    # fixed path invites. fsync before the replace: os.replace is atomic to other
+    # processes, but without it a power loss can leave the renamed file zero-length.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".models.ini.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _prune_backups() -> None:

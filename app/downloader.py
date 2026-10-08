@@ -240,6 +240,15 @@ class DownloadManager:
             job.status = "error"
             job.error = f"{type(e).__name__}: {e}"
             job.completed_at = time.time()
+            if job.parallel:
+                # A failed parallel temp is a PREALLOCATED full-size sparse file. Keeping it
+                # is how a later attempt got to "resume" a download that was really a hole,
+                # and promote it as a complete model. Single-stream temps are append-only
+                # and genuinely resumable, so only the parallel one goes.
+                try:
+                    job.temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         finally:
             db.record_download(
                 repo_id=job.repo_id,
@@ -296,10 +305,11 @@ class DownloadManager:
             await self._stream_single(job, url, headers)
 
     async def _stream_parallel(self, job: DownloadJob, url: str, headers: dict[str, str], total: int) -> None:
-        # If a partial file exists and matches size exactly, assume it's complete (rare).
-        if job.temp_path.exists() and job.temp_path.stat().st_size == total:
-            job.downloaded_bytes = total
-            return
+        # No resume here, and deliberately no "temp size == total means complete"
+        # shortcut: the temp is preallocated to full size below, so that check was
+        # true of every failed run's sparse leftover, and the retry promoted a
+        # hole-ridden file as a finished model. Completion is proven by received
+        # bytes, never by file size.
         # Preallocate temp file to full size; per-worker seek+write into non-overlapping regions.
         with open(job.temp_path, "wb") as f:
             f.truncate(total)
@@ -321,7 +331,10 @@ class DownloadManager:
             timeout = httpx.Timeout(30.0, read=120.0)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=worker_headers) as w:
                 async with w.stream("GET", url) as resp:
-                    if resp.status_code not in (200, 206):
+                    # 206 or nothing: a 200 means the server ignored the Range header,
+                    # and eight workers each writing the WHOLE body at their own offset
+                    # is not a download, it is a confetti cannon pointed at the temp.
+                    if resp.status_code != 206:
                         body = ""
                         try:
                             body = (await resp.aread()).decode(errors="replace")[:200]
@@ -341,6 +354,11 @@ class DownloadManager:
                                 if len(cs._samples) > 12:
                                     cs._samples = cs._samples[-12:]
                             self._note_progress(job, len(buf))
+                    # A 206 that ends early is a truncated chunk, and the stream closing
+                    # cleanly is not the same statement as "every byte arrived".
+                    if cs.downloaded != cs.size:
+                        raise RuntimeError(
+                            f"range {cs.start}-{cs.end}: got {cs.downloaded} of {cs.size} bytes")
 
         tasks = [asyncio.create_task(worker(c)) for c in job.chunks]
         try:
@@ -358,42 +376,65 @@ class DownloadManager:
             raise
 
     async def _stream_single(self, job: DownloadJob, url: str, headers: dict[str, str]) -> None:
-        # Original resume-aware single-stream path (used when server doesn't support ranges, or file is small)
-        start = 0
-        if job.temp_path.exists():
-            start = job.temp_path.stat().st_size
-        if start > 0:
-            headers = {**headers, "Range": f"bytes={start}-"}
-        job.downloaded_bytes = start
-        job._speed_samples.append((time.time(), job.downloaded_bytes))
+        # Original resume-aware single-stream path (used when server doesn't support ranges, or file is small).
+        # Two rounds at most: round two only happens when a 416 says the resumable temp is
+        # oversized, in which case it is not resumable and goes in the bin.
+        for attempt in (0, 1):
+            start = 0
+            if job.temp_path.exists():
+                start = job.temp_path.stat().st_size
+            req_headers = {**headers, "Range": f"bytes={start}-"} if start > 0 else dict(headers)
+            job.downloaded_bytes = start
+            if attempt == 0:
+                job._speed_samples.append((time.time(), job.downloaded_bytes))
 
-        timeout = httpx.Timeout(30.0, read=120.0)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
-            async with client.stream("GET", url) as resp:
-                if resp.status_code == 416 and start > 0:
-                    job.downloaded_bytes = job.total_bytes or start
+            timeout = httpx.Timeout(30.0, read=120.0)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=req_headers) as client:
+                async with client.stream("GET", url) as resp:
+                    if resp.status_code == 416 and start > 0:
+                        # 416 means the temp is BIGGER than the remote file - stale or
+                        # corrupt, not finished. It used to be taken as "complete" and
+                        # promoted, oversized, over the destination.
+                        if attempt == 0:
+                            job.temp_path.unlink(missing_ok=True)
+                            job.downloaded_bytes = 0
+                            continue
+                        raise RuntimeError(f"HTTP 416 from {url} after restarting the download")
+                    if resp.status_code not in (200, 206):
+                        body = ""
+                        try:
+                            body = (await resp.aread()).decode(errors="replace")[:200]
+                        except Exception:
+                            pass
+                        raise RuntimeError(f"HTTP {resp.status_code} from {url}: {body}")
+
+                    # We asked to resume and the server ignored the Range header: this
+                    # body is the WHOLE file, and appending it onto the partial would
+                    # corrupt the model. Restart the temp from zero instead.
+                    if start > 0 and resp.status_code == 200:
+                        start = 0
+                        job.downloaded_bytes = 0
+
+                    if not job.total_bytes:
+                        if "content-range" in resp.headers:
+                            job.total_bytes = int(resp.headers["content-range"].split("/")[-1])
+                        else:
+                            job.total_bytes = start + int(resp.headers.get("content-length", "0"))
+
+                    mode = "ab" if start else "wb"
+                    with open(job.temp_path, mode) as f:
+                        async for buf in resp.aiter_bytes(1024 * 1024):
+                            if job._cancel.is_set():
+                                raise asyncio.CancelledError
+                            f.write(buf)
+                            self._note_progress(job, len(buf))
+
+                    # A stream that ends without error has not said it sent everything:
+                    # a server closing a chunked body early just... ends. Count it.
+                    if job.total_bytes and job.downloaded_bytes != job.total_bytes:
+                        raise RuntimeError(
+                            f"stream ended at {job.downloaded_bytes} of {job.total_bytes} bytes")
                     return
-                if resp.status_code not in (200, 206):
-                    body = ""
-                    try:
-                        body = (await resp.aread()).decode(errors="replace")[:200]
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"HTTP {resp.status_code} from {url}: {body}")
-
-                if not job.total_bytes:
-                    if "content-range" in resp.headers:
-                        job.total_bytes = int(resp.headers["content-range"].split("/")[-1])
-                    else:
-                        job.total_bytes = start + int(resp.headers.get("content-length", "0"))
-
-                mode = "ab" if start else "wb"
-                with open(job.temp_path, mode) as f:
-                    async for buf in resp.aiter_bytes(1024 * 1024):
-                        if job._cancel.is_set():
-                            raise asyncio.CancelledError
-                        f.write(buf)
-                        self._note_progress(job, len(buf))
 
 
 manager = DownloadManager()

@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -43,6 +44,34 @@ _PINS_RE = re.compile(r"^(?:export\s+)?GPUS\s*=\s*(\d+(?:\s*,\s*\d+)*)\s*$")
 # Any pin line, set or cleared - the cleared kind (GPUS= with nothing after it) matters:
 # see set_pin.
 _PIN_ANY_RE = re.compile(r"^(?:export\s+)?GPUS?\s*=")
+
+
+def _atomic_replace(path: Path, data: str) -> None:
+    """tmp + fsync + os.replace, preserving the target's mode.
+
+    Both files this module writes are READ BY OTHER PROCESSES at start: the strata
+    entry point sources strata.env, and the server loads its run config. A truncated
+    write (plain write_text) leaves them a half file; mkstemp alone would fix the
+    truncation but land on mode 0600, so the original mode is carried over.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def read_pin(path: Path | None = None) -> str:
@@ -145,7 +174,7 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
     out.append(clear)   # always: sourcing must beat whatever compose baked in
 
     try:
-        p.write_text("\n".join(out) + "\n", encoding="utf-8")
+        _atomic_replace(p, "\n".join(out) + "\n")
     except OSError as e:
         return False, f"cannot write {p}: {e}"
     if single:
@@ -283,22 +312,40 @@ def merge_run_config(path: Path, keys: dict) -> tuple[bool, str]:
         return False, f"cannot read {path.name}: {e}"
     if not isinstance(cfg, dict):
         return False, f"{path.name} is not a config object"
-    changed = []
-    for k, v in keys.items():
-        if v is None:
-            if k in cfg:
-                del cfg[k]
+
+    def _merge(target: dict) -> list[str]:
+        changed: list[str] = []
+        for k, v in keys.items():
+            if v is None:
+                if k in target:
+                    del target[k]
+                    changed.append(k)
+            elif target.get(k) != v:
+                target[k] = v
                 changed.append(k)
-        elif cfg.get(k) != v:
-            cfg[k] = v
-            changed.append(k)
+        return changed
+
+    changed = _merge(cfg)
     if not changed:
         return True, "no change"
+
+    # setup.py inside the Strata container is the other writer of this file, and no
+    # advisory lock spans two processes that do not both agree to take it. So the
+    # race gets narrowed instead of closed: re-apply the merge to the freshest copy
+    # microseconds before publishing, so anything setup.py wrote in between survives.
+    try:
+        fresh = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(fresh, dict):
+            cfg = fresh
+            changed = _merge(cfg)
+            if not changed:
+                return True, "no change"
+    except (OSError, ValueError):
+        pass   # publish the merge computed above rather than fail the call
+
     _backup(path)
     try:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+        _atomic_replace(path, json.dumps(cfg, indent=1))
     except OSError as e:
         return False, f"cannot write {path.name}: {e}"
     return True, "applied " + ", ".join(sorted(changed))
