@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import os
 import socket
@@ -237,7 +238,7 @@ _MTP_TTL_S = 10.0
 _mtp_cache: dict[str, tuple[float, "telemetry.Stats"]] = {}
 
 
-def _hero_mtp(backend: str, model_id: str) -> dict | None:
+async def _hero_mtp(backend: str, model_id: str) -> dict | None:
     """Draft-acceptance facts for the running model, or None when it does not speculate.
 
     What the running instance was SPECULATING with comes off its own argv (the telemetry db's
@@ -255,7 +256,7 @@ def _hero_mtp(backend: str, model_id: str) -> dict | None:
     ent = _mtp_cache.get(key)
     if ent is None or (now - ent[0]) > _MTP_TTL_S:
         try:
-            telemetry.ingest([backend])
+            await asyncio.to_thread(telemetry.ingest, [backend])
             ent = (now, telemetry.stats_for(model_path="", alias=model_id))
         except Exception:  # noqa: BLE001 - a missing box, never a broken hero
             ent = (now, telemetry.Stats())
@@ -391,7 +392,7 @@ async def _hero_context() -> dict:
     # against the 90 GB MoE record it replaced. A page that renders a backend's state should
     # not depend on what the previous model happened to have configured.
     try:
-        telemetry.ingest([b.name])
+        await asyncio.to_thread(telemetry.ingest, [b.name])
     except Exception:  # noqa: BLE001 - stale telemetry must never cost the hero
         pass
 
@@ -462,7 +463,7 @@ async def _hero_context() -> dict:
     # What speculation costs, merged into the MTP box so the price sits beside the payoff.
     # Only meaningful once there is a GPU to measure against, which is why it is here and not
     # in _hero_mtp - that function sees telemetry and argv, never the cards.
-    hero_mtp = None if hero_loading else _hero_mtp(b.name, model_id)
+    hero_mtp = None if hero_loading else await _hero_mtp(b.name, model_id)
     if hero_mtp is not None and st.ok and st.gpu and not hero_asleep:
         try:
             hero_mtp["cost"] = vram_live.draft_cost(
@@ -709,7 +710,7 @@ async def dashboard(request: Request) -> HTMLResponse:
            "ini_sections": ini.list_sections(),
            "active_downloads": active, "host_line": _host_line()}
     ctx.update(await _hero_context())
-    ctx.update(_gpu_strip_context())
+    ctx.update(await asyncio.to_thread(_gpu_strip_context))
     ctx.update(_power_context())
     ctx.update(_power_settings_context())
     return templates.TemplateResponse("dashboard.html", ctx)
@@ -731,7 +732,7 @@ async def hero_partial(request: Request) -> HTMLResponse:
 @app.get("/gpu-strip", response_class=HTMLResponse)
 async def gpu_strip_partial(request: Request) -> HTMLResponse:
     ctx = {"request": request}
-    ctx.update(_gpu_strip_context())
+    ctx.update(await asyncio.to_thread(_gpu_strip_context))
     return templates.TemplateResponse("_gpu_strip.html", ctx)
 
 
@@ -1014,7 +1015,7 @@ async def _models_list_ctx(request: Request, snap, flash=None) -> dict:
     file_to_owner, avatars = await _models_avatar_map(snap)
     loaded_map = await _loaded_map()
     update_status = _update_status_map(snap)
-    owui = _owui_visibility()
+    owui = await asyncio.to_thread(_owui_visibility)
     shapes = _shapes_for_files(snap)
     # What a section can DO is derived from its own config - GGUF header, its mmproj, its spec
     # profile - by the same helper the models.ini cards use. OpenWebUI's record is a copy of
@@ -1247,21 +1248,26 @@ async def model_local_detail(request: Request, filename: str) -> HTMLResponse:
 
 @app.post("/models/delete", response_class=HTMLResponse)
 async def models_delete(request: Request, name: str = Form(...)) -> HTMLResponse:
-    ok, msg, freed = services.delete_gguf(name)
-    # Prune here catches ids orphaned EARLIER -- it cannot catch the model just deleted.
-    # delete_gguf removes files, not the models.ini section, so at this point the section is
-    # still there and the id still resolves; `unknown_ids` means "no section provides this".
-    # What makes an id dead is deleting its section, and that path prunes for itself.
-    # A no-op (and no restart) when nothing is actually stale.
-    if ok:
-        try:
-            pruned = services.prune_openwebui_unknown_ids()
-            if pruned:
-                msg = f"{msg}; removed {len(pruned)} stale id(s) from OpenWebUI"
-            services.sync_openwebui_capabilities()
-        except Exception:  # noqa: BLE001 -- deletion must succeed even if OpenWebUI is down
-            pass
-    snap = services.snapshot_models_dir()
+    def _do() -> tuple[bool, str, int]:
+        ok, msg, freed = services.delete_gguf(name)
+        # Prune here catches ids orphaned EARLIER -- it cannot catch the model just deleted.
+        # delete_gguf removes files, not the models.ini section, so at this point the section is
+        # still there and the id still resolves; `unknown_ids` means "no section provides this".
+        # What makes an id dead is deleting its section, and that path prunes for itself.
+        # A no-op (and no restart) when nothing is actually stale.
+        if ok:
+            try:
+                pruned = services.prune_openwebui_unknown_ids()
+                if pruned:
+                    msg = f"{msg}; removed {len(pruned)} stale id(s) from OpenWebUI"
+                services.sync_openwebui_capabilities()
+            except Exception:  # noqa: BLE001 -- deletion must succeed even if OpenWebUI is down
+                pass
+        return ok, msg, freed
+    # The OpenWebUI reconcile behind these calls can restart the container (up to 30 s),
+    # so it runs in a thread: on the loop it would freeze every polling page meanwhile.
+    ok, msg, freed = await asyncio.to_thread(_do)
+    snap = await asyncio.to_thread(services.snapshot_models_dir)
     flash = {"ok": ok, "msg": msg, "freed_h": human_bytes(freed) if freed else None}
     return templates.TemplateResponse(
         "_models_list.html", await _models_list_ctx(request, snap, flash))
@@ -1273,24 +1279,28 @@ async def models_delete_bulk(request: Request) -> HTMLResponse:
     names = form.getlist("names") if hasattr(form, "getlist") else form.get("names") or []
     if isinstance(names, str):
         names = [names]
-    total_freed = 0
-    ok_count = 0
-    errors: list[str] = []
-    for n in names:
-        ok, msg, freed = services.delete_gguf(str(n))
-        if ok:
-            ok_count += 1
-            total_freed += freed
-        else:
-            errors.append(f"{n}: {msg}")
-    # One prune after the whole batch, not per file -- each whitelist write restarts
-    # open-webui, so doing it inside the loop would restart it once per deleted model.
-    if ok_count:
-        try:
-            services.prune_openwebui_unknown_ids()
-        except Exception:  # noqa: BLE001
-            pass
-    snap = services.snapshot_models_dir()
+
+    def _do() -> tuple[int, int, list[str]]:
+        total_freed = 0
+        ok_count = 0
+        errors: list[str] = []
+        for n in names:
+            ok, msg, freed = services.delete_gguf(str(n))
+            if ok:
+                ok_count += 1
+                total_freed += freed
+            else:
+                errors.append(f"{n}: {msg}")
+        # One prune after the whole batch, not per file -- each whitelist write restarts
+        # open-webui, so doing it inside the loop would restart it once per deleted model.
+        if ok_count:
+            try:
+                services.prune_openwebui_unknown_ids()
+            except Exception:  # noqa: BLE001
+                pass
+        return ok_count, total_freed, errors
+    ok_count, total_freed, errors = await asyncio.to_thread(_do)
+    snap = await asyncio.to_thread(services.snapshot_models_dir)
     if errors:
         flash = {"ok": False, "msg": f"deleted {ok_count}, {len(errors)} failed: " + "; ".join(errors[:3])}
     else:
@@ -2024,7 +2034,7 @@ async def config_section_save(request: Request, name: str) -> Response:
     # save, so adding or removing a projector updates the UI that people actually click.
     # No restart: the `model` table is ordinary app data, not PersistentConfig.
     try:
-        services.sync_openwebui_capabilities()
+        await asyncio.to_thread(services.sync_openwebui_capabilities)
     except Exception:  # noqa: BLE001 -- saving the section must not depend on OpenWebUI
         pass
     # A brand-new model is offered on the GPU backends by default. Without this it lands in
@@ -2033,7 +2043,7 @@ async def config_section_save(request: Request, name: str) -> Response:
     note = ""
     if is_new_section:
         try:
-            ok, msg = services.assign_new_model_to_gpu(name)
+            ok, msg = await asyncio.to_thread(services.assign_new_model_to_gpu, name)
             if ok and msg:
                 note = f"&note={msg}"
         except Exception:  # noqa: BLE001
@@ -2203,7 +2213,8 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
     # wrapped so a log-format change or a docker hiccup costs the panel its measurements rather
     # than costing the user the page.
     try:
-        telemetry.ingest(services._effective_container_names())
+        await asyncio.to_thread(telemetry.ingest,
+                                await asyncio.to_thread(services._effective_container_names))
         tel = telemetry.stats_for(model_path=model_rel, alias=name)
         cfgh = telemetry.config_history(model_path=model_rel, alias=name)
     except Exception:  # noqa: BLE001
@@ -2402,7 +2413,7 @@ async def config_section_rename(request: Request, name: str) -> Response:
     # its whitelist rather than intersecting it with what the backend reports, so a dead id
     # stays visible in the model picker and fails with "model not found" only when someone
     # tries to use it — the one failure mode neither end shows you.
-    try:
+    def _reconcile() -> None:
         known = set(ini.section_names())
         for c in (services.openwebui_state().get("connections") or []):
             ids = c.get("model_ids") or []
@@ -2414,6 +2425,9 @@ async def config_section_rename(request: Request, name: str) -> Response:
             # "offer every model", quietly widening what this backend exposes.
             if fixed and fixed != ids:
                 services.set_openwebui_model_filter(c["url"], fixed)
+    try:
+        # Each whitelist write restarts open-webui (up to 30 s) - off the event loop.
+        await asyncio.to_thread(_reconcile)
     except Exception:  # noqa: BLE001 — renaming must succeed even if OpenWebUI is unreachable
         pass
 
@@ -2497,7 +2511,7 @@ async def containers_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("containers.html", {
         "request": request, "backends": backends, "stats": _stats_by_name(), "perf": _perf_by_name(),
         "prompts": db.list_prompts(),
-        "openwebui": services.openwebui_state(),
+        "openwebui": await asyncio.to_thread(services.openwebui_state),
         # Raw model ids a backend reports — what OpenWebUI's model_ids whitelist matches on.
         # Every llama backend serves the same models.ini, so the section names are the list.
         "all_model_ids": sorted(ini.section_names()),
@@ -2718,7 +2732,8 @@ async def containers_openwebui_filter(request: Request) -> HTMLResponse:
             '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">No connection specified.</div>'
         )
     model_ids = [str(v) for v in form.getlist("model_ids") if str(v).strip()]
-    ok, msg = services.set_openwebui_model_filter(url, model_ids)
+    # Writes webui.db through docker exec and restarts open-webui (up to 30 s) - off the loop.
+    ok, msg = await asyncio.to_thread(services.set_openwebui_model_filter, url, model_ids)
     cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
            else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
     mark = "✓" if ok else "Filter failed:"
@@ -2789,7 +2804,9 @@ async def models_openwebui_visibility(request: Request) -> HTMLResponse:
         return HTMLResponse(
             '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">Missing model or connection.</div>'
         )
-    ok, msg = services.toggle_openwebui_model(url, model_id, show, sorted(ini.section_names()))
+    # Same as the filter route: webui.db write + open-webui restart behind it.
+    ok, msg = await asyncio.to_thread(
+        services.toggle_openwebui_model, url, model_id, show, sorted(ini.section_names()))
     cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
            else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
     return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Failed:"} {msg}</div>')

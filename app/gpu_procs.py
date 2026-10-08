@@ -50,8 +50,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import docker
 from docker.errors import DockerException
+
+from .utils import docker_client
 
 _KFD_PROC = Path("/sys/class/kfd/kfd/proc")
 _KFD_NODES = Path("/sys/class/kfd/kfd/topology/nodes")
@@ -189,7 +190,9 @@ def cu_per_card(exec_candidates=()) -> int:
     got = _cu_per_card_local()
     if not got and exec_candidates:
         try:
-            client = docker.from_env()
+            client = docker_client()
+            if client is None:
+                return 0
             for name in exec_candidates:
                 try:
                     c = client.containers.get(name)
@@ -333,9 +336,8 @@ def _topo_local() -> dict[str, int]:
 
 def _topo_via_exec(candidates) -> dict[str, int]:
     """Read it through a container that does hold /dev/kfd. First one that answers wins."""
-    try:
-        client = docker.from_env()
-    except (DockerException, OSError):
+    client = docker_client()
+    if client is None:
         return {}
     for name in candidates:
         try:
@@ -376,23 +378,26 @@ def card_index_by_gpu_id(exec_candidates=()) -> dict[str, int]:
 
 def _scan_owners() -> dict[int, tuple[str, str]] | None:
     """{host pid: (container name, process name)}, or None when docker is unreachable."""
+    client = docker_client()
+    if client is None:
+        return None
+    out: dict[int, tuple[str, str]] = {}
     try:
-        client = docker.from_env()
-        out: dict[int, tuple[str, str]] = {}
-        for c in client.containers.list():
-            try:
-                top = c.top(ps_args="-eo pid,comm")
-            except Exception:  # noqa: BLE001 - a container that exited mid-list is not an error
-                continue
-            for row in (top or {}).get("Processes") or []:
-                if len(row) < 2:
-                    continue
-                try:
-                    out[int(row[0])] = (c.name, row[1].strip())
-                except (TypeError, ValueError):
-                    continue
+        containers = client.containers.list()
     except (DockerException, OSError):
         return None
+    for c in containers:
+        try:
+            top = c.top(ps_args="-eo pid,comm")
+        except Exception:  # noqa: BLE001 - a container that exited mid-list is not an error
+            continue
+        for row in (top or {}).get("Processes") or []:
+            if len(row) < 2:
+                continue
+            try:
+                out[int(row[0])] = (c.name, row[1].strip())
+            except (TypeError, ValueError):
+                continue
     return out
 
 
@@ -560,22 +565,25 @@ def gpu_capable_containers(backend_names=()) -> list[dict]:
     """
     known = set(backend_names or ())
     out: list[dict] = []
+    client = docker_client()
+    if client is None:
+        return []
     try:
-        client = docker.from_env()
-        for c in client.containers.list(all=True):
-            if c.name in known:
-                continue
-            try:
-                devs = (c.attrs.get("HostConfig") or {}).get("Devices") or []
-                paths = {str(d.get("PathOnHost", "")) for d in devs}
-            except Exception:  # noqa: BLE001 - a container mid-removal is not an error
-                continue
-            if "/dev/kfd" not in paths:
-                continue
-            out.append({"name": c.name, "running": c.status == "running",
-                        "status": c.status, "last_gb": _LAST_SEEN.get(c.name, 0.0)})
+        containers = client.containers.list(all=True)
     except (DockerException, OSError):
         return []
+    for c in containers:
+        if c.name in known:
+            continue
+        try:
+            devs = (c.attrs.get("HostConfig") or {}).get("Devices") or []
+            paths = {str(d.get("PathOnHost", "")) for d in devs}
+        except Exception:  # noqa: BLE001 - a container mid-removal is not an error
+            continue
+        if "/dev/kfd" not in paths:
+            continue
+        out.append({"name": c.name, "running": c.status == "running",
+                    "status": c.status, "last_gb": _LAST_SEEN.get(c.name, 0.0)})
     out.sort(key=lambda r: r["name"])
     return out
 
@@ -583,7 +591,9 @@ def gpu_capable_containers(backend_names=()) -> list[dict]:
 def set_container_running(name: str, start: bool) -> tuple[bool, str]:
     """Start or stop one container. Returns (ok, message)."""
     try:
-        client = docker.from_env()
+        client = docker_client()
+        if client is None:
+            return False, f"{name}: docker unreachable"
         c = client.containers.get(name)
         if start:
             if c.status == "running":

@@ -19,7 +19,7 @@ from . import ini
 from . import diagnose
 from . import strata as strata_engine
 from .config import settings
-from .utils import human_bytes, shard_key
+from .utils import docker_client, human_bytes, shard_key
 
 
 # ---------- models directory ----------
@@ -451,11 +451,9 @@ def delete_gguf(display_name: str, subdir: str = "") -> tuple[bool, str, int]:
 
 # ---------- docker / containers ----------
 
-def _docker_client() -> docker.DockerClient | None:
-    try:
-        return docker.from_env()
-    except DockerException:
-        return None
+# One shared client for the whole app (see utils.docker_client). The alias keeps the
+# ~25 call sites below spelled the way they always have.
+_docker_client = docker_client
 
 
 @dataclass
@@ -982,11 +980,19 @@ def _is_asleep(container) -> bool:
     return last == "entering"
 
 
-async def snapshot_llama_backends() -> list[LlamaBackend]:
+def _snapshot_backends_sync() -> tuple[list[LlamaBackend], list[tuple[int, str, int | None]]]:
+    """The blocking half: docker enumeration, inspect and the sleeper log read.
+
+    Split out of snapshot_llama_backends because it is all synchronous docker SDK
+    work, and the async caller runs on the event loop - the hero poll hits this
+    every 500 ms, and a container's `logs(tail=400)` for the sleeper check is a
+    round trip per running backend. The caller runs this in a thread.
+    """
     client = _docker_client()
     effective = _effective_container_names()
     if client is None:
-        return [LlamaBackend(name=n, found=False, status="docker unreachable") for n in effective]
+        return [LlamaBackend(name=n, found=False, status="docker unreachable")
+                for n in effective], []
 
     out: list[LlamaBackend] = []
     probe_targets: list[tuple[int, str, int | None]] = []  # (idx, name, internal_port)
@@ -1024,6 +1030,12 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
         out.append(b)
         if b.found and b.status == "running":
             probe_targets.append((i, name, b.internal_port))
+
+    return out, probe_targets
+
+
+async def snapshot_llama_backends() -> list[LlamaBackend]:
+    out, probe_targets = await asyncio.to_thread(_snapshot_backends_sync)
 
     if probe_targets:
         results = await asyncio.gather(
