@@ -227,19 +227,14 @@
   {# A running Strata can be asked to unload instead of being stopped: same VRAM and RAM
      back in ~0.3 s, container and page cache left warm, return trip in seconds instead of
      a 90 s cold start. The checkbox is offered only when that is actually possible, and
-     hx-include on the forms is what carries it. #}
+     hx-include on the forms is what carries it. It sits AFTER the buttons and names the
+     handover it modifies: a bare "unload instead of stop" read as an orphan when the
+     word "stop" appeared on no button in the row. #}
   {% set strata_live = engines | selectattr('engine', 'equalto', 'strata') | selectattr('running') | list %}
   <div class="mt-3 border-t border-slate-800 pt-2.5">
     <div id="engine-switch-toast" class="empty:hidden mb-2"></div>
     <div class="flex flex-wrap items-center gap-2">
       <span class="text-[10px] uppercase tracking-wide text-slate-500">Engine</span>
-      {% if strata_live %}
-      <label class="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none"
-             title="Ask a running Strata to UNLOAD instead of stopping it: the same VRAM and RAM come back in ~0.3 s and it stays warm, so the way back costs seconds. The trade: a parked server can still be woken by a stray request. Uncheck for the hard handover.">
-        <input type="checkbox" id="engine-soft" name="soft" value="1" checked class="accent-fuchsia-600">
-        unload instead of stop
-      </label>
-      {% endif %}
       {% for e in engines %}
       <form class="contents"
             {% if not e.running %}
@@ -256,7 +251,8 @@
               {% else %}disabled title="Already holding the cards."{% endif %}>
         <span class="h-2 w-2 shrink-0 rounded-sm {% if e.running %}bg-fuchsia-600{% else %}bg-slate-700{% endif %}"></span>
         {{ e.engine }}
-        {%- if e.running %} <span class="text-[10px] text-fuchsia-400/70">active</span>{% endif %}
+        {%- if e.running %} <span class="text-[10px] text-fuchsia-400/70">active</span>
+        {%- else %} <span class="text-[10px] text-slate-500">take over</span>{% endif %}
       </button>
       </form>
       {# Share: start this engine, displace nothing. Offered only when the cards divide -
@@ -274,6 +270,13 @@
       </form>
       {% endif %}
       {% endfor %}
+      {% if strata_live %}
+      <label class="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none"
+             title="Modifies the take-over buttons: a running Strata is asked to UNLOAD instead of being stopped - the same VRAM and RAM come back in ~0.3 s and it stays warm, so the way back costs seconds. The trade: a parked server can still be woken by a stray request. Uncheck for the hard handover.">
+        <input type="checkbox" id="engine-soft" name="soft" value="1" checked class="accent-fuchsia-600">
+        handover: unload strata instead of stopping it
+      </label>
+      {% endif %}
       {#
         The phase is shown for everything except 'done'. 'loading' is the one that earns its
         place: the container is up but the model is not in yet - 90 s on Strata, which reads
