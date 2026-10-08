@@ -548,10 +548,6 @@ def note_seen(ts: list[Tenant]) -> None:
             _LAST_SEEN[t.container] = t.total_gb
 
 
-def last_seen_gb(container: str) -> float:
-    return _LAST_SEEN.get(container, 0.0)
-
-
 def gpu_capable_containers(backend_names=()) -> list[dict]:
     """Containers that were given a GPU but are NOT llama backends, running or stopped.
 

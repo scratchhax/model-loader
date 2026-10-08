@@ -251,6 +251,11 @@ def _cached_components(name: str, vendor: str, gpu_count: int,
         comps = None
     with _LOCK:
         _CACHE[key] = (time.time(), comps)
+        # The loaded-model set is part of the key, so every swap leaves the previous
+        # set's entry unreachable. Drop this backend's stale entries on write;
+        # otherwise the dict grows one permanent entry per model swap forever.
+        for stale in [k for k in _CACHE if k[0] == name and k != key]:
+            _CACHE.pop(stale, None)
     return comps
 
 

@@ -115,29 +115,28 @@ def _read_raw_stream(f) -> dict[str, Any]:
     (io.BytesIO) as well as a local file — metadata lives at the very start of a GGUF,
     so the first ~1 MB is enough to read every KV pair without pulling the weights.
     """
-    if True:
-        magic = f.read(4)
-        if magic != b"GGUF":
-            raise GgufMetaError(f"not a GGUF file (magic={magic!r})")
-        version = struct.unpack("<I", f.read(4))[0]
-        tensor_count = struct.unpack("<Q", f.read(8))[0]
-        kv_count = struct.unpack("<Q", f.read(8))[0]
-        out: dict[str, Any] = {
-            "_gguf_version": version,
-            "_tensor_count": tensor_count,
-            "_kv_count": kv_count,
-        }
-        for _ in range(kv_count):
-            try:
-                key = _read_string(f)
-                vtype = struct.unpack("<I", f.read(4))[0]
-                out[key] = _read_value(f, vtype)
-            except GgufMetaError as e:
-                out["_error"] = f"stopped at KV read: {e}"
-                break
-            except (struct.error, OSError) as e:
-                out["_error"] = f"stopped at KV read: {e}"
-                break
+    magic = f.read(4)
+    if magic != b"GGUF":
+        raise GgufMetaError(f"not a GGUF file (magic={magic!r})")
+    version = struct.unpack("<I", f.read(4))[0]
+    tensor_count = struct.unpack("<Q", f.read(8))[0]
+    kv_count = struct.unpack("<Q", f.read(8))[0]
+    out: dict[str, Any] = {
+        "_gguf_version": version,
+        "_tensor_count": tensor_count,
+        "_kv_count": kv_count,
+    }
+    for _ in range(kv_count):
+        try:
+            key = _read_string(f)
+            vtype = struct.unpack("<I", f.read(4))[0]
+            out[key] = _read_value(f, vtype)
+        except GgufMetaError as e:
+            out["_error"] = f"stopped at KV read: {e}"
+            break
+        except (struct.error, OSError) as e:
+            out["_error"] = f"stopped at KV read: {e}"
+            break
     return out
 
 

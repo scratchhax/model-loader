@@ -546,10 +546,11 @@ def _clean_card_power(name: str, cards: list[GpuCard]) -> None:
     """
     for c in cards:
         key = (name, c.index)
-        window = _POWER_SAMPLES.setdefault(key, [])
-        window.append(c.power_w)
-        del window[:-_POWER_WINDOW]
-        c.power_w = round(sorted(window)[len(window) // 2], 1)
+        with _LOCK:   # the sampler's prune block pops keys from this dict too
+            window = _POWER_SAMPLES.setdefault(key, [])
+            window.append(c.power_w)
+            del window[:-_POWER_WINDOW]
+            c.power_w = round(sorted(window)[len(window) // 2], 1)
 
 
 def _collect(name: str) -> BackendStats:
@@ -709,6 +710,9 @@ def _sample_loop() -> None:
                     _HISTORY.pop(gone, None)
                     _CACHE.pop(gone, None)
                     _RUNTIME_CACHE.pop(gone, None)
+                    _VENDOR_CACHE.pop(gone, None)
+                    for key in [k for k in _POWER_SAMPLES if k[0] == gone]:
+                        _POWER_SAMPLES.pop(key, None)
         time.sleep(_SAMPLE_INTERVAL_S)
 
 
@@ -755,11 +759,16 @@ def start_sampler() -> None:
 _POWER_HISTORY_MAX = 240
 _POWER_MIN_GAP_S = 0.5
 _power_history: list[tuple[float, float, float, str]] = []   # (ts, wall_w, temp_c, temp_label)
+# Written from the dashboard render (event loop) AND the 2 s power_partial poll (threadpool),
+# read by both - the append/truncate and the read need one lock or the sparkline can
+# duplicate or drop samples while the window arithmetic races itself.
+_POWER_HIST_LOCK = threading.Lock()
 
 
 def power_history() -> tuple[list[float], list[float]]:
     """(wall watts, hottest temperature) series, oldest first."""
-    return [w for _t, w, _c, _l in _power_history], [c for _t, _w, c, _l in _power_history]
+    with _POWER_HIST_LOCK:
+        return [w for _t, w, _c, _l in _power_history], [c for _t, _w, c, _l in _power_history]
 
 
 _HOST_SENSORS_PATH = Path("/data/host_sensors.json")
@@ -822,10 +831,11 @@ def power_rollup(baseline_w: float, psu_efficiency: float) -> dict:
     eff = psu_efficiency if 0.5 <= psu_efficiency <= 1.0 else 0.9
     wall_w = dc_w / eff
     now = time.time()
-    if not _power_history or (now - _power_history[-1][0]) >= _POWER_MIN_GAP_S:
-        _power_history.append((now, round(wall_w, 1), round(hottest_c, 1), hottest_label))
-        if len(_power_history) > _POWER_HISTORY_MAX:
-            del _power_history[:len(_power_history) - _POWER_HISTORY_MAX]
+    with _POWER_HIST_LOCK:
+        if not _power_history or (now - _power_history[-1][0]) >= _POWER_MIN_GAP_S:
+            _power_history.append((now, round(wall_w, 1), round(hottest_c, 1), hottest_label))
+            if len(_power_history) > _POWER_HISTORY_MAX:
+                del _power_history[:len(_power_history) - _POWER_HISTORY_MAX]
 
     return {
         "hottest_c": round(hottest_c, 1) if hottest_c else None,

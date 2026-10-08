@@ -102,32 +102,6 @@ def read_pin(path: Path | None = None) -> str:
     return single
 
 
-def pin_in_container(attrs: dict | None) -> str:
-    """The selection the container was CREATED with, from its baked environment. "" if none.
-
-    Kept for tests and for reading a container that does not follow the re-source pattern.
-    NOT what the running process is on: the documented entry point sources strata.env on
-    every start, so the file wins after any restart while docker inspect keeps reporting
-    the create-time values until a recreate - which is why the app reads the live pin from
-    the file, not from here.
-    """
-    try:
-        env = ((attrs or {}).get("Config") or {}).get("Env") or []
-    except AttributeError:
-        return ""
-    single = ""
-    for entry in env:
-        if not isinstance(entry, str):
-            continue
-        key, _, val = entry.partition("=")
-        key, val = key.strip(), val.strip()
-        if key == "GPUS" and val:
-            return ",".join(part.strip() for part in val.split(","))
-        if key == "GPU" and val.isdigit():
-            single = val
-    return single
-
-
 def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
     """Rewrite the pin file to name `selection` ("1" or "1,0"). Returns (ok, message).
 
