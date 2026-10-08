@@ -74,11 +74,13 @@ def read_pin(path: Path | None = None) -> str:
 
 
 def pin_in_container(attrs: dict | None) -> str:
-    """The selection the RUNNING container was created with, from its own environment.
+    """The selection the container was CREATED with, from its baked environment. "" if none.
 
-    Read separately from the file on purpose. The file is what the next start will use; this
-    is what the process is actually on. They differ exactly between a pin change and the
-    restart that applies it, and that gap is the one thing a user needs told about.
+    Kept for tests and for reading a container that does not follow the re-source pattern.
+    NOT what the running process is on: the documented entry point sources strata.env on
+    every start, so the file wins after any restart while docker inspect keeps reporting
+    the create-time values until a recreate - which is why the app reads the live pin from
+    the file, not from here.
     """
     try:
         env = ((attrs or {}).get("Config") or {}).get("Env") or []

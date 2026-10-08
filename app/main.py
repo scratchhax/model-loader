@@ -2547,7 +2547,12 @@ def _strata_pin_state(backends) -> dict | None:
     return {
         "backend": b.name,
         "file": strata_engine.read_pin(),
-        "live": strata_engine.pin_in_container(attrs),
+        # The file IS the live pin while running: the documented entry point sources it on
+        # every start, so any restart applies it, while docker inspect keeps reporting the
+        # create-time environment until a recreate. (Measured: a re-pinned engine ran on
+        # one card while its baked env still said 1,0 - showing that as "live" made the
+        # card claim a restart was needed forever.)
+        "live": strata_engine.read_pin() if b.status == "running" else "",
         "choices": choices,
         "running": b.status == "running",
         "config_note": strata_engine.config_note(

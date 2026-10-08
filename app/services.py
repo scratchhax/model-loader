@@ -1564,21 +1564,22 @@ def strata_error(name: str, loaded: bool = False) -> str:
 
 
 def strata_held_cards() -> tuple[int, ...]:
-    """The cards a RUNNING Strata backend holds, per its own container environment. () when
-    no Strata runs, or it runs unpinned.
+    """The cards a RUNNING Strata backend holds, per the pin file. () when no Strata runs,
+    or it runs unpinned.
 
-    The container's environment and not the pin file: the file is what the next start will
-    use, and a fit table that zeroed out cards the running process never took would be
-    sizing against a claim instead of a fact. Empty on any failure - whole cards are the
-    conservative answer when the truth is unknown, and it is the answer the app gave before
-    Strata existed at all.
+    The file, not the container's baked environment: the documented entry point sources
+    this file on every start, so after any restart the file is what the process is on,
+    while docker inspect keeps reporting create-time values until the container is
+    recreated. (Measured on this box: a re-pinned engine held one card while its baked env
+    still said 1,0.) Empty on any failure - whole cards are the conservative answer when
+    the truth is unknown, and it is the answer the app gave before Strata existed at all.
     """
     try:
         client = _docker_client()
         if client is None:
             return ()
         for c in client.containers.list(filters={"label": f"ai-lab.engine={strata_engine.ENGINE}"}):
-            sel = strata_engine.pin_in_container(c.attrs)
+            sel = strata_engine.read_pin()
             if sel:
                 return tuple(int(x) for x in sel.split(","))
     except Exception:  # noqa: BLE001
