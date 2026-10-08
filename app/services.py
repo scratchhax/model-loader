@@ -2180,9 +2180,13 @@ def _rates_from_log_strata(name: str) -> dict:
                 out["cur_pp_done"] = int(pr or 0)
         out["last_gen_tps"] = float(last.get("decode_tok_s") or 0.0)
         out["last_gen_tokens"] = int(last.get("output_tokens") or 0)
-        if last.get("prompt_ms"):
-            out["last_pp_tps"] = round((last.get("prompt_tokens") or 0)
-                                       / (last["prompt_ms"] / 1000.0), 1)
+        # Prompt rate over the tokens actually READ, not the whole prompt: with prefix-cache
+        # reuse prompt_ms covers only the few thousand tokens that were not a cache hit, and
+        # dividing the full prompt by it printed 432,000 tok/s on a warm agent session. An
+        # older engine without prompt_read gets 0 - an honest zero beats a wrong 400k.
+        read = last.get("prompt_read")
+        if last.get("prompt_ms") and read:
+            out["last_pp_tps"] = round(read / (last["prompt_ms"] / 1000.0), 1)
         hr = last.get("hit_rate")
         out["expert_hit_pct"] = round(hr * 100.0, 1) if isinstance(hr, (int, float)) else None
         n = totals.get("requests")
