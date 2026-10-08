@@ -11,6 +11,7 @@ import docker
 from docker.errors import DockerException, NotFound
 
 from .config import settings
+from .utils import docker_client
 
 
 @dataclass
@@ -112,10 +113,9 @@ _sampler_started = False
 
 
 def _client() -> docker.DockerClient | None:
-    try:
-        return docker.from_env()
-    except DockerException:
-        return None
+    # Shared app-wide client; used to be docker.from_env() per call, which the
+    # 2 s sampler leaked continuously.
+    return docker_client()
 
 
 def _detect_vendor(container) -> str:
