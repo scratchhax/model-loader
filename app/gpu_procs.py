@@ -52,7 +52,7 @@ from pathlib import Path
 
 from docker.errors import DockerException
 
-from .utils import docker_client
+from .utils import docker_client, timed_shell
 
 _KFD_PROC = Path("/sys/class/kfd/kfd/proc")
 _KFD_NODES = Path("/sys/class/kfd/kfd/topology/nodes")
@@ -198,7 +198,7 @@ def cu_per_card(exec_candidates=()) -> int:
                     c = client.containers.get(name)
                     if c.status != "running":
                         continue
-                    code, out = c.exec_run(["sh", "-c", _CU_SH], demux=False)
+                    code, out = c.exec_run(timed_shell(_CU_SH), demux=False)
                 except Exception:  # noqa: BLE001 - a container without a shell is not the one
                     continue
                 if code == 0:
@@ -344,7 +344,7 @@ def _topo_via_exec(candidates) -> dict[str, int]:
             c = client.containers.get(name)
             if c.status != "running":
                 continue
-            code, out = c.exec_run(["sh", "-c", _TOPO_SH], demux=False)
+            code, out = c.exec_run(timed_shell(_TOPO_SH), demux=False)
         except Exception:  # noqa: BLE001 - a container without a shell is just not the one
             continue
         if code != 0:

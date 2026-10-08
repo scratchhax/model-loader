@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import threading
 import time
 
@@ -68,3 +69,16 @@ def docker_client() -> "docker.DockerClient | None":
         except DockerException:
             _DOCKER_CLIENT = None
         return _DOCKER_CLIENT
+
+
+def timed_shell(cmd: str, seconds: int = 5) -> list[str]:
+    """Wrap a shell command for docker exec_run so it cannot hang forever.
+
+    exec_run has no timeout parameter: a wedged nvidia-smi/rocm-smi on a sick
+    GPU blocks the read indefinitely, freezing whatever thread asked - the 2 s
+    sampler, or worse an event-loop handler. coreutils `timeout` inside the
+    container caps it (exit 124, which every caller already treats as "no
+    data"); on an image without `timeout` the exec dies at 127 instead.
+    Degraded telemetry beats a frozen sampler.
+    """
+    return ["sh", "-c", f"timeout {seconds} sh -c {shlex.quote(cmd)}"]
