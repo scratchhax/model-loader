@@ -263,6 +263,9 @@
             hx-post="/engines/{{ e.engine }}/activate"
             hx-target="#engine-switch-toast" hx-swap="innerHTML"
             hx-confirm="Share the cards? {{ e.names|join(', ') }} starts and nothing is stopped — {{ share[e.engine] }}.">
+      {# The hidden input is the whole request: HTMX posts the form's inputs, and a form
+         with none was a hard take-over wearing a green badge (measured the hard way). #}
+      <input type="hidden" name="share" value="1">
       <button class="inline-flex items-center rounded-lg border border-emerald-800 bg-emerald-950/30 px-2 py-1.5 text-[10px] font-mono text-emerald-300 hover:bg-emerald-900/40"
               title="Starts {{ e.names|join(', ') }} without stopping or unloading anything: {{ share[e.engine] }}.">
         share
