@@ -40,6 +40,9 @@ ENV_PATH = Path(os.environ.get("STRATA_ENV_PATH") or "/strata/strata.env")
 # comments explaining itself.
 _PIN_RE = re.compile(r"^(?:export\s+)?GPU\s*=\s*(\d+)\s*$")
 _PINS_RE = re.compile(r"^(?:export\s+)?GPUS\s*=\s*(\d+(?:\s*,\s*\d+)*)\s*$")
+# Any pin line, set or cleared - the cleared kind (GPUS= with nothing after it) matters:
+# see set_pin.
+_PIN_ANY_RE = re.compile(r"^(?:export\s+)?GPUS?\s*=")
 
 
 def read_pin(path: Path | None = None) -> str:
@@ -102,9 +105,13 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
     someone reading it later needs. An append-only writer would leave two GPU= lines and `sh`
     sourcing the file would take the last; a truncating writer would throw the explanation away.
 
-    Exactly one of GPU / GPUS survives. Leaving a stale GPU= beside a new GPUS= would mean the
-    file disagrees with itself, and which one won would depend on the order the entry point
-    happens to pass them.
+    Both switches are always named: the chosen one set, the other explicitly CLEARED. The
+    entry point sources this file and then exports GPU and GPUS as they stand - a compose
+    service that bakes `GPUS=1,0` into the container environment keeps that value through a
+    restart unless the file overwrites it, and the entry point passes --gpus after --gpu, so
+    the stale bake wins. (Measured on this box: a pin to one card left the engine across
+    both until the file said GPUS= as well.) An empty assignment is what sourcing needs to
+    see to clear the variable; deleting the line does nothing.
     """
     cards = [c.strip() for c in str(selection).split(",") if c.strip()]
     if not cards or not all(c.isdigit() for c in cards):
@@ -119,11 +126,13 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
     except OSError as e:
         return False, f"cannot read {p}: {e}"
 
-    want = f"GPU={cards[0]}" if len(cards) == 1 else "GPUS=" + ",".join(cards)
+    single = len(cards) == 1
+    want = f"GPU={cards[0]}" if single else "GPUS=" + ",".join(cards)
+    clear = "GPUS=" if single else "GPU="
     out: list[str] = []
     placed = False
     for line in text.splitlines():
-        if _PIN_RE.match(line.strip()) or _PINS_RE.match(line.strip()):
+        if _PIN_ANY_RE.match(line.strip()):
             if not placed:          # the first pin line becomes the new one; any other is dropped
                 out.append(want)
                 placed = True
@@ -131,12 +140,13 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
         out.append(line)
     if not placed:
         out.append(want)
+    out.append(clear)   # always: sourcing must beat whatever compose baked in
 
     try:
         p.write_text("\n".join(out) + "\n", encoding="utf-8")
     except OSError as e:
         return False, f"cannot write {p}: {e}"
-    if len(cards) == 1:
+    if single:
         return True, f"pinned to card {cards[0]}"
     return True, (f"split across cards {', '.join(cards)} — card {cards[0]} is the main one. "
                   "Upstream measured a split LOSING on this pair (4K prompts 1,776 -> 1,244 "
