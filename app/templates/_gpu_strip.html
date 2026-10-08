@@ -276,7 +276,11 @@
       {% if strata_live %}
       <label class="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none"
              title="Modifies the take-over buttons: a running Strata is asked to UNLOAD instead of being stopped - the same VRAM and RAM come back in ~0.3 s and it stays warm, so the way back costs seconds. The trade: a parked server can still be woken by a stray request. Uncheck for the hard handover.">
-        <input type="checkbox" id="engine-soft" name="soft" value="1" checked class="accent-fuchsia-600">
+        {# hx-preserve because the strip re-renders every second: without it the swap
+           re-creates the checkbox from the template's hardcoded `checked` and the user's
+           uncheck survives exactly one poll. The preserved node keeps its live state. #}
+        <input type="checkbox" id="engine-soft" name="soft" value="1" checked
+               hx-preserve="true" class="accent-fuchsia-600">
         handover: unload strata instead of stopping it
       </label>
       {% endif %}
