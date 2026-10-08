@@ -86,6 +86,7 @@ def run() -> dict:
             continue
 
         # Copy into each referencing section's dir, then delete original
+        all_placed = True
         for sec in refs:
             sec_dir = root / sec
             sec_dir.mkdir(exist_ok=True)
@@ -98,12 +99,17 @@ def run() -> dict:
                 ini_updates.append(f"[{sec}] mmproj = {mmproj_abs}")
                 mmproj_placed.append(f"{mp.name} -> {sec}/{mp.name}")
             except OSError as e:
+                all_placed = False
                 skipped.append(f"{mp.name} -> {sec}: {e}")
-        # Remove the original at top-level after all copies
-        try:
-            mp.unlink()
-        except OSError as e:
-            skipped.append(f"unlink {mp.name}: {e}")
+        # Remove the original at top-level after all copies - but ONLY when every
+        # copy landed. A section whose copy failed still points at the original in
+        # the ini (cp.set is skipped with it), and unlinking anyway would leave
+        # that section's mmproj = path dangling.
+        if all_placed:
+            try:
+                mp.unlink()
+            except OSError as e:
+                skipped.append(f"unlink {mp.name}: {e}")
 
     # ---- pass 4: promote any relative model/mmproj paths back to absolute (llama-server needs abs)
     for sec in cp.sections():

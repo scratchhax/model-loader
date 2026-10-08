@@ -22,6 +22,29 @@ from .config import settings
 from .utils import docker_client, human_bytes, shard_key
 
 
+# ---------- hot-path HTTP ----------
+
+_HTTP: httpx.AsyncClient | None = None
+_HTTP_LOOP: "asyncio.AbstractEventLoop | None" = None
+
+
+def _http() -> httpx.AsyncClient:
+    """Shared AsyncClient for the hot poll paths (/v1/models, /slots, /props).
+
+    A fresh client per request churned a TCP connect+teardown per backend every
+    500 ms-2 s; one pooled client keeps the connections alive. It is bound to the
+    loop that created it, so it is rebuilt if the running loop ever changes (the
+    test suites spin a fresh loop per run). Per-call timeouts are passed at the
+    request sites, which differ by an order of magnitude.
+    """
+    global _HTTP, _HTTP_LOOP
+    loop = asyncio.get_running_loop()
+    if _HTTP is None or _HTTP.is_closed or _HTTP_LOOP is not loop:
+        _HTTP = httpx.AsyncClient(timeout=httpx.Timeout(2.0))
+        _HTTP_LOOP = loop
+    return _HTTP
+
+
 # ---------- models directory ----------
 
 
@@ -719,72 +742,71 @@ async def _probe_loaded_model(
         return None, None, None, None, None, None
     url = f"http://{container_name}:{internal_port}/v1/models"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, read=3.0)) as client:
-            r = await client.get(url)
-            if r.status_code != 200:
-                return None, f"HTTP {r.status_code}", None, None, None, None
-            data = r.json()
-            items = data.get("data") or []
-            if not items:
-                return None, "no models configured", None, None, None, None
-            loaded_ids: list[str] = []
-            unloaded_ids: list[str] = []
-            failure: str | None = None
-            loading: str | None = None
-            sleeping: str | None = None
-            for it in items:
-                mid = str(it.get("id") or "")
-                # A ROUTER reports status.value per model because it loads and evicts them. A
-                # server started with -m has no status field at all, because it has nothing to
-                # load or unload: the one model named on its command line is resident for the
-                # life of the process. Reading an absent status as "not loaded" made Orpheus
-                # TTS report "1 configured, none loaded" while it was actively speaking, and
-                # left the overview claiming nothing was running whenever it was the only
-                # backend holding a model. Its id is the container path, so show the stem.
-                if "status" not in it:
-                    stem = mid.rsplit("/", 1)[-1]
-                    if stem.lower().endswith(".gguf"):
-                        stem = stem[:-5]
-                    if stem:
-                        loaded_ids.append(stem)
-                    continue
-                status = it.get("status") or {}
-                val = str(status.get("value") or "").lower()
-                if val == "loaded":
-                    loaded_ids.append(mid)
-                elif val == "sleeping":
-                    sleeping = mid
-                elif val == "loading":
-                    # At --models-max 1 there can only be one, and it flips within ~0.3 s of the
-                    # request - early enough to cover the eviction of its predecessor, so this
-                    # one field spans the whole episode the user is staring at.
-                    loading = mid
-                elif val == "unloaded" and not _load_failure(status)[0]:
-                    # A FAILED llama model reads value "unloaded" too, with the flag set -
-                    # so the failure check has to keep seeing those, and only a clean
-                    # unloaded lands here.
-                    unloaded_ids.append(mid)
-                elif failure is None:
-                    failed, code = _load_failure(status)
-                    if failed:
-                        failure = f"{mid} (exit {code})" if code is not None else mid
-            if failure is not None:
-                return (", ".join(i for i in loaded_ids if i) or None, None, failure,
-                        loading, sleeping, None)
-            if loaded_ids:
-                return ", ".join(i for i in loaded_ids if i), None, None, loading, sleeping, None
-            # "none loaded" is the honest note only when nothing is on its way in and nothing is
-            # merely asleep. Either of those read as an idle box, which is the confusion this
-            # whole function keeps being wrong about.
-            if loading or sleeping:
-                return None, None, None, loading, sleeping, None
-            # One model, and it says unloaded: that is not an idle router with an ini full of
-            # candidates, it is a parked single-model server - VRAM free, files in the page
-            # cache, seconds from serving. Saying "1 configured, none loaded" made it read as
-            # the router case and hid the one fact that distinguishes them.
-            if len(items) == 1 and len(unloaded_ids) == 1:
-                return None, None, None, None, None, unloaded_ids[0]
-            return None, f"{len(items)} configured, none loaded", None, None, None, None
+        r = await _http().get(url, timeout=httpx.Timeout(2.0, read=3.0))
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}", None, None, None, None
+        data = r.json()
+        items = data.get("data") or []
+        if not items:
+            return None, "no models configured", None, None, None, None
+        loaded_ids: list[str] = []
+        unloaded_ids: list[str] = []
+        failure: str | None = None
+        loading: str | None = None
+        sleeping: str | None = None
+        for it in items:
+            mid = str(it.get("id") or "")
+            # A ROUTER reports status.value per model because it loads and evicts them. A
+            # server started with -m has no status field at all, because it has nothing to
+            # load or unload: the one model named on its command line is resident for the
+            # life of the process. Reading an absent status as "not loaded" made Orpheus
+            # TTS report "1 configured, none loaded" while it was actively speaking, and
+            # left the overview claiming nothing was running whenever it was the only
+            # backend holding a model. Its id is the container path, so show the stem.
+            if "status" not in it:
+                stem = mid.rsplit("/", 1)[-1]
+                if stem.lower().endswith(".gguf"):
+                    stem = stem[:-5]
+                if stem:
+                    loaded_ids.append(stem)
+                continue
+            status = it.get("status") or {}
+            val = str(status.get("value") or "").lower()
+            if val == "loaded":
+                loaded_ids.append(mid)
+            elif val == "sleeping":
+                sleeping = mid
+            elif val == "loading":
+                # At --models-max 1 there can only be one, and it flips within ~0.3 s of the
+                # request - early enough to cover the eviction of its predecessor, so this
+                # one field spans the whole episode the user is staring at.
+                loading = mid
+            elif val == "unloaded" and not _load_failure(status)[0]:
+                # A FAILED llama model reads value "unloaded" too, with the flag set -
+                # so the failure check has to keep seeing those, and only a clean
+                # unloaded lands here.
+                unloaded_ids.append(mid)
+            elif failure is None:
+                failed, code = _load_failure(status)
+                if failed:
+                    failure = f"{mid} (exit {code})" if code is not None else mid
+        if failure is not None:
+            return (", ".join(i for i in loaded_ids if i) or None, None, failure,
+                    loading, sleeping, None)
+        if loaded_ids:
+            return ", ".join(i for i in loaded_ids if i), None, None, loading, sleeping, None
+        # "none loaded" is the honest note only when nothing is on its way in and nothing is
+        # merely asleep. Either of those read as an idle box, which is the confusion this
+        # whole function keeps being wrong about.
+        if loading or sleeping:
+            return None, None, None, loading, sleeping, None
+        # One model, and it says unloaded: that is not an idle router with an ini full of
+        # candidates, it is a parked single-model server - VRAM free, files in the page
+        # cache, seconds from serving. Saying "1 configured, none loaded" made it read as
+        # the router case and hid the one fact that distinguishes them.
+        if len(items) == 1 and len(unloaded_ids) == 1:
+            return None, None, None, None, None, unloaded_ids[0]
+        return None, f"{len(items)} configured, none loaded", None, None, None, None
     except (httpx.HTTPError, ValueError) as e:
         return None, f"{type(e).__name__}: {e}", None, None, None, None
 
@@ -2059,6 +2081,17 @@ _props_cache: dict[str, tuple[float, dict]] = {}
 # Last per-slot context figures seen while busy, so the strip survives going idle without a
 # /slots read. One (ctx_used, ctx_total) per slot, in index order; the length IS the slot count.
 _last_slots: dict[str, list[tuple[int, int]]] = {}
+
+
+def _evict_other_models(cache: dict, key: str) -> None:
+    """Drop this container's entries for OTHER models. Both caches above are keyed
+    container/model, so every swap used to leave a permanent entry behind; the old
+    model's figures are unreachable the moment a new one loads."""
+    prefix = key.split("/", 1)[0] + "/"
+    for stale in [k for k in cache if k.startswith(prefix) and k != key]:
+        cache.pop(stale, None)
+
+
 # A task the log still calls open but /slots has reported finished. Remembering it stops a
 # missing release line - a crash, or a tail that scrolled - from polling /slots forever.
 _settled_task: dict[str, int] = {}
@@ -2096,8 +2129,8 @@ async def _slot_states(container_name: str, internal_port: int, model_id: str) -
     """
     url = f"http://{container_name}:{internal_port}/slots"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, read=2.0)) as client:
-            r = await client.get(url, params={"model": model_id})
+        r = await _http().get(url, params={"model": model_id},
+                              timeout=httpx.Timeout(1.5, read=2.0))
         if r.status_code != 200:
             return []
         slots = r.json()
@@ -2130,9 +2163,9 @@ async def _props_state(container_name: str, internal_port: int, model_id: str) -
         return cached[1]
     out: dict = {}
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(1.5, read=2.0)) as client:
-            r = await client.get(f"http://{container_name}:{internal_port}/props",
-                                 params={"model": model_id})
+        r = await _http().get(f"http://{container_name}:{internal_port}/props",
+                              params={"model": model_id},
+                              timeout=httpx.Timeout(1.5, read=2.0))
         if r.status_code == 200:
             d = r.json()
             gen = d.get("default_generation_settings") or {}
@@ -2141,6 +2174,7 @@ async def _props_state(container_name: str, internal_port: int, model_id: str) -
                    "is_sleeping": bool(d.get("is_sleeping"))}
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
         out = {}
+    _evict_other_models(_props_cache, key)
     _props_cache[key] = (time.time(), out)
     return out
 
@@ -2455,6 +2489,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
             slots = _slots_strata(raw_slots, r)
         else:
             slots = [_slot_speed(container_name, s, r, now) for s in raw_slots]
+        _evict_other_models(_last_slots, ctx_key)
         _last_slots[ctx_key] = [(sl.ctx_used, sl.ctx_total) for sl in slots]
     else:
         # Idle, and /slots was deliberately not read. Rebuild the strip from the last busy
