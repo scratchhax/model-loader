@@ -2407,6 +2407,13 @@ async def inference_speed(container_name: str, internal_port: int | None,
         # task ids restart from 1 when the router reloads a child, so a marker left over from a
         # previous life could collide with a genuine new task and silence one request's readout.
         _settled_task.pop(container_name, None)
+        # Strata is the exception to the hands-off rule. Its GET /slots is a read of a static
+        # view: upstream keeps the idle-unload clock to the generation paths only, and there
+        # is no sleep state to wake - and n_prompt_tokens, the conversation it carries on,
+        # lives nowhere else. Without this read an idle Strata renders "-" for context after
+        # any restart, when there is no remembered busy sample to fall back on.
+        if _engine == "strata":
+            raw_slots = await _slot_states(container_name, internal_port, model_id)
     elif _settled_task.get(container_name) != open_task:
         raw_slots = await _slot_states(container_name, internal_port, model_id)
         if not any(s.get("is_processing") for s in raw_slots):
