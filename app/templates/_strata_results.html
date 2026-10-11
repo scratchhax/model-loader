@@ -1,0 +1,69 @@
+{% from "_icons.html" import icon %}
+
+{% if error %}
+  <div class="rounded-md border border-rose-300/60 bg-rose-50 dark:border-rose-500/30 dark:bg-rose-500/10 px-3 py-2 text-sm">{{ error }}</div>
+{% elif not rows %}
+  <p class="text-sm text-slate-500 dark:text-slate-400">Nothing found.</p>
+{% else %}
+
+<div class="space-y-2">
+{% for row in rows %}
+  <div class="rounded-md border {% if row.matches %}border-slate-200 dark:border-slate-700{% else %}border-slate-200/60 dark:border-slate-700/50{% endif %} px-3 py-2">
+    <div class="flex items-baseline justify-between gap-3">
+      <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
+         class="font-medium text-sm hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }}</a>
+      <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
+        {{ '{:,}'.format(row.repo.downloads) }} downloads · {{ row.repo.likes }} likes
+      </span>
+    </div>
+
+    {% if not row.matches %}
+      {# A refusal says WHICH rule it failed. "Unsupported" would send the user to the engine
+         source to find out, which is the thing this page exists to spare them. #}
+      <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Not installable: {{ row.reason }}</p>
+    {% else %}
+      <div class="mt-2 flex flex-wrap gap-1.5">
+      {% for m in row.matches %}
+        {% set taken = m.tier.install_tag in installed %}
+        <form hx-post="/strata/install" hx-swap="outerHTML" class="inline">
+          <input type="hidden" name="repo_id" value="{{ row.repo.id }}">
+          <input type="hidden" name="family" value="{{ m.tier.family }}">
+          <input type="hidden" name="model" value="{{ m.tier.model }}">
+          <button {% if taken %}disabled{% endif %}
+            title="{{ m.files|length }} shard(s){% if m.mmproj %} + vision encoder{% endif %} → slot {{ m.tier.install_tag }}{% if taken %} (already installed){% endif %}"
+            class="rounded-md border px-2 py-1 text-xs
+                   {% if taken %}cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400
+                   {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700{% endif %}">
+            {{ m.tier.model }}
+            <span class="text-slate-400">{{ (m.total_bytes / 1e9)|round(1) }} GB</span>
+            {% if taken %}<span class="text-slate-400">· slot taken</span>
+            {% else %}<span class="text-slate-400">· {{ m.tier.install_tag }}</span>{% endif %}
+          </button>
+        </form>
+      {% endfor %}
+      </div>
+
+      {% for m in row.matches %}
+        {% for w in m.warnings %}
+          <p class="mt-1 text-xs text-amber-700 dark:text-amber-400">{{ m.tier.model }}: {{ w }}</p>
+        {% endfor %}
+      {% endfor %}
+
+      {% set slots = row.matches | map(attribute='tier.family') | unique | list %}
+      {% if slots | length > 1 %}
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          Offered in more than one slot ({{ slots | join(', ') }}) — the files are identical, only the
+          name they are installed under differs. Pick whichever slot is free; the engine will report
+          the model under that slot's title.
+        </p>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endfor %}
+</div>
+
+<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">
+  Sizes are the whole shard set. Anything already on disk with a matching content hash is linked
+  rather than downloaded, so the queued figure is often much smaller.
+</p>
+{% endif %}

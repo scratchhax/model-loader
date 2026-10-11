@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'strata' %}
+{% block title %}Strata models · Model Loader{% endblock %}
+{% block content %}
+
+<div class="flex items-baseline justify-between">
+  <h1 class="text-xl font-semibold tracking-tight">Strata models</h1>
+  <a href="/search" class="text-sm text-slate-500 dark:text-slate-400 hover:underline">llama.cpp search {{ icon('chevron-right', 13) }}</a>
+</div>
+
+{% if not engine_up %}
+  <div class="mt-4 rounded-md border border-amber-300/60 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10 px-3 py-2 text-sm">
+    Strata is not running, so its catalog cannot be read. What is already installed is listed below;
+    start Strata from the overview to search for more.
+  </div>
+{% endif %}
+
+<p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
+  Strata serves one architecture — Qwen3.8-Flash-Next — from an expert pack it builds itself, and it
+  resolves a model by exact filename against the catalog below. A community re-quant or fine-tune is
+  installable when it ships a complete shard set in GSQ-RCO format; it is renamed into a free slot on
+  the way in. Search results say plainly why anything else is refused.
+</p>
+
+<!-- installed ------------------------------------------------------------ -->
+<h2 class="mt-6 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Installed</h2>
+{% if installed %}
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  <table class="w-full text-sm">
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    {% for tag, d in installed.items() %}
+      <tr class="{% if tag == (selection.FAMILY ~ selection.MODEL)|lower %}bg-slate-50 dark:bg-slate-800/50{% endif %}">
+        <td class="px-3 py-2 font-mono text-xs">{{ tag }}</td>
+        <td class="px-3 py-2 text-slate-500 dark:text-slate-400">pack {{ (d.bytes / 1e9)|round(1) }} GB</td>
+        <td class="px-3 py-2 text-right">
+          {% set parts = tag.split('-') %}
+          <form hx-post="/strata/select" hx-swap="outerHTML" class="inline">
+            <input type="hidden" name="family" value="{{ 'unsloth' if tag.startswith('unsloth-') else ('swift' if tag.startswith('swift-') else ('coder' if tag.startswith('coder-') else 'qwen')) }}">
+            <input type="hidden" name="model" value="{{ tag.split('-', 1)[1]|upper if '-' in tag else tag|upper }}">
+            <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Use next start</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+  Selection is written to the file Strata reads on start, the same way the GPU pin is — it applies on
+  the next restart, not immediately.
+  {% if selection.FAMILY %}Next start: <span class="font-mono">{{ selection.FAMILY }} / {{ selection.MODEL }}</span>.{% endif %}
+</p>
+{% else %}
+<p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing prepared yet.</p>
+{% endif %}
+
+<!-- search ---------------------------------------------------------------- -->
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Find a model</h2>
+<form hx-get="/strata/search/results" hx-target="#strata-results" hx-indicator="#sp" hx-swap="innerHTML"
+      class="mt-2 flex flex-wrap gap-2">
+  <input name="q" value="{{ query }}" placeholder="Qwen3.8-Flash-Next  ·  abliterated  ·  GSQ-RCO"
+         class="min-w-[18rem] flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm">
+  <button class="rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium">Search</button>
+  <span id="sp" class="htmx-indicator self-center text-xs text-slate-500">searching…</span>
+</form>
+
+<div id="strata-results" class="mt-4"
+     hx-get="/strata/search/results?q=" hx-trigger="load" hx-swap="innerHTML"></div>
+
+<!-- catalog --------------------------------------------------------------- -->
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+  Catalog <span class="font-normal normal-case">— read from the running engine, so it tracks the image</span>
+</h2>
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 dark:bg-slate-800/60 text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <tr>
+        <th class="px-3 py-2 text-left font-medium">Family</th>
+        <th class="px-3 py-2 text-left font-medium">Tier</th>
+        <th class="px-3 py-2 text-right font-medium">Download</th>
+        <th class="px-3 py-2 text-right font-medium">Experts in RAM</th>
+        <th class="px-3 py-2 text-left font-medium">Slot</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    {% for t in tiers %}
+      <tr>
+        <td class="px-3 py-2">{{ t.family_title }}
+          {% if t.experimental %}<span class="ml-1 rounded bg-amber-100 dark:bg-amber-500/20 px-1 text-[10px] uppercase">experimental</span>{% endif %}
+          {% if t.vision %}<span class="ml-1 rounded bg-sky-100 dark:bg-sky-500/20 px-1 text-[10px] uppercase">images</span>{% endif %}
+        </td>
+        <td class="px-3 py-2 font-mono text-xs">{{ t.model }}</td>
+        <td class="px-3 py-2 text-right">{{ t.download_gb }} GB</td>
+        <td class="px-3 py-2 text-right">{{ t.arena_gb }} GB</td>
+        <td class="px-3 py-2">
+          <span class="font-mono text-xs">{{ t.install_tag }}</span>
+          {% if t.install_tag in installed %}<span class="ml-1 text-xs text-emerald-600 dark:text-emerald-400">installed</span>
+          {% elif t.hash_pinned %}<span class="ml-1 text-xs text-slate-400">upstream only</span>
+          {% else %}<span class="ml-1 text-xs text-slate-400">free</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="mt-2 max-w-3xl text-xs text-slate-500 dark:text-slate-400">
+  A pack is named after its family slot and tier, so two mirrors of the same tier cannot be installed
+  at once unless they go in different slots — that is the ceiling on how many re-tunes you can keep
+  prepared. Slots marked <em>upstream only</em> pin SHA-256 hashes, so only the original publisher's
+  files satisfy them.
+</p>
+
+{% endblock %}
