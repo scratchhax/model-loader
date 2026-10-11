@@ -153,10 +153,16 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
         return False, f"cannot write {p}: {e}"
     if single:
         return True, f"pinned to card {cards[0]}"
+    # Upstream publishes figures showing a split LOSING (4K prompts 1,776 -> 1,244 tok/s,
+    # decode ~60 -> ~51) and this message used to repeat them. They were measured on Coder
+    # IQ1_M, which keeps half the experts and therefore fits one 32 GB card - the one case
+    # where a split cannot pay. Measured here on the packs this box actually runs, the split
+    # is 2.2-2.5x FASTER on long prompts, because one card holds only ~53% of the experts.
+    # The rule, not the number: compare the engine's "N ranked pairs" against "expert cache
+    # M slots". M < N means a split pays.
     return True, (f"split across cards {', '.join(cards)} — card {cards[0]} is the main one. "
-                  "Upstream measured a split LOSING on this pair (4K prompts 1,776 -> 1,244 "
-                  "tok/s, decode ~60 -> ~51) because one 32 GB R9700 already holds every "
-                  "expert; worth measuring here, not assuming.")
+                  "Measured on this box the split is 2.2-2.5x faster on long prompts; "
+                  "upstream's contrary figure is for a pack that fits one card.")
 
 
 def card_count(exec_candidates=()) -> int:

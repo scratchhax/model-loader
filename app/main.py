@@ -17,6 +17,7 @@ from . import autoconfig
 from . import telemetry
 from . import bench, db, gguf_meta, gpu_procs, hf, hw, ini, services, vram_live
 from . import strata as strata_engine
+from . import strata_models
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -3240,3 +3241,141 @@ def benchmark_run(request: Request, run_id: int) -> HTMLResponse:
         "badges": {v["alias"]: db.badges_for(v["alias"]) for v in variants},
     })
     return templates.TemplateResponse("benchmark.html", ctx)
+
+
+# ===================================================================== Strata models
+#
+# The Strata half of Search HF. It is a SEPARATE page rather than a filter on the llama search
+# because the two engines disagree about what a model is: llama takes any GGUF file, Strata
+# takes a complete shard set of one architecture in one quantization format and prepares an
+# expert pack from it. Mixing them into one result list would mean most rows carry a "not for
+# this engine" badge, which is noise, not information.
+
+STRATA_CONTAINER = os.environ.get("STRATA_CONTAINER", "strata")
+STRATA_ENV_FILE = os.environ.get("STRATA_ENV_PATH", "/strata/strata.env")
+STRATA_DATA = os.environ.get("STRATA_DATA_DIR", "/strata/data")
+
+
+def _strata_state() -> dict:
+    """Catalog, what is installed, and which pairs still have a free pack name."""
+    tiers = strata_models.catalog(STRATA_CONTAINER)
+    inst = strata_models.installed(STRATA_DATA)
+    sel = strata_models.read_selection(STRATA_ENV_FILE)
+    return {
+        "tiers": tiers,
+        "installed": inst,
+        "free": {t.install_tag for t in strata_models.free_slots(set(inst), tiers)},
+        "selection": sel,
+        "engine_up": bool(tiers),
+    }
+
+
+@app.get("/strata/models", response_class=HTMLResponse)
+def strata_models_page(request: Request) -> HTMLResponse:
+    st = _strata_state()
+    return templates.TemplateResponse("strata_models.html", {"request": request, "query": "", **st})
+
+
+@app.get("/strata/search/results", response_class=HTMLResponse)
+async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
+    """HF search, with every repo classified against the engine's catalog.
+
+    Repos that match nothing are kept and shown as refused WITH THE REASON. Hiding them would
+    be worse: the common case is a Qwen3.8-Flash-Next repo in a quantization Strata cannot
+    read, and a user who searched for it deserves to be told that rather than shown an empty
+    page that looks like a broken search.
+    """
+    st = _strata_state()
+    error: str | None = None
+    rows: list[dict] = []
+    if not st["engine_up"]:
+        error = ("The Strata container is not running, so its model catalog cannot be read. "
+                 "Start Strata from the overview and search again.")
+    else:
+        try:
+            found = await hf.search_models(q.strip() or "Qwen3.8-Flash-Next", limit=25)
+            for m in found:
+                try:
+                    detail = await hf.repo_detail(m.id)
+                except httpx.HTTPError:
+                    continue
+                files = [{"path": f.path, "size": f.size} for f in detail.files]
+                matches = strata_models.classify_repo(files, st["tiers"])
+                rows.append({"repo": m, "matches": matches,
+                             "reason": "" if matches else _strata_refusal(files)})
+        except httpx.HTTPStatusError as e:
+            error = f"HF returned HTTP {e.response.status_code}"
+        except httpx.HTTPError as e:
+            error = f"network error: {e}"
+    return templates.TemplateResponse("_strata_results.html", {
+        "request": request, "rows": rows, "error": error,
+        "installed": st["installed"], "free": st["free"],
+    })
+
+
+def _strata_refusal(files: list[dict]) -> str:
+    """Why a repo matched nothing — named precisely, because "unsupported" teaches nothing."""
+    names = [f["path"].rsplit("/", 1)[-1].lower() for f in files if f["path"].lower().endswith(".gguf")]
+    if not names:
+        return "no GGUF files"
+    if not any(strata_models.ARCH_MARKER in n for n in names):
+        return "not Qwen3.8-Flash-Next — Strata serves only that architecture"
+    if not any(strata_models.GSQ_MARKER in n for n in names):
+        return ("Qwen3.8-Flash-Next, but not GSQ-RCO quantized — Strata's pack builder reads "
+                "GSQ-RCO files (and Unsloth's own UD-IQ4_XS / UD-Q4_K_XL, which it downloads itself)")
+    return "GSQ-RCO, but no complete shard set for a quant tier this engine lists"
+
+
+@app.post("/strata/install", response_class=HTMLResponse)
+async def strata_install(repo_id: str = Form(...), family: str = Form(...),
+                         model: str = Form(...)) -> HTMLResponse:
+    """Plan the install, place what we already have, and queue only what is missing."""
+    st = _strata_state()
+    tier = next((t for t in st["tiers"] if t.family == family and t.model == model), None)
+    if tier is None:
+        return _blocked_chip("that family/tier is not in the engine's catalog")
+    if tier.install_tag in st["installed"]:
+        return _blocked_chip(f"{tier.install_tag} is already installed — remove it first")
+
+    try:
+        detail = await hf.repo_detail(repo_id)
+    except httpx.HTTPError as e:
+        return _blocked_chip(f"cannot read {repo_id}: {e}")
+    files = [{"path": f.path, "size": f.size} for f in detail.files]
+    match = next((m for m in strata_models.classify_repo(files, [tier])), None)
+    if match is None:
+        return _blocked_chip("this repo no longer matches that tier")
+
+    # Content hashes first: without them every reuse check degrades to "same size", which is
+    # not good enough to act on (see plan_install).
+    paths = [f["src"] for f in match.files] + ([match.mmproj["src"]] if match.mmproj else [])
+    etags = await strata_models.fetch_etags(repo_id, paths)
+    for f in match.files:
+        f["sha"] = etags.get(f["src"], "")
+    if match.mmproj:
+        match.mmproj["sha"] = etags.get(match.mmproj["src"], "")
+
+    subdir = f"strata-{repo_id.split('/')[-1]}-{model}"
+    plan = await asyncio.to_thread(strata_models.plan_install, match,
+                                   str(settings.models_dir), subdir)
+    await asyncio.to_thread(strata_models.materialize_reuse, plan)
+
+    for f in plan["fetch"]:
+        manager.enqueue(repo_id=repo_id, hf_path=f["src"],
+                        filename=f"{subdir}/{f['dst']}", total_bytes=f["size"])
+
+    saved = plan["saved_bytes"]
+    note = f", reusing {human_bytes(saved)} already on disk" if saved else ""
+    return HTMLResponse(_QUEUED_CHIP.format(
+        label=f"Queued {human_bytes(plan['fetch_bytes'])}",
+        title=f"{len(plan['fetch'])} file(s) queued into {subdir}{note}"))
+
+
+@app.post("/strata/select", response_class=HTMLResponse)
+def strata_select(family: str = Form(...), model: str = Form(...),
+                  gguf_dir: str = Form("")) -> HTMLResponse:
+    """Point the next Strata start at an installed pair. Takes effect on restart, not now."""
+    ok, msg = strata_models.set_selection(STRATA_ENV_FILE, family, model, gguf_dir)
+    if not ok:
+        return _blocked_chip(msg)
+    return HTMLResponse(_QUEUED_CHIP.format(label="Saved", title=msg + " — restart Strata to apply"))
