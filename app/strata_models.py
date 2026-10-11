@@ -108,23 +108,36 @@ class RepoMatch:
         return sum(int(f.get("size") or 0) for f in self.files) + int((self.mmproj or {}).get("size") or 0)
 
 
-def _docker_exec_json(container: str, code: str, timeout: float = 20.0) -> dict | None:
+def _docker_exec_json(container: str, code: str, timeout: int = 20) -> dict | None:
     """Run a snippet inside the engine container and parse its stdout as JSON.
 
+    Through the Docker SDK, NOT a `docker` subprocess: this app runs in a container that has
+    the daemon socket bind-mounted but no docker CLI on PATH, so shelling out returns
+    FileNotFoundError and the catalog silently comes back empty - a page that renders fine and
+    lists nothing, which is exactly how this was first shipped and caught.
+
     The catalog is read from the RUNNING ENGINE rather than duplicated here. Strata adds
-    families and tiers between releases (UD-IQ4_XS stopped being experimental in 0.1.39; the
-    Coder family did not exist before 0.1.3x), and a hardcoded copy here would keep offering
-    what the image no longer has, or hide what it gained, with no error either way.
+    families and tiers between releases (UD-IQ4_XS stopped being experimental in 0.1.39), and a
+    hardcoded copy here would keep offering what the image no longer has, or hide what it
+    gained, with no error either way.
     """
-    cmd = ["docker", "exec", container, "/opt/strata/.venv/bin/python", "-c", code]
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if p.returncode != 0 or not p.stdout.strip():
+    from .utils import docker_client, timed_shell
+    cli = docker_client()
+    if cli is None:
         return None
     try:
-        return json.loads(p.stdout)
+        c = cli.containers.get(container)
+        if c.status != "running":
+            return None
+        rc, out = c.exec_run(
+            timed_shell("/opt/strata/.venv/bin/python -c " + shlex.quote(code), timeout),
+            demux=False)
+    except Exception:  # noqa: BLE001 - a stopped or missing engine is "no catalog", not an error
+        return None
+    if rc != 0 or not out:
+        return None
+    try:
+        return json.loads(out.decode("utf-8", "replace"))
     except json.JSONDecodeError:
         return None
 
