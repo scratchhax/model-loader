@@ -3294,10 +3294,28 @@ async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
     else:
         try:
             found = await hf.search_models(q.strip() or "Qwen3.8-Flash-Next", limit=25)
-            for m in found:
-                try:
-                    detail = await hf.repo_detail(m.id)
-                except httpx.HTTPError:
+
+            # Classifying a repo needs its FILE LIST, which is a second request per result, and
+            # done one at a time that is the whole latency of this page: 25 repos x ~0.5 s was
+            # ~13 s of mostly-idle waiting. They are independent, so they go together.
+            #
+            # Bounded, not unbounded: a bare gather would open 25 simultaneous connections to
+            # the Hub per keystroke-driven search, which is how an app earns a 429 and then
+            # shows nothing at all. Eight keeps it one round of waiting without being rude.
+            sem = asyncio.Semaphore(8)
+
+            async def _detail(m):
+                async with sem:
+                    try:
+                        return m, await hf.repo_detail(m.id)
+                    except httpx.HTTPError:
+                        return m, None
+
+            # Order is the Hub's relevance order, and gather preserves it. Sorting by
+            # installability instead was tempting and wrong: it would bury the repo someone
+            # searched for by name under whatever happens to be installable.
+            for m, detail in await asyncio.gather(*(_detail(m) for m in found)):
+                if detail is None:
                     continue
                 files = [{"path": f.path, "size": f.size} for f in detail.files]
                 matches = strata_models.classify_repo(files, st["tiers"])
