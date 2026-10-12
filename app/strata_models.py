@@ -88,6 +88,7 @@ class Tier:
     shards: int
     first_shard: str              # the exact filename setup will look for
     hash_pinned: bool
+    canonical_repo: str = ""      # the Hub repo this family's own files come from
 
     @property
     def install_tag(self) -> str:
@@ -150,6 +151,7 @@ for f, d in setup.FAMILIES.items():
         "title": d.get("title", f), "by": d.get("by", ""), "tag": d.get("tag", ""),
         "vision": d.get("vision"), "shards": int(d.get("shards") or 2),
         "hash_pinned": bool(d.get("sha256")),
+        "hf": d.get("hf", ""),
     }
 for m, d in setup.MODELS.items():
     out["models"][m] = {
@@ -214,9 +216,16 @@ def catalog(container: str = "strata", force: bool = False) -> list[Tier]:
                 shards=int(m.get("shards") or f.get("shards") or 2),
                 first_shard=first,
                 hash_pinned=bool(f.get("hash_pinned")),
+                canonical_repo=_repo_from_hf(f.get("hf", "")),
             ))
     out.sort(key=lambda t: (t.family, t.download_gb))
     return out
+
+
+def _repo_from_hf(url: str) -> str:
+    """"owner/name" out of a family's Hub URL, which carries a path and placeholders after it."""
+    m = re.search(r"huggingface\.co/([^/]+/[^/{}]+)", url or "")
+    return m.group(1).rstrip("/") if m else ""
 
 
 def parse_shard(name: str) -> tuple[int, int] | None:
@@ -686,3 +695,64 @@ def set_selection(env_path: str, family: str, model: str, gguf_dir: str) -> tupl
     except OSError as e:
         return False, f"cannot write {p}: {e}"
     return True, f"next start: {family} / {model}" + (f" from {gguf_dir}" if gguf_dir else "")
+
+
+# ---------------------------------------------------------------- where an install came from
+
+# A prepared pack records the family slot and the tier - `swift-iq3_s` - and nothing about the
+# repo the files came from. That is fine for the engine and wrong for a person: once a mirror
+# is installed into a borrowed slot, the slot name actively misdescribes it. SC117's abliterated
+# IQ3_S sitting in the `swift` slot is not Swift 1.5, and a list that calls it `swift-iq3_s` is
+# telling the user something false every time they look at it.
+#
+# So the app keeps its own small record beside the engine's. It is NOT written into Strata's
+# config: setup owns that file and regenerates it, and anything we add there is lost on the next
+# pass (the lesson the hand-edited vision block keeps teaching). This lives in the app's own kv
+# store, where the app is the only writer and a re-setup cannot touch it.
+_PROV_KEY = "strata.install_provenance"
+
+
+def provenance() -> dict[str, dict]:
+    """{install_tag: {"repo": "owner/name", "family": str, "model": str, "at": epoch}}."""
+    from . import db
+    try:
+        return json.loads(db.get_setting(_PROV_KEY, "") or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
+def record_provenance(install_tag: str, repo_id: str, family: str, model: str,
+                      canonical_repo: str = "") -> None:
+    """Remember which repo an install came from. Overwrites: a slot holds one thing at a time.
+
+    `borrowed` is decided HERE, where the family's own repo is known from the catalog, and
+    stored as a fact. Deriving it later by comparing the repo id against the slot name is
+    string-guessing that gets `unsloth-ud-iq4_xs` wrong - "unsloth-ud" is not a family name,
+    so Unsloth's own file in Unsloth's own slot reads as borrowed.
+    """
+    from . import db
+    cur = provenance()
+    cur[install_tag] = {"repo": repo_id, "family": family, "model": model,
+                        "at": int(time.time()),
+                        "borrowed": bool(canonical_repo) and repo_id.lower() != canonical_repo.lower()}
+    db.set_setting(_PROV_KEY, json.dumps(cur))
+
+
+def describe_install(install_tag: str, prov: dict[str, dict] | None = None) -> dict:
+    """How to label an installed pack: its source repo when known, the slot name when not.
+
+    `borrowed` is the case worth flagging in the UI - the pack sits in a family slot whose name
+    is not its own, which is normal for a mirror and confusing without a label.
+    """
+    p = (prov if prov is not None else provenance()).get(install_tag) or {}
+    repo = p.get("repo") or ""
+    owner, _, name = repo.partition("/")
+    return {
+        "tag": install_tag,
+        "repo": repo,
+        "owner": owner,
+        "title": name or install_tag,
+        "model": p.get("model", ""),
+        "family": p.get("family", ""),
+        "borrowed": bool(p.get("borrowed")),
+    }

@@ -3261,19 +3261,31 @@ def _strata_state() -> dict:
     tiers = strata_models.catalog(STRATA_CONTAINER)
     inst = strata_models.installed(STRATA_DATA)
     sel = strata_models.read_selection(STRATA_ENV_FILE)
+    prov = strata_models.provenance()
+    for tag, d in inst.items():
+        d["about"] = strata_models.describe_install(tag, prov)
     return {
         "tiers": tiers,
         "installed": inst,
         "free": {t.install_tag for t in strata_models.free_slots(set(inst), tiers)},
         "selection": sel,
         "engine_up": bool(tiers),
+        # {install_tag: repo} so a search row can say whether the slot it wants is held by THIS
+        # repo (already installed) or by a different one (genuinely taken).
+        "slot_repo": {t: (v.get("repo") or "") for t, v in prov.items()},
     }
 
 
 @app.get("/strata/models", response_class=HTMLResponse)
-def strata_models_page(request: Request) -> HTMLResponse:
+async def strata_models_page(request: Request) -> HTMLResponse:
     st = _strata_state()
-    return templates.TemplateResponse("strata_models.html", {"request": request, "query": "", **st})
+    owners = [d["about"]["owner"] for d in st["installed"].values() if d["about"]["owner"]]
+    try:
+        avatars = await hf.owner_avatars(owners) if owners else {}
+    except httpx.HTTPError:
+        avatars = {}      # an icon is decoration; never fail the page for one
+    return templates.TemplateResponse("strata_models.html",
+                                      {"request": request, "query": "", "avatars": avatars, **st})
 
 
 @app.get("/strata/search/results", response_class=HTMLResponse)
@@ -3331,7 +3343,7 @@ async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
             error = f"network error: {e}"
     return templates.TemplateResponse("_strata_results.html", {
         "request": request, "rows": rows, "error": error, "avatars": avatars,
-        "installed": st["installed"], "free": st["free"],
+        "installed": st["installed"], "free": st["free"], "slot_repo": st["slot_repo"],
     })
 
 
@@ -3385,6 +3397,11 @@ async def strata_install(repo_id: str = Form(...), family: str = Form(...),
     for f in plan["fetch"]:
         manager.enqueue(repo_id=repo_id, hf_path=f["src"],
                         filename=f"{subdir}/{f['dst']}", total_bytes=f["size"])
+
+    # Recorded at QUEUE time, not on completion: the slot is spoken for from here on, and a
+    # download that is interrupted still leaves files whose origin someone will need to know.
+    strata_models.record_provenance(tier.install_tag, repo_id, family, model,
+                                   tier.canonical_repo)
 
     saved = plan["saved_bytes"]
     note = f", reusing {human_bytes(saved)} already on disk" if saved else ""

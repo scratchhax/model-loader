@@ -32,19 +32,25 @@
     {% else %}
       <div class="mt-2 ml-[38px] flex flex-wrap gap-1.5">
       {% for m in row.matches %}
+        {# "slot taken" conflated two different facts: that YOU already installed this repo
+           into that slot, and that a DIFFERENT repo holds it. The first means "you have this",
+           the second means "pick another tier" - opposite actions, so they get opposite words. #}
+        {% set holder = slot_repo.get(m.tier.install_tag, '') %}
         {% set taken = m.tier.install_tag in installed %}
+        {% set mine = taken and holder == row.repo.id %}
         <form hx-post="/strata/install" hx-swap="outerHTML" class="inline">
           <input type="hidden" name="repo_id" value="{{ row.repo.id }}">
           <input type="hidden" name="family" value="{{ m.tier.family }}">
           <input type="hidden" name="model" value="{{ m.tier.model }}">
           <button {% if taken %}disabled{% endif %}
-            title="{{ m.files|length }} shard(s){% if m.mmproj %} + vision encoder{% endif %} → slot {{ m.tier.install_tag }}{% if taken %} (already installed){% endif %}"
+            title="{{ m.files|length }} shard(s){% if m.mmproj %} + vision encoder{% endif %} → slot {{ m.tier.install_tag }}{% if mine %} — you installed this repo here{% elif taken %} — occupied by {{ holder or 'another model' }}{% endif %}"
             class="rounded-md border px-2 py-1 text-xs
                    {% if taken %}cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400
                    {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700{% endif %}">
             {{ m.tier.model }}
             <span class="text-slate-400">{{ (m.total_bytes / 1e9)|round(1) }} GB</span>
-            {% if taken %}<span class="text-slate-400">· slot taken</span>
+            {% if mine %}<span class="text-emerald-600 dark:text-emerald-400">· installed</span>
+            {% elif taken %}<span class="text-slate-400">· slot held by {{ holder.split('/')[0] if holder else 'another model' }}</span>
             {% else %}<span class="text-slate-400">· {{ m.tier.install_tag }}</span>{% endif %}
           </button>
         </form>

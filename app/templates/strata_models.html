@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_avatar.html" import avatar %}
 {% from "_icons.html" import icon %}
 {% set active_nav = 'strata' %}
 {% block title %}Strata models · Model Loader{% endblock %}
@@ -31,7 +32,27 @@
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
     {% for tag, d in installed.items() %}
       <tr class="{% if tag == (selection.FAMILY ~ selection.MODEL)|lower %}bg-slate-50 dark:bg-slate-800/50{% endif %}">
-        <td class="px-3 py-2 font-mono text-xs">{{ tag }}</td>
+        <td class="px-3 py-2">
+          <div class="flex items-center gap-2.5">
+            {{ avatar(d.about.owner or '?', avatars.get(d.about.owner, ''), size=24) }}
+            <div class="min-w-0">
+              {% if d.about.repo %}
+                <a href="https://huggingface.co/{{ d.about.repo }}" target="_blank" rel="noopener"
+                   class="font-mono text-xs hover:underline">{{ d.about.repo }}</a>
+                <div class="text-[11px] text-slate-500 dark:text-slate-400">
+                  {{ d.about.model }} · slot <span class="font-mono">{{ tag }}</span>
+                  {# The slot name is the engine's, not the model's. Once a mirror borrows a
+                     slot, showing only the tag tells the user this IS Swift 1.5, which it is
+                     not - so say whose slot it is sitting in. #}
+                  {% if d.about.borrowed %}<span class="ml-1 rounded bg-slate-100 dark:bg-slate-700 px-1" title="Installed into another family's slot — the engine will report it under that slot's title">borrowed slot</span>{% endif %}
+                </div>
+              {% else %}
+                <span class="font-mono text-xs">{{ tag }}</span>
+                <div class="text-[11px] text-slate-500 dark:text-slate-400">installed before the app tracked sources</div>
+              {% endif %}
+            </div>
+          </div>
+        </td>
         <td class="px-3 py-2 text-slate-500 dark:text-slate-400">pack {{ (d.bytes / 1e9)|round(1) }} GB</td>
         <td class="px-3 py-2 text-right">
           {% set parts = tag.split('-') %}
