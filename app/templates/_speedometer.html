@@ -27,10 +27,14 @@
         <span class="text-sky-700 dark:text-sky-300">reading prompt{% if speed.prefill_pct %} {{ speed.prefill_pct }}%{% endif %}</span>
         {# The count behind the percentage - see the note in _hero.html. 38% of a 400-token
            prompt and 38% of an 80,000-token one are the same number and a very different wait. #}
-        {% if speed.prefill_done %}
+        {# Show the SIZE even when progress is unknown. Strata only reports prompt_read once a
+           16,384-token chunk completes, so a read under one chunk - every agent turn behind a
+           cached prefix - never produces a numerator. Hiding the row then left "reading prompt"
+           with no indication whether that meant 0.3 s or a minute. #}
+        {% if speed.prefill_done or speed.prefill_total %}
         <span class="font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400"
-              title="prompt tokens read so far{% if speed.prefill_total %} of {{ '{:,}'.format(speed.prefill_total) }}{% endif %}; tokens reused from the KV cache count as read">
-          {{ '{:,}'.format(speed.prefill_done) }}{% if speed.prefill_total %}/{{ '{:,}'.format(speed.prefill_total) }}{% endif %} tok
+              title="{% if speed.prefill_done %}prompt tokens read so far of {{ '{:,}'.format(speed.prefill_total) }}{% else %}the size of the prompt being read; progress is only reported once a 16,384-token chunk completes{% endif %}; tokens reused from the KV cache count as read">
+          {% if speed.prefill_done %}{{ '{:,}'.format(speed.prefill_done) }}/{{ '{:,}'.format(speed.prefill_total) }}{% else %}{{ '{:,}'.format(speed.prefill_total) }}{% endif %} tok
         </span>
         {% endif %}
       {% else %}

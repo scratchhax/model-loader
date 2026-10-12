@@ -2223,7 +2223,7 @@ def _rates_from_log_strata(name: str) -> dict:
     second, which they do under an agent client.
     """
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
-           "cur_pp_done": 0,
+           "cur_pp_done": 0, "cur_pp_total": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
            "open_task": None, "open_slot": 0, "expert_hit_pct": None}
 
@@ -2243,6 +2243,15 @@ def _rates_from_log_strata(name: str) -> dict:
             if pt:
                 out["cur_pp_pct"] = round(100.0 * (pr or 0) / pt)
                 out["cur_pp_done"] = int(pr or 0)
+            # The SIZE is known from the first sample; the PROGRESS is not. Strata reports
+            # prompt_read/prompt_total only once a 16,384-token chunk has landed, so a read
+            # stays null for the first several seconds of a long prompt and for the WHOLE of
+            # any read smaller than one chunk - which is every turn of an agent client working
+            # behind a cached prefix (measured: 833 fresh tokens of an 83,456-token prompt).
+            # Publishing the total regardless lets the UI say which of those two situations
+            # this is. It is the distinction the percentage existed to make: 400 tokens and
+            # 166,754 tokens are 0.3 s and 57 s of waiting on this box.
+            out["cur_pp_total"] = int(pt or live.get("prompt_tokens") or 0)
         out["last_gen_tps"] = float(last.get("decode_tok_s") or 0.0)
         out["last_gen_tokens"] = int(last.get("output_tokens") or 0)
         # Prompt rate over the tokens actually READ, not the whole prompt: with prefix-cache
@@ -2350,6 +2359,7 @@ def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
             ctx_used=_int_c(sl.get("n_prompt_tokens") or 0),
             ctx_total=_int_c(sl.get("n_ctx") or 0),
             prefill_pct=r["cur_pp_pct"] if state == "prefill" else 0,
+            prefill_total=r.get("cur_pp_total", 0) if state == "prefill" else 0,
             prefill_done=r["cur_pp_done"] if state == "prefill" else 0,
         ))
     return out
@@ -2370,7 +2380,7 @@ def _rates_from_log(name: str) -> dict:
     which is what the card shows, dimmed, while the model sits idle.
     """
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
-           "cur_pp_done": 0,
+           "cur_pp_done": 0, "cur_pp_total": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
            "open_task": None, "open_slot": None}
     # A wide tail, then the router's own chatter removed. It has to be both. While a slot
