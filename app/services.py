@@ -2255,8 +2255,20 @@ def _rates_from_log_strata(name: str) -> dict:
         hr = last.get("hit_rate")
         out["expert_hit_pct"] = round(hr * 100.0, 1) if isinstance(hr, (int, float)) else None
         n = totals.get("requests")
-        out["open_task"] = str(n) if n is not None else None
-        out["newest"] = state
+        # `open_task` must be None when nothing is running and must CHANGE the moment a request
+        # STARTS. totals.requests is a COMPLETED counter, so while a request was in flight it
+        # still read the value the caller had already filed in _settled_task - which made
+        # inference_speed take its "this task is finished" branch, skip the /slots read, and
+        # report a model that was demonstrably generating as idle for the request's whole
+        # duration. (Observed: /metrics live.state "generating" while the speedometer showed
+        # standby.) The in-flight request's own id - completed + 1 - is stable for as long as it
+        # runs and never collides with the settled marker.
+        working = state not in ("", "idle")
+        out["open_task"] = str((n or 0) + 1) if working else None
+        # "reading" is Strata's word for prefill. Passed through unmapped it did not equal
+        # "prefill" in _slots_strata, which then fell through to "generating" - so a long prompt
+        # read was labelled as decode, at a decode rate it was not producing.
+        out["newest"] = "prefill" if state == "reading" else ("generating" if working else "")
         return out
 
     ok, text = container_logs(name, tail=400, current_run_only=True)
