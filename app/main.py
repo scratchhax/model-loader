@@ -3288,6 +3288,7 @@ async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
     st = _strata_state()
     error: str | None = None
     rows: list[dict] = []
+    avatars: dict[str, str] = {}
     if not st["engine_up"]:
         error = ("The Strata container is not running, so its model catalog cannot be read. "
                  "Start Strata from the overview and search again.")
@@ -3321,12 +3322,15 @@ async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
                 matches = strata_models.classify_repo(files, st["tiers"])
                 rows.append({"repo": m, "matches": matches,
                              "reason": "" if matches else _strata_refusal(files)})
+            # Owner avatars, the same call and the same cache the llama search uses, so a repo
+            # looks like itself on both pages instead of like two different things.
+            avatars = await hf.owner_avatars([r["repo"].id.split("/", 1)[0] for r in rows])
         except httpx.HTTPStatusError as e:
             error = f"HF returned HTTP {e.response.status_code}"
         except httpx.HTTPError as e:
             error = f"network error: {e}"
     return templates.TemplateResponse("_strata_results.html", {
-        "request": request, "rows": rows, "error": error,
+        "request": request, "rows": rows, "error": error, "avatars": avatars,
         "installed": st["installed"], "free": st["free"],
     })
 

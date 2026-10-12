@@ -1,3 +1,4 @@
+{% from "_avatar.html" import avatar %}
 {% from "_icons.html" import icon %}
 
 {% if error %}
@@ -9,9 +10,16 @@
 <div class="space-y-2">
 {% for row in rows %}
   <div class="rounded-md border {% if row.matches %}border-slate-200 dark:border-slate-700{% else %}border-slate-200/60 dark:border-slate-700/50{% endif %} px-3 py-2">
-    <div class="flex items-baseline justify-between gap-3">
-      <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
-         class="font-medium text-sm hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }}</a>
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 flex items-start gap-2.5">
+        {% set owner = row.repo.id.split('/', 1)[0] %}
+        {# The same macro the llama search uses. A refused repo keeps its avatar at reduced
+           opacity rather than losing it: the row is still a real repo someone may want to open,
+           and dropping the icon made the two search pages look like different applications. #}
+        <span class="{% if not row.matches %}opacity-60{% endif %}">{{ avatar(owner, avatars.get(owner, ''), size=28) }}</span>
+        <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
+           class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+      </div>
       <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
         {{ '{:,}'.format(row.repo.downloads) }} downloads · {{ row.repo.likes }} likes
       </span>
@@ -20,9 +28,9 @@
     {% if not row.matches %}
       {# A refusal says WHICH rule it failed. "Unsupported" would send the user to the engine
          source to find out, which is the thing this page exists to spare them. #}
-      <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Not installable: {{ row.reason }}</p>
+      <p class="mt-1 ml-[38px] text-xs text-slate-500 dark:text-slate-400">Not installable: {{ row.reason }}</p>
     {% else %}
-      <div class="mt-2 flex flex-wrap gap-1.5">
+      <div class="mt-2 ml-[38px] flex flex-wrap gap-1.5">
       {% for m in row.matches %}
         {% set taken = m.tier.install_tag in installed %}
         <form hx-post="/strata/install" hx-swap="outerHTML" class="inline">
