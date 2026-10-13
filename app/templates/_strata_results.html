@@ -7,6 +7,17 @@
   <p class="text-sm text-slate-500 dark:text-slate-400">Nothing found.</p>
 {% else %}
 
+{% set ns = namespace(multi=false) %}
+{% for row in rows %}{% if (row.matches | map(attribute='tier.family') | unique | list | length) > 1 %}{% set ns.multi = true %}{% endif %}{% endfor %}
+{% if ns.multi %}
+<p class="mb-2 text-xs text-slate-500 dark:text-slate-400">
+  {# This was repeated verbatim under every multi-slot row. It describes how the engine works,
+     not anything about a particular repo, so it belongs once at the top. #}
+  Some models are offered in more than one slot — the files are identical, only the name they are
+  installed under differs. Pick whichever slot is free; the engine reports the model under that
+  slot's title.
+</p>
+{% endif %}
 <div class="space-y-2">
 {% for row in rows %}
   <div class="rounded-md border {% if row.matches %}border-slate-200 dark:border-slate-700{% else %}border-slate-200/60 dark:border-slate-700/50{% endif %} px-3 py-2">
@@ -17,12 +28,22 @@
            opacity rather than losing it: the row is still a real repo someone may want to open,
            and dropping the icon made the two search pages look like different applications. #}
         <span class="{% if not row.matches %}opacity-60{% endif %}">{{ avatar(owner, avatars.get(owner, ''), size=28) }}</span>
-        <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
-           class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+        <div class="min-w-0">
+          <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
+             class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+          <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span class="inline-flex items-center gap-1">{{ icon('download', 11) }} {{ '{:,}'.format(row.repo.downloads) }}</span>
+            <span class="inline-flex items-center gap-1">★ {{ '{:,}'.format(row.repo.likes) }}</span>
+            {% if row.repo.pipeline_tag %}<span class="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5">{{ icon('tag', 10) }} {{ row.repo.pipeline_tag }}</span>{% endif %}
+            {% if row.repo.last_modified %}<span class="inline-flex items-center gap-1 tabular-nums">{{ icon('clock', 11) }} {{ row.repo.last_modified[:10] }}</span>{% endif %}
+            {% if row.repo.gguf_count is not none %}<span class="inline-flex items-center gap-1">{{ icon('hash', 11) }} {{ row.repo.gguf_count }} GGUF file{{ 's' if row.repo.gguf_count != 1 else '' }}</span>{% endif %}
+          </div>
+        </div>
       </div>
-      <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
-        {{ '{:,}'.format(row.repo.downloads) }} downloads · {{ row.repo.likes }} likes
-      </span>
+      {# The SAME metadata row Search HF renders, icon for icon. Two views of one Hub that
+         describe a repo differently read as two applications; the only thing that should
+         differ between them is the action, because that is the only thing that differs. #}
+      <span class="shrink-0"></span>
     </div>
 
     {% if not row.matches %}
@@ -63,14 +84,7 @@
         {% endfor %}
       {% endfor %}
 
-      {% set slots = row.matches | map(attribute='tier.family') | unique | list %}
-      {% if slots | length > 1 %}
-        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Offered in more than one slot ({{ slots | join(', ') }}) — the files are identical, only the
-          name they are installed under differs. Pick whichever slot is free; the engine will report
-          the model under that slot's title.
-        </p>
-      {% endif %}
+
     {% endif %}
   </div>
 {% endfor %}
