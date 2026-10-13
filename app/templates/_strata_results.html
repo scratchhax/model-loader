@@ -10,7 +10,7 @@
 {% set ns = namespace(multi=false) %}
 {% for row in rows %}{% if (row.matches | map(attribute='tier.family') | unique | list | length) > 1 %}{% set ns.multi = true %}{% endif %}{% endfor %}
 {% if ns.multi %}
-<p class="mb-2 text-xs text-slate-500 dark:text-slate-400">
+<p class="mb-3 text-xs text-slate-500 dark:text-slate-400">
   {# This was repeated verbatim under every multi-slot row. It describes how the engine works,
      not anything about a particular repo, so it belongs once at the top. #}
   Some models are offered in more than one slot — the files are identical, only the name they are
@@ -18,19 +18,37 @@
   slot's title.
 </p>
 {% endif %}
-<div class="space-y-2">
-{% for row in rows %}
-  <div class="rounded-md border {% if row.matches %}border-slate-200 dark:border-slate-700{% else %}border-slate-200/60 dark:border-slate-700/50{% endif %} px-3 py-2">
-    <div class="flex items-start justify-between gap-3">
-      <div class="min-w-0 flex items-start gap-2.5">
+
+{# Structure, classes and the expand affordance are Search HF's, deliberately. The two pages
+   search one Hub, so a repo should look and behave the same in both; the only thing that may
+   differ is what the expansion CONTAINS, because that is the only real difference between the
+   engines - llama picks a file, Strata picks a quant tier. Unlike Search HF this needs no
+   request to expand: the tiers were already classified when the row was built. #}
+<ul class="space-y-3">
+  {% for row in rows %}
+  {% set ns2 = namespace(mine=false) %}
+  {% for m in row.matches %}{% if slot_repo.get(m.tier.install_tag, '') == row.repo.id %}{% set ns2.mine = true %}{% endif %}{% endfor %}
+  <li x-data="{ expanded: false }" class="rounded-xl border
+      {% if ns2.mine %}border-emerald-300 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/10
+      {% elif row.matches %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900
+      {% else %}border-slate-200/70 dark:border-slate-800/70{% endif %}">
+    <div class="flex items-start justify-between gap-4 p-4">
+      <div class="min-w-0 flex items-start gap-3">
         {% set owner = row.repo.id.split('/', 1)[0] %}
-        {# The same macro the llama search uses. A refused repo keeps its avatar at reduced
-           opacity rather than losing it: the row is still a real repo someone may want to open,
-           and dropping the icon made the two search pages look like different applications. #}
+        {# A refused repo keeps its avatar at reduced opacity rather than losing it: the row is
+           still a real repo someone may want to open, and dropping the icon made refusals read
+           as broken entries. #}
         <span class="{% if not row.matches %}opacity-60{% endif %}">{{ avatar(owner, avatars.get(owner, ''), size=28) }}</span>
         <div class="min-w-0">
-          <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
-             class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+          <div class="flex items-center gap-2 flex-wrap">
+            <a href="https://huggingface.co/{{ row.repo.id }}" target="_blank" rel="noopener"
+               class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline {% if not row.matches %}text-slate-500 dark:text-slate-400{% endif %}">{{ row.repo.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+            {% if ns2.mine %}
+              <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                {{ icon('check', 10) }} installed
+              </span>
+            {% endif %}
+          </div>
           <div class="mt-1 text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span class="inline-flex items-center gap-1">{{ icon('download', 11) }} {{ '{:,}'.format(row.repo.downloads) }}</span>
             <span class="inline-flex items-center gap-1">★ {{ '{:,}'.format(row.repo.likes) }}</span>
@@ -38,24 +56,31 @@
             {% if row.repo.last_modified %}<span class="inline-flex items-center gap-1 tabular-nums">{{ icon('clock', 11) }} {{ row.repo.last_modified[:10] }}</span>{% endif %}
             {% if row.repo.gguf_count is not none %}<span class="inline-flex items-center gap-1">{{ icon('hash', 11) }} {{ row.repo.gguf_count }} GGUF file{{ 's' if row.repo.gguf_count != 1 else '' }}</span>{% endif %}
           </div>
+          {% if not row.matches %}
+            {# A refusal names WHICH rule it failed. "Unsupported" would send the reader to the
+               engine's source to find out, which is the thing this page exists to spare them. #}
+            <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">Not installable: {{ row.reason }}</p>
+          {% endif %}
         </div>
       </div>
-      {# The SAME metadata row Search HF renders, icon for icon. Two views of one Hub that
-         describe a repo differently read as two applications; the only thing that should
-         differ between them is the action, because that is the only thing that differs. #}
-      <span class="shrink-0"></span>
+
+      {% if row.matches %}
+      <button @click="expanded = !expanded"
+              class="inline-flex items-center gap-1.5 shrink-0 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
+        <span :class="expanded ? 'rotate-90' : ''" class="transition-transform">{{ icon('chevron-right', 12) }}</span>
+        <span x-text="expanded ? 'Hide quants' : 'Show quants'">Show quants</span>
+        <span class="text-slate-400">({{ row.matches | length }})</span>
+      </button>
+      {% endif %}
     </div>
 
-    {% if not row.matches %}
-      {# A refusal says WHICH rule it failed. "Unsupported" would send the user to the engine
-         source to find out, which is the thing this page exists to spare them. #}
-      <p class="mt-1 ml-[38px] text-xs text-slate-500 dark:text-slate-400">Not installable: {{ row.reason }}</p>
-    {% else %}
-      <div class="mt-2 ml-[38px] flex flex-wrap gap-1.5">
+    {% if row.matches %}
+    <div x-show="expanded" x-cloak class="px-4 pb-4 pt-0">
+      <div class="flex flex-wrap gap-1.5">
       {% for m in row.matches %}
-        {# "slot taken" conflated two different facts: that YOU already installed this repo
-           into that slot, and that a DIFFERENT repo holds it. The first means "you have this",
-           the second means "pick another tier" - opposite actions, so they get opposite words. #}
+        {# "slot taken" conflated two different facts: that YOU already installed this repo into
+           that slot, and that a DIFFERENT repo holds it. The first means "you have this", the
+           second means "pick another tier" - opposite actions, so they get opposite words. #}
         {% set holder = slot_repo.get(m.tier.install_tag, '') %}
         {% set taken = m.tier.install_tag in installed %}
         {% set mine = taken and holder == row.repo.id %}
@@ -80,18 +105,17 @@
 
       {% for m in row.matches %}
         {% for w in m.warnings %}
-          <p class="mt-1 text-xs text-amber-700 dark:text-amber-400">{{ m.tier.model }}: {{ w }}</p>
+          <p class="mt-2 text-xs text-amber-700 dark:text-amber-400">{{ m.tier.model }}: {{ w }}</p>
         {% endfor %}
       {% endfor %}
 
-
+      <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Sizes are the whole shard set. Anything already on disk with a matching content hash is
+        linked rather than downloaded, so the queued figure is often much smaller.
+      </p>
+    </div>
     {% endif %}
-  </div>
-{% endfor %}
-</div>
-
-<p class="mt-3 text-xs text-slate-500 dark:text-slate-400">
-  Sizes are the whole shard set. Anything already on disk with a matching content hash is linked
-  rather than downloaded, so the queued figure is often much smaller.
-</p>
+  </li>
+  {% endfor %}
+</ul>
 {% endif %}
