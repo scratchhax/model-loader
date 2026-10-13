@@ -165,6 +165,14 @@
                 {# MoE vs dense, because it decides what offloading costs. Shared macro with
                    the models.ini section cards, so one model reads the same on both pages. #}
                 {{ caps_chips(r.shape) }}
+                {# Whose engine this file is for. Without it the Models directory lists a
+                   GSQ-RCO pack beside llama.cpp models with the same chips and the same
+                   actions, and nothing says it will never load in llama - or that Strata is
+                   what reads it. #}
+                {% if strata_only(g.display_name) %}
+                <span class="rounded bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 px-1.5 py-0.5"
+                      title="GSQ-RCO: the Strata engine's quantisation. llama.cpp has no kernels for it and cannot load this file, so it gets no models.ini section. Strata reads it from its own config.">Strata</span>
+                {% endif %}
                 {# The quant is the one part of the filename that varies between copies of the
                    same model, which is exactly why it is also what the family grouping strips. #}
                 {% if r.quant and not r.is_alias %}

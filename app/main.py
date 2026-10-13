@@ -25,6 +25,7 @@ from .utils import human_bytes, shard_key
 app = FastAPI(title="Model Loader")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.globals["hue"] = lambda s: sum(ord(c) for c in (s or "")) % 360
+templates.env.globals["strata_only"] = strata_models.strata_only
 templates.env.globals["badge_categories"] = db.BADGE_CATEGORIES
 templates.env.globals["badge_labels"] = db.BADGE_LABELS
 

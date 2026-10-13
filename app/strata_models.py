@@ -756,3 +756,22 @@ def describe_install(install_tag: str, prov: dict[str, dict] | None = None) -> d
         "family": p.get("family", ""),
         "borrowed": bool(p.get("borrowed")),
     }
+
+
+# ---------------------------------------------------------------- whose format is it
+
+def strata_only(filename: str) -> bool:
+    """True for a GGUF only the Strata engine can read.
+
+    GSQ-RCO is ISTA-DASLab's quantization for this engine's pack builder; llama.cpp has no
+    kernels for it and cannot load the file at all. That matters beyond labelling, because
+    autoconfig will otherwise size one of these like any other GGUF and write a complete,
+    confident models.ini section for it - context, flash-attn, cache types, mmproj - describing
+    how to run something that cannot run. A recipe that detailed is worse than no recipe: it
+    reads as a tested configuration.
+
+    Unsloth's UD-* packs are deliberately NOT included. Those are ordinary GGUF quantizations
+    that llama.cpp reads perfectly well; Strata merely also knows how to build a pack from
+    them, so a section for one is legitimate.
+    """
+    return GSQ_MARKER in (filename or "").lower()

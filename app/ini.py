@@ -563,12 +563,18 @@ def get_section(name: str) -> dict[str, str] | None:
 
 def unregistered_gguf_stems() -> list[str]:
     """Filenames (stem, without .gguf) that don't have a section yet. Scans one subdir level too."""
+    from . import strata_models
     have = set(section_names())
     # A file is "registered" if ANY section points at it — not merely when a section shares
     # its name. Without this, renaming a section makes its own model reappear as unregistered.
     claimed = _files_claimed_by_sections()
+    # A Strata-format file is not "unregistered", it is NOT FOR THIS ENGINE. Listing it here
+    # invites a models.ini section for a file llama.cpp cannot load, and autoconfig will happily
+    # size one - which is how a GSQ-RCO model ended up with a full ctx-size/flash-attn/mmproj
+    # recipe that could never work.
     return sorted([stem for stem, rel in _stems_present().items()
-                   if stem not in have and rel not in claimed])
+                   if stem not in have and rel not in claimed
+                   and not strata_models.strata_only(stem)])
 
 
 # ---- writing ----

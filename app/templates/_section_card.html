@@ -12,6 +12,14 @@
         {% else %}
         <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" title="expected {{ s.name }}.gguf in models dir">no matching GGUF</span>
         {% endif %}
+        {# A section for a file llama.cpp cannot load. The app no longer offers to create these,
+           but one made earlier is still here and still reads as a working configuration - which
+           is the whole problem: a complete, confident recipe (context, flash-attn, cache types,
+           mmproj) for a model that fails at load. Say so where it lives. #}
+        {% if strata_only(s.name) %}
+        <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300"
+              title="GSQ-RCO is the Strata engine's quantisation. llama.cpp has no kernels for it, so this section cannot work — Strata reads this model from its own config, not from models.ini. Safe to delete.">Strata format — llama.cpp cannot load this</span>
+        {% endif %}
         {% if _cap %}
         {# The same capability chips as the models page — derived here from the section's
            own file, mmproj and saved profile, so this page says what the config means even
