@@ -53,13 +53,27 @@
             </div>
           </div>
         </td>
-        <td class="px-3 py-2 text-slate-500 dark:text-slate-400">pack {{ (d.bytes / 1e9)|round(1) }} GB</td>
+        <td class="px-3 py-2 text-slate-500 dark:text-slate-400">
+          pack {{ (d.bytes / 1e9)|round(1) }} GB
+          {# An install can rot without anything touching it: its pack stays intact while the
+             files it was built from move or their mount is renamed. That used to surface only
+             as a container that would not start. Say it here, where the model is chosen. #}
+          {% if d.missing %}
+          <div class="mt-0.5 text-[11px] text-amber-700 dark:text-amber-400"
+               title="{{ d.missing | join('&#10;') }}">
+            {{ d.missing | length }} source file{{ 's' if d.missing | length != 1 else '' }} missing — this will not start
+          </div>
+          {% endif %}
+        </td>
         <td class="px-3 py-2 text-right">
           {% set parts = tag.split('-') %}
           <form hx-post="/strata/select" hx-swap="outerHTML" class="inline">
             <input type="hidden" name="family" value="{{ 'unsloth' if tag.startswith('unsloth-') else ('swift' if tag.startswith('swift-') else ('coder' if tag.startswith('coder-') else 'qwen')) }}">
             <input type="hidden" name="model" value="{{ tag.split('-', 1)[1]|upper if '-' in tag else tag|upper }}">
-            <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Use next start</button>
+            <button {% if d.missing %}disabled title="Its source files are missing, so this would fail to start"{% endif %}
+                    class="rounded-md border px-2 py-1 text-xs
+                           {% if d.missing %}cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400
+                           {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700{% endif %}">Use next start</button>
           </form>
         </td>
       </tr>

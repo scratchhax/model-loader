@@ -356,6 +356,48 @@ def free_slots(installed_tags: set[str], tiers: list[Tier]) -> list[Tier]:
 DATA_DIR = "/strata/data"
 
 
+# How a path inside the ENGINE container maps to one this app can see. The two containers
+# mount the same data under different names, so "does this file exist" is answerable here only
+# after translating. /opt/strata lives inside the engine's image and is always present, so it is
+# not checked rather than guessed at.
+_PATH_VIEWS = (
+    ("/gguf-root/", "/models/"),      # the models root, ./models in both compose services
+    ("/data/", "/strata/data/"),      # the engine's volume, ./strata/data
+)
+
+
+def _missing_sources(cfg: dict) -> list[str]:
+    """Paths an install needs that are NOT there any more.
+
+    This exists because an install can rot without anything touching it. `/gguf` used to be a
+    bind of ONE model directory; replacing it with `/gguf-root` (the whole models root) left
+    every earlier install pointing at a mount the container no longer has. Nothing reported
+    that: the config was valid, the pack was intact, and the failure only appeared as a
+    container that would not start - the same silent, crash-looping shape as the staged-config
+    bug. An install whose files have moved should say so where it is listed, not when it is
+    selected.
+    """
+    out: list[str] = []
+    paths = [v for v in (cfg.get("args") or []) if isinstance(v, str) and v.startswith("/")]
+    vision = cfg.get("vision")
+    if isinstance(vision, dict):
+        paths += [v for v in vision.values() if isinstance(v, str) and v.startswith("/")]
+    for raw in paths:
+        if raw.startswith("/opt/strata"):
+            continue                              # inside the engine image; always present
+        local = None
+        for pref, here in _PATH_VIEWS:
+            if raw.startswith(pref):
+                local = here + raw[len(pref):]
+                break
+        from pathlib import Path as _P
+        if local is None:
+            out.append(raw)                       # an old mount name, e.g. the retired /gguf
+        elif not _P(local).exists():
+            out.append(raw)
+    return out
+
+
 def installed(data_dir: str | None = None) -> dict[str, dict]:
     """{install_tag: {"config": path, "pack": path|None, "bytes": int}} for prepared models.
 
@@ -381,7 +423,12 @@ def installed(data_dir: str | None = None) -> dict[str, dict]:
                 size = sum(f.stat().st_size for f in pack.rglob("*") if f.is_file())
             except OSError:
                 size = 0
-        out[tag] = {"config": str(c), "pack": str(pack) if pack.is_dir() else None, "bytes": size}
+        try:
+            cfg = json.loads(c.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cfg = {}
+        out[tag] = {"config": str(c), "pack": str(pack) if pack.is_dir() else None, "bytes": size,
+                    "missing": _missing_sources(cfg)}
     return out
 
 
