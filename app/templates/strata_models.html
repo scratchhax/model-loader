@@ -76,18 +76,20 @@
 <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing prepared yet.</p>
 {% endif %}
 
-<!-- search ---------------------------------------------------------------- -->
-<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Find a model</h2>
-<form hx-get="/strata/search/results" hx-target="#strata-results" hx-indicator="#sp" hx-swap="innerHTML"
-      class="mt-2 flex flex-wrap gap-2">
-  <input name="q" value="{{ query }}" placeholder="Qwen3.8-Flash-Next  ·  abliterated  ·  GSQ-RCO"
-         class="min-w-[18rem] flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-sm">
-  <button class="rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium">Search</button>
-  <span id="sp" class="htmx-indicator self-center text-xs text-slate-500">searching…</span>
-</form>
-
-<div id="strata-results" class="mt-4"
-     hx-get="/strata/search/results?q=" hx-trigger="load" hx-swap="innerHTML"></div>
+<!-- find a model ------------------------------------------------------- -->
+{# The search box used to live here, which meant the app had two of them against one Hub.
+   Finding a model is the same task whichever engine runs it, so it happens in one place and
+   the engine is a filter there. #}
+<div class="mt-7 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 dark:border-slate-800 px-4 py-3">
+  <p class="text-sm text-slate-600 dark:text-slate-300">
+    Looking for a model to install? Search Hugging Face with the engine filter set to Strata —
+    it lists what this engine can run and says why anything else is refused.
+  </p>
+  <a href="/search?engine=strata"
+     class="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium">
+    {{ icon('search', 14) }} Find a model
+  </a>
+</div>
 
 <!-- catalog --------------------------------------------------------------- -->
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">

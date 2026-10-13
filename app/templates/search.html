@@ -12,6 +12,15 @@
       class="mt-5 flex flex-wrap gap-2">
   <input name="q" value="{{ query or '' }}" placeholder="e.g. gemma 4, qwen 2.5, llama 3"
          class="flex-1 min-w-64 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm">
+  {# Engine is a FILTER, not a mode switch. "Any" keeps the fast path - one Hub request, no
+     per-repo classification - and marks repos whose NAME suggests Strata can run them.
+     Choosing Strata pays for the exact answer: a file list per result, which is why it is
+     opt-in rather than always on. #}
+  <select name="engine" class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm">
+    <option value="" {% if not engine %}selected{% endif %}>any engine</option>
+    <option value="llama" {% if engine == 'llama' %}selected{% endif %}>llama.cpp</option>
+    <option value="strata" {% if engine == 'strata' %}selected{% endif %}>Strata</option>
+  </select>
   <select name="sort" class="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm">
     <option value="downloads">most downloads</option>
     <option value="likes">most likes</option>
@@ -27,7 +36,7 @@
 </form>
 
 <div id="results" class="mt-6"
-     hx-get="/search/results?sort=trendingScore&limit=10"
+     hx-get="/search/results?sort=trendingScore&limit=10{% if engine %}&engine={{ engine }}{% endif %}"
      hx-trigger="load"
      hx-swap="innerHTML">
   <div class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center text-sm text-slate-500 dark:text-slate-400">

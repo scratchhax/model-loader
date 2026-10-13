@@ -1345,13 +1345,20 @@ async def settings_save(request: Request, hf_token: str = Form(""), action: str 
 # ---------- Search ----------
 
 @app.get("/search", response_class=HTMLResponse)
-def search_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("search.html", {"request": request, "query": ""})
+def search_page(request: Request, engine: str = "") -> HTMLResponse:
+    return templates.TemplateResponse("search.html",
+                                      {"request": request, "query": "", "engine": engine})
 
 
 @app.get("/search/results", response_class=HTMLResponse)
 async def search_results(request: Request, q: str = "", sort: str = "downloads",
-                         limit: int = 30) -> HTMLResponse:
+                         limit: int = 30, engine: str = "") -> HTMLResponse:
+    # One search, two engines. Strata needs a file list per result to answer exactly, which is
+    # why it is a chosen filter rather than something every search pays for: the llama path is
+    # one Hub request, the Strata path is one per result.
+    if engine == "strata":
+        return await _strata_results_response(request, q)
+
     error: str | None = None
     results = []
     avatars: dict[str, str] = {}
@@ -1368,10 +1375,18 @@ async def search_results(request: Request, q: str = "", sort: str = "downloads",
     # Cross-check against local downloads so we can flag repos the user already has.
     # Must be checked against the FILESYSTEM, not just the history log — see the helper.
     downloaded = _downloaded_and_still_present()
+    # A HINT, never a verdict. Deciding properly needs the repo's file list, and doing that for
+    # every result is exactly the cost this page refuses to pay by default - so the name is used
+    # to say "worth a look" and the Strata filter remains the authority. Worded as a question in
+    # the UI for the same reason.
+    maybe_strata = {
+        m.id for m in results
+        if strata_models.ARCH_MARKER in m.id.lower() and strata_models.GSQ_MARKER in m.id.lower()
+    }
     return templates.TemplateResponse("_search_results.html", {
         "request": request, "results": results, "error": error, "avatars": avatars,
         "browse_mode": browse_mode, "browse_sort": sort,
-        "downloaded_by_repo": downloaded,
+        "downloaded_by_repo": downloaded, "maybe_strata": maybe_strata, "engine": engine,
     })
 
 
@@ -3297,6 +3312,12 @@ async def strata_models_page(request: Request) -> HTMLResponse:
 
 @app.get("/strata/search/results", response_class=HTMLResponse)
 async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
+    """Kept so an existing link or bookmark still works; the page itself now searches through
+    /search?engine=strata, so there is one search box in the app rather than two."""
+    return await _strata_results_response(request, q)
+
+
+async def _strata_results_response(request: Request, q: str = "") -> HTMLResponse:
     """HF search, with every repo classified against the engine's catalog.
 
     Repos that match nothing are kept and shown as refused WITH THE REASON. Hiding them would

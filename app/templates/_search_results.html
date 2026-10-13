@@ -27,6 +27,16 @@
         <div class="flex items-center gap-2 flex-wrap">
           <a href="https://huggingface.co/{{ m.id }}" target="_blank" rel="noopener"
              class="inline-flex items-center gap-1 font-mono text-sm font-medium hover:underline">{{ m.id }} {{ icon('external-link', 12, 'text-slate-400') }}</a>
+          {% if maybe_strata and m.id in maybe_strata %}
+            {# A HINT from the repo name only. The exact answer needs this repo's file list, and
+               paying that for every result is what the engine filter exists to make optional -
+               so this is phrased as a question and links to the filter that can answer it. #}
+            <a href="/search?engine=strata"
+               title="The name suggests Strata may be able to run this. Switch the engine filter to Strata for the exact answer."
+               class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 hover:underline">
+              Strata?
+            </a>
+          {% endif %}
           {% if have_files %}
             <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
                   title="You've already downloaded {{ have_files | length }} file(s) from this repo: {{ have_files | join(', ') }}">
