@@ -3273,6 +3273,13 @@ def _strata_state() -> dict:
         # {install_tag: repo} so a search row can say whether the slot it wants is held by THIS
         # repo (already installed) or by a different one (genuinely taken).
         "slot_repo": {t: (v.get("repo") or "") for t, v in prov.items()},
+        # Which repos anything was installed FROM, independent of the catalog. Deriving this by
+        # matching installed tags against catalog tiers looked equivalent and is not: the
+        # catalog comes from the RUNNING engine, so rolling the engine back can drop a tier
+        # that an installed pack still uses (0.1.40.2 has no swift/IQ3_S; 0.1.43 added it).
+        # The pack still runs, so "you have this" must not stop being true because the engine
+        # changed underneath it.
+        "installed_repos": {(v.get("repo") or "") for v in prov.values() if v.get("repo")},
     }
 
 
@@ -3344,6 +3351,7 @@ async def strata_search_results(request: Request, q: str = "") -> HTMLResponse:
     return templates.TemplateResponse("_strata_results.html", {
         "request": request, "rows": rows, "error": error, "avatars": avatars,
         "installed": st["installed"], "free": st["free"], "slot_repo": st["slot_repo"],
+        "installed_repos": st["installed_repos"],
     })
 
 

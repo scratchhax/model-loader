@@ -26,8 +26,9 @@
    request to expand: the tiers were already classified when the row was built. #}
 <ul class="space-y-3">
   {% for row in rows %}
-  {% set ns2 = namespace(mine=false) %}
-  {% for m in row.matches %}{% if slot_repo.get(m.tier.install_tag, '') == row.repo.id %}{% set ns2.mine = true %}{% endif %}{% endfor %}
+  {# Read from provenance, NOT from the matched tiers: an installed pack whose tier the current
+     engine no longer lists (after an engine rollback) is still installed. #}
+  {% set ns2 = namespace(mine = row.repo.id in installed_repos) %}
   <li x-data="{ expanded: false }" class="rounded-xl border
       {% if ns2.mine %}border-emerald-300 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/10
       {% elif row.matches %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900
