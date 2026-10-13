@@ -97,6 +97,43 @@
 <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing prepared yet.</p>
 {% endif %}
 
+<!-- tuning ---------------------------------------------------------------- -->
+{% if tuning_tag %}
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+  Tuning <span class="font-normal normal-case">— for <span class="font-mono">{{ tuning_tag }}</span>, the model that starts next</span>
+</h2>
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  {% for flag, spec in tunables.items() %}
+  <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3 {% if not loop.first %}border-t border-slate-200 dark:border-slate-700{% endif %}">
+    <div class="min-w-0 max-w-2xl">
+      <div class="text-sm font-medium">{{ spec.label }}</div>
+      <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ spec.about }}</p>
+    </div>
+    <form hx-post="/strata/tuning" hx-swap="outerHTML" class="flex shrink-0 items-center gap-2">
+      <input type="hidden" name="install_tag" value="{{ tuning_tag }}">
+      <input type="hidden" name="flag" value="{{ flag }}">
+      <select name="value"
+              class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
+        {% for val, label in spec.choices %}
+        <option value="{{ val }}" {% if tuning.get(flag) == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+<p class="mt-2 max-w-3xl text-xs text-slate-500 dark:text-slate-400">
+  {# Values are read from the engine where it reports them, so this cannot claim a setting is
+     live when it is only written. #}
+  Current values come from the running engine where it reports them, so they show what is
+  actually in force — a change here lands on the next restart.
+  {% if not engine_running %}<span class="text-amber-700 dark:text-amber-400">Strata is stopped, so these are read from the config.</span>{% endif %}
+  Only settings that cannot stop the engine starting are offered: context, KV type and
+  speculation all change what must fit in VRAM, and there is little spare here.
+</p>
+{% endif %}
+
 <!-- catalog --------------------------------------------------------------- -->
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
   Catalog <span class="font-normal normal-case">— read from the running engine, so it tracks the image</span>

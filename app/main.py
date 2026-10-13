@@ -3296,7 +3296,29 @@ def _strata_state() -> dict:
         # The pack still runs, so "you have this" must not stop being true because the engine
         # changed underneath it.
         "installed_repos": {(v.get("repo") or "") for v in prov.values() if v.get("repo")},
+        # Tuning applies to the model that will RUN next, which is the one the selection names -
+        # not whatever happens to be loaded, because a change made now lands on the next start.
+        "tuning_tag": _strata_selected_tag(sel),
+        "tunables": strata_models.TUNABLES,
     }
+
+
+def _strata_selected_tag(sel: dict) -> str:
+    """The install tag the pin file's FAMILY/MODEL names — the same tag the entry point builds."""
+    fam, mod = (sel.get("FAMILY") or "").strip(), (sel.get("MODEL") or "").strip()
+    if not mod:
+        return ""
+    prefix = "" if fam in ("", "qwen") else f"{fam}-"
+    return f"{prefix}{mod.lower()}"
+
+
+@app.post("/strata/tuning", response_class=HTMLResponse)
+def strata_tuning(install_tag: str = Form(...), flag: str = Form(...),
+                  value: str = Form(...)) -> HTMLResponse:
+    ok, msg = strata_models.set_tunable(install_tag, flag, value, STRATA_CONTAINER, STRATA_DATA)
+    if not ok:
+        return _blocked_chip(msg)
+    return HTMLResponse(_QUEUED_CHIP.format(label="Saved", title=msg))
 
 
 @app.get("/strata/models", response_class=HTMLResponse)
@@ -3307,6 +3329,10 @@ async def strata_models_page(request: Request) -> HTMLResponse:
         avatars = await hf.owner_avatars(owners) if owners else {}
     except httpx.HTTPError:
         avatars = {}      # an icon is decoration; never fail the page for one
+    metrics = services.strata_metrics(STRATA_CONTAINER)
+    st["tuning"] = (strata_models.tuning_state(st["tuning_tag"], metrics, STRATA_DATA)
+                    if st["tuning_tag"] else {})
+    st["engine_running"] = metrics is not None
     return templates.TemplateResponse("strata_models.html",
                                       {"request": request, "query": "", "avatars": avatars, **st})
 

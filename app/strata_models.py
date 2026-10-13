@@ -822,3 +822,125 @@ def strata_only(filename: str) -> bool:
     them, so a section for one is legitimate.
     """
     return GSQ_MARKER in (filename or "").lower()
+
+
+# ---------------------------------------------------------------- tuning an installed model
+
+# Strata has no models.ini. Its equivalent is the `args` list inside an install config, which
+# setup writes and the engine reads at start - so this app owns a SMALL, named set of them the
+# same way `ini` owns models.ini: single writer, re-applied, never hand-edited.
+#
+# Only knobs that cannot stop the engine starting are here. --kv, --max-context, --spec and
+# --batch-groups all change what has to fit in VRAM, and this box reports 552 MiB free, so a
+# wrong value there is a container that will not start - the failure mode this engine already
+# has too many of. Those wait for a fit check that can refuse BEFORE the restart.
+TUNABLES = {
+    "conversation-cache-mib": {
+        "label": "Conversation cache",
+        "about": ("Keeps each client's conversation so an agent resending its history does not "
+                  "re-read it. Upstream measured clients re-reading ~90% of their prompts "
+                  "without it (#882 #440). Costs this much VRAM."),
+        "choices": [("0", "off"), ("4096", "4 GB"), ("8192", "8 GB"), ("16384", "16 GB")],
+        "metric": "conversation_cache_mib",   # the engine reports this, so the UI shows truth
+    },
+    "prefill": {
+        "label": "Prompt chunk",
+        "about": ("How much of a prompt is read per pass. Upstream measured auto:32768 reading "
+                  "prompts 21-35% faster on machines with plenty of RAM (#433 #440 #834); this "
+                  "one has 126 GB."),
+        "choices": [("auto", "auto"), ("auto:16384", "auto, up to 16K"), ("auto:32768", "auto, up to 32K")],
+        "metric": None,                        # not reported; read back from the config
+    },
+}
+
+
+def _config_path(install_tag: str, data_dir: str | None = None) -> "Path":
+    from pathlib import Path
+    return Path(data_dir or DATA_DIR) / "config" / f"strata-{install_tag}.json"
+
+
+def tuning_state(install_tag: str, metrics: dict | None = None,
+                 data_dir: str | None = None) -> dict[str, str]:
+    """{flag: current value} for an install, preferring what the ENGINE reports over what the
+    config says. The two differ exactly between a change and the restart that applies it, and
+    showing the config there would claim a setting is live when it is not."""
+    out: dict[str, str] = {}
+    try:
+        cfg = json.loads(_config_path(install_tag, data_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    args = cfg.get("args") or []
+    for flag, spec in TUNABLES.items():
+        val = ""
+        key = spec.get("metric")
+        if key and isinstance(metrics, dict):
+            live = (metrics.get("engine") or {}).get(key)
+            if live is not None:
+                val = str(live)
+        if not val:
+            tok = f"--{flag}"
+            val = args[args.index(tok) + 1] if tok in args and args.index(tok) + 1 < len(args) else ""
+        out[flag] = val or (spec["choices"][0][0])
+    return out
+
+
+def set_tunable(install_tag: str, flag: str, value: str, container: str = "strata",
+                data_dir: str | None = None) -> tuple[bool, str]:
+    """Write one tuning flag into an install's config, to take effect on the next start.
+
+    THE STAGED COPY HAS TO GO, and that is not tidiness. docker-entrypoint.sh copies
+    /opt/strata/strata-<tag>.json BACK OVER the config on the volume whenever the two differ -
+    that is how changes made during a run are persisted. So a config edited here while a staged
+    copy exists is silently REVERTED on the next start, by a mechanism that looks like it is
+    protecting data. Removing the staged copy makes the next start re-stage from what we wrote.
+    """
+    if flag not in TUNABLES:
+        return False, f"not a tunable: {flag}"
+    if value not in {v for v, _ in TUNABLES[flag]["choices"]}:
+        return False, f"not an allowed value for {flag}: {value!r}"
+
+    p = _config_path(install_tag, data_dir)
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return False, f"cannot read {p.name}: {e}"
+
+    args = list(cfg.get("args") or [])
+    tok = f"--{flag}"
+    if tok in args:
+        i = args.index(tok)
+        if i + 1 < len(args):
+            args[i + 1] = value
+        else:
+            args.append(value)
+    else:
+        args += [tok, value]
+    cfg["args"] = args
+    try:
+        p.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    except OSError as e:
+        return False, f"cannot write {p.name}: {e}"
+
+    # Remember what we asked for, so a setup pass that regenerates args can be detected - the
+    # same reason the vision block keeps getting lost.
+    from . import db
+    want = json.loads(db.get_setting("strata.tuning", "") or "{}")
+    want.setdefault(install_tag, {})[flag] = value
+    db.set_setting("strata.tuning", json.dumps(want))
+
+    _drop_staged(install_tag, container)
+    return True, f"{TUNABLES[flag]['label']} set to {value} — applies on the next restart"
+
+
+def _drop_staged(install_tag: str, container: str) -> None:
+    """Remove the engine container's staged copy of this config (see set_tunable)."""
+    from .utils import docker_client, timed_shell
+    cli = docker_client()
+    if cli is None:
+        return
+    try:
+        c = cli.containers.get(container)
+        if c.status == "running":
+            c.exec_run(timed_shell(f"rm -f /opt/strata/strata-{install_tag}.json"), demux=False)
+    except Exception:  # noqa: BLE001 - a stopped engine has no staged copy to drop
+        pass
