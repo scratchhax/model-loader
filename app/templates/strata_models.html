@@ -25,7 +25,14 @@
 </p>
 
 <!-- installed ------------------------------------------------------------ -->
-<h2 class="mt-6 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Installed</h2>
+{# "Find a model" used to be a panel with its own button here. That is still two entry points
+   for one task, just quieter than two search boxes - the nav already has Search HF one click
+   away. What belongs on THIS page is the link a person wants while looking at what they have
+   installed: add another. So it sits on the Installed heading, at the weight of a link. #}
+<div class="mt-6 flex items-baseline justify-between gap-3">
+  <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Installed</h2>
+  <a href="/search?engine=strata" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">add from Hugging Face →</a>
+</div>
 {% if installed %}
 <div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
@@ -89,21 +96,6 @@
 {% else %}
 <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing prepared yet.</p>
 {% endif %}
-
-<!-- find a model ------------------------------------------------------- -->
-{# The search box used to live here, which meant the app had two of them against one Hub.
-   Finding a model is the same task whichever engine runs it, so it happens in one place and
-   the engine is a filter there. #}
-<div class="mt-7 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 dark:border-slate-800 px-4 py-3">
-  <p class="text-sm text-slate-600 dark:text-slate-300">
-    Looking for a model to install? Search Hugging Face with the engine filter set to Strata —
-    it lists what this engine can run and says why anything else is refused.
-  </p>
-  <a href="/search?engine=strata"
-     class="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3 py-1.5 text-sm font-medium">
-    {{ icon('search', 14) }} Find a model
-  </a>
-</div>
 
 <!-- catalog --------------------------------------------------------------- -->
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
