@@ -475,3 +475,38 @@ async def completions_noprefix(request: Request):
 @app.post("/messages")
 async def anthropic_messages_noprefix(request: Request):
     return await _forward(request, "/v1/messages", "anthropic")
+
+
+@app.get("/health")
+async def health_llamacpp() -> dict:
+    """llama.cpp serves /health; clients configured as llama.cpp probe it. Same answer as
+    /healthz, under the name that mode expects."""
+    return await healthz()
+
+
+@app.get("/props")
+async def props() -> JSONResponse:
+    """llama.cpp's /props, relayed from whichever backend would serve a request right now.
+
+    Open WebUI uses this in llama.cpp mode to learn a server's context size and chat template.
+    It is ANSWERED FOR ONE BACKEND and cannot be anything else: this router fronts two engines
+    with different context lengths, so there is no single honest answer to "what is your n_ctx"
+    - only "here is the one that would serve you". The alternative, inventing a merged answer,
+    would describe a server that does not exist.
+
+    A client that wants the general picture should talk to this router as an OpenAI endpoint,
+    where no such question is asked.
+    """
+    try:
+        backend, _ = await resolve(ENGINES[0])
+    except Unresolved:
+        try:
+            backend, _ = await resolve(ENGINES[1])
+        except Unresolved as e:
+            return JSONResponse(status_code=503, content={"error": {"message": str(e)}})
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{backend['url']}/props")
+        return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
+    except httpx.HTTPError as e:
+        return JSONResponse(status_code=502, content={"error": {"message": f"{backend['name']}: {e}"}})
