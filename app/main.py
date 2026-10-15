@@ -3529,14 +3529,23 @@ def _router_conversations(limit: int = 15) -> list[dict]:
     prefix hash is what makes these questions answerable at all.
     """
     with db._conn() as c:
+        # engine and model come from the conversation's LATEST row, not from MAX() of each.
+        # Independent aggregates pick independently: a conversation that hit Strata and llama
+        # reported MAX(engine)="strata" with MAX(model)="wheatley-voice" - a pair that never
+        # happened, and which read as Strata having loaded a voice model.
         return [dict(r) for r in c.execute(
             "SELECT conv, COUNT(*) AS turns, MAX(ts) AS last_ts, "
             "       SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
             "       SUM(cached_tokens) AS cached_tokens, "
             "       AVG(NULLIF(ttft_ms,0)) AS avg_ttft, AVG(total_ms) AS avg_total, "
             "       SUM(status >= 400) AS failures, "
-            "       MAX(engine) AS engine, MAX(model) AS model, MAX(client) AS client "
-            "FROM router_request WHERE conv <> '' "
+            "       COUNT(DISTINCT CASE WHEN model <> '' THEN model END) AS models_used, "
+            "       (SELECT engine FROM router_request x WHERE x.conv = r.conv AND x.engine <> '' "
+            "         ORDER BY x.ts DESC LIMIT 1) AS engine, "
+            "       (SELECT model  FROM router_request x WHERE x.conv = r.conv AND x.model  <> '' "
+            "         ORDER BY x.ts DESC LIMIT 1) AS model, "
+            "       MAX(client) AS client "
+            "FROM router_request r WHERE conv <> '' "
             "GROUP BY conv ORDER BY last_ts DESC LIMIT ?", (limit,))]
 
 

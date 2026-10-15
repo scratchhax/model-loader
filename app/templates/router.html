@@ -109,7 +109,15 @@
         <td class="px-3 py-2 font-mono text-xs">{{ c.conv }}
           {% if c.failures %}<span class="ml-1 rounded bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 px-1 text-[10px]">{{ c.failures }} failed</span>{% endif %}
         </td>
-        <td class="px-3 py-2 text-xs"><span class="text-slate-400">{{ c.engine }}</span> {{ c.model }}</td>
+        <td class="px-3 py-2 text-xs">
+          <span class="text-slate-400">{{ c.engine }}</span> {{ c.model }}
+          {# A conversation CAN legitimately span models - the same prompt sent to two engines -
+             so say when the named one is only the most recent rather than the only one. #}
+          {% if (c.models_used or 0) > 1 %}
+          <span class="ml-1 rounded bg-slate-100 dark:bg-slate-800 px-1 text-[10px] text-slate-500 dark:text-slate-400"
+                title="This conversation used {{ c.models_used }} different models; the one named is its most recent.">+{{ c.models_used - 1 }} more</span>
+          {% endif %}
+        </td>
         <td class="px-3 py-2 text-right tabular-nums">{{ c.turns }}</td>
         <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(c.prompt_tokens or 0) }}</td>
         {# Reused is the number that explains a long conversation staying fast: the engines

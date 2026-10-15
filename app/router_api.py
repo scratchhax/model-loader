@@ -118,7 +118,14 @@ def conversation_key(body: dict) -> str:
     if who:
         return "u:" + hashlib.sha256(who.encode()).hexdigest()[:16]
     msgs = body.get("messages") or []
-    head = json.dumps(msgs[:2], sort_keys=True)[:2000] if msgs else json.dumps(body.get("prompt"))[:2000]
+    raw = msgs[:2] if msgs else body.get("prompt")
+    if not raw:
+        # Nothing to key on - a malformed or empty body. Hashing "null" would give every such
+        # request the SAME key, which silently merges unrelated traffic into one conversation:
+        # four failed probes and eight real Strata turns appeared as a single 12-turn thread.
+        # No key is honest; a shared one is not.
+        return ""
+    head = json.dumps(raw, sort_keys=True)[:2000]
     return "p:" + hashlib.sha256(head.encode("utf-8", "replace")).hexdigest()[:16]
 
 
