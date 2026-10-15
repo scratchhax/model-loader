@@ -171,6 +171,33 @@ def _backends(include_stopped: bool = False) -> list[dict]:
     return out
 
 
+async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
+    """Can this backend serve a request RIGHT NOW, not merely is its container up?
+
+    The two are different and the gap is ninety seconds wide. docker reports `running` the
+    moment the process starts, and the engines then take their time: Strata reads ~55 GB of
+    experts before it will answer, and a llama router opens its port before any model is in.
+
+    The question is per-engine, the same split `services._wait_ready` makes and for the same
+    reason. On Strata it is /health, because /v1/models answers 200 with the model listed as
+    "unloaded" - a 200 there can mean "up and serving nothing", which is exactly the state a
+    cold start and a parked server both pass through. /health carries the one bool that settles
+    it. On llama it is whether /v1/models answered at all, since that router only opens the port
+    once it is ready to take requests and picks the model per request anyway.
+
+    Without this a request arriving during a Strata start was routed INTO the closed port and
+    came back 502 "All connection attempts failed", which reads as a broken engine rather than
+    one that is still coming up - and it meant no caller could ever be told to wait instead.
+    """
+    if b["engine"] != "strata":
+        return bool(b["models"])
+    try:
+        r = await client.get(f"{b['url']}/health", timeout=5.0)
+        return r.status_code == 200 and bool(r.json().get("loaded"))
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
 async def _models_of(client: httpx.AsyncClient, b: dict) -> list[str]:
     try:
         r = await client.get(f"{b['url']}/v1/models", timeout=5.0)
@@ -195,12 +222,21 @@ def _rank(b: dict) -> tuple:
 
 
 async def _live_map() -> tuple[list[dict], dict[str, dict]]:
-    """(backends with their models, {model_id: the PREFERRED backend for it})."""
+    """(backends with their models and readiness, {model_id: the PREFERRED READY backend}).
+
+    `ready` is carried rather than filtered out, because the two callers want different things:
+    /v1/models keeps advertising an engine alias that is merely mid-start, so it does not
+    disappear from a client's dropdown and come back during a swap, while resolve() refuses to
+    route to it. Dropping it here would have done both at once.
+    """
     bs = sorted(_backends(), key=_rank)
     by_model: dict[str, dict] = {}
     async with httpx.AsyncClient() as client:
         for b in bs:
             b["models"] = await _models_of(client, b)
+            b["ready"] = await _ready(client, b)
+            if not b["ready"]:
+                continue
             for m in b["models"]:
                 by_model.setdefault(m, b)      # first wins, and the list is ranked
     return bs, by_model
@@ -235,11 +271,19 @@ async def resolve(asked: str) -> tuple[dict, str]:
     bs, by_model = await _live_map()
     if not bs:
         raise Unresolved("no inference backend is running")
-
     if asked in ENGINES:
-        live = [b for b in bs if b["engine"] == asked]
+        live = [b for b in bs if b["engine"] == asked and b.get("ready")]
         if not live:
-            other = ", ".join(sorted({b["engine"] for b in bs})) or "none"
+            # A container of this engine that is up but not SERVING yet gets its own answer.
+            # Lumping it in with "not the engine holding the cards" sent people to flip a switch
+            # that was already flipped, and routing to it returned 502 from a closed port, which
+            # reads as a broken engine rather than one still coming up.
+            coming = [b["name"] for b in bs if b["engine"] == asked and not b.get("ready")]
+            if coming:
+                raise Unresolved(
+                    f"{asked} is starting up ({', '.join(coming)} is running but not serving "
+                    f"yet). Nothing is wrong; it is not ready.")
+            other = ", ".join(sorted({b["engine"] for b in bs if b.get("ready")})) or "none"
             raise Unresolved(
                 f"{asked} is not the engine holding the cards right now (running: {other}). "
                 f"The engines here are exclusive; switch them in Model Loader.")
@@ -340,12 +384,19 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": {"message": "body must be JSON"}})
 
     asked = str(body.get("model") or "").strip()
+    want = asked or ENGINES[0]
     conv, client_id = conversation_key(body), _client_of(request)
     streaming = bool(body.get("stream"))
 
     try:
-        backend, model = await resolve(asked or ENGINES[0])
+        backend, model = await resolve(want)
     except Unresolved as e:
+        if streaming and shape == "openai" and await swap_in_flight_for(want):
+            # A switch the USER started is already running, and it is bringing up the very
+            # engine this request asked for. The honest answer is "wait, and here is what it is
+            # doing", not a 503 that blames the request for arriving during a swap it did not
+            # cause. Nothing on this path STARTS a switch - see swap_in_flight_for.
+            return narrated_response(body, path, shape, conv, client_id, want, t0)
         _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape,
                 status=503, error=str(e), total_ms=(time.time() - t0) * 1000)
         return JSONResponse(status_code=503, content={"error": {"message": str(e)}})
@@ -547,6 +598,30 @@ async def switch_state() -> dict:
 
 
 _LIVE_PHASES = ("stopping", "draining", "starting", "loading")
+
+
+async def swap_in_flight_for(asked: str) -> bool:
+    """Is a switch ALREADY running, and is it bringing up the engine `asked` names?
+
+    This is the whole of the narration trigger, and it is deliberately the half that cannot
+    cause anything: it answers "is the hardware already moving", never "should it move". The
+    switch is started by a person clicking the engine control in the UI, and all this does is
+    turn the 503 that used to meet them a second later into a description of their own switch.
+
+    Both conditions matter. Without "already running", this would be auto-switching with no
+    policy. Without "for this engine", a request for Strata arriving during a switch to llama
+    would wait out the whole llama startup only to be told Strata is unavailable, which is
+    strictly worse than being told so immediately.
+
+    Only for an engine ALIAS. A specific model id resolves through a different path with its own
+    requirement that the backend be running, and a model that a stopped backend would have
+    offered is not something this can promise to deliver.
+    """
+    if asked not in ENGINES:
+        return False
+    state = await switch_state()
+    return (str(state.get("phase") or "") in _LIVE_PHASES
+            and str(state.get("engine") or "") == asked)
 
 
 def swap_progress(asked: str, deadline: float):
