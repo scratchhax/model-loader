@@ -748,9 +748,12 @@ def series(since: float, now: float | None = None) -> dict:
 
     if not buckets:
         return {"grain": grain, "points": []}
-    # Fill the gaps. Without this a quiet night is drawn as a continuous bar next to a busy one
-    # and the time axis silently lies about duration.
-    lo, hi = min(buckets), max(buckets)
+    # Fill the WHOLE REQUESTED WINDOW, not just the range that happens to contain data. Filling
+    # only min..max drew two busy hours as two half-width bars spanning a "last 24 hours" chart -
+    # the axis claiming those two hours were the day. Quiet buckets are information: they are
+    # what makes a burst look like a burst.
+    lo = (int((since or min(buckets)) // step)) * step
+    hi = (int(now // step)) * step
     t = lo
     while t <= hi:
         slot(t)
