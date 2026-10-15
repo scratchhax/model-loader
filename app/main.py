@@ -3540,15 +3540,45 @@ def _router_conversations(limit: int = 15) -> list[dict]:
             "GROUP BY conv ORDER BY last_ts DESC LIMIT ?", (limit,))]
 
 
+def _strata_choices() -> list[tuple[str, str]]:
+    """[(install tag, label)] for the Strata default — the INSTALLED packs, not the loaded one.
+
+    Strata serves exactly one model at a time, so asking it what it offers returns one id, and a
+    dropdown built from that can only ever say "the thing already running". But a Strata default
+    is a statement about the NEXT start, so the set to choose from is what is installed. Those
+    come from the install configs on the volume, which is also why this still lists them while
+    Strata is stopped.
+    """
+    import json as _json
+    out: list[tuple[str, str]] = []
+    prov = strata_models.provenance()
+    for tag, d in strata_models.installed(STRATA_DATA).items():
+        name = tag
+        try:
+            name = _json.loads(open(d["config"], encoding="utf-8").read()).get("model_name") or tag
+        except (OSError, ValueError):
+            pass
+        owner = (prov.get(tag, {}).get("repo") or "").split("/")[0]
+        label = f"{name}  ({owner})" if owner else name
+        if d.get("missing"):
+            label += "  — source files missing"
+        out.append((tag, label))
+    return out
+
+
 @app.get("/router", response_class=HTMLResponse)
 async def router_page(request: Request) -> HTMLResponse:
     bs, by_model = await router_api._live_map()
-    per_engine: dict[str, list[str]] = {}
+    per_engine: dict[str, list] = {}
     for b in bs:
+        if b["engine"] == "strata":
+            continue                       # built from installed packs below, not from /v1/models
         per_engine.setdefault(b["engine"], [])
         for m in b["models"]:
             if m not in per_engine[b["engine"]]:
                 per_engine[b["engine"]].append(m)
+    per_engine["llama"] = [(m, m) for m in per_engine.get("llama", [])]
+    per_engine["strata"] = _strata_choices()
     return templates.TemplateResponse("router.html", {
         "request": request,
         "engines": router_api.ENGINES,
@@ -3569,12 +3599,26 @@ def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLRe
         return _blocked_chip(f"unknown engine {engine!r}")
     db.set_setting(f"router.default.{engine}", model.strip())
     if engine == "strata" and model.strip():
-        # Strata cannot load on demand: its model is whatever the container started with, so a
-        # default here is a statement about the NEXT start, not something that can take effect
-        # now. Saying so beats silently bouncing an engine somebody is using.
+        # For Strata the value is an INSTALL TAG, because that is the unit you can choose - the
+        # loaded model cannot be changed without a restart. Applying it means writing the same
+        # pin file the Strata tab writes, which a read-only instance must not do: two instances
+        # driving the same engine is how this setup produced crash loops.
+        tag = model.strip()
+        fam = "qwen"
+        for f in ("unsloth-", "swift-", "coder-"):
+            if tag.startswith(f):
+                fam = f[:-1]
+                break
+        mdl = tag[len(fam) + 1:].upper() if fam != "qwen" else tag.upper()
+        if settings.router_readonly:
+            return HTMLResponse(_QUEUED_CHIP.format(
+                label="Noted", title=f"{tag} recorded as the Strata default. This instance is "
+                                     f"read-only, so apply it from the live Model Loader's "
+                                     f"Strata tab ({fam} / {mdl})"))
+        ok, msg = strata_models.set_selection(STRATA_ENV_FILE, fam, mdl, "")
         return HTMLResponse(_QUEUED_CHIP.format(
-            label="Saved", title=f"{model} is the Strata default — Strata serves whatever it "
-                                 f"started with, so this applies when it next starts"))
+            label="Saved" if ok else "Failed",
+            title=msg + (" — restart Strata to apply" if ok else "")))
     return HTMLResponse(_QUEUED_CHIP.format(
         label="Saved", title=f"{engine} now defaults to {model or '(none)'}"))
 

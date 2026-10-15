@@ -36,8 +36,9 @@
         {% if e == 'strata' %}
           {# The two engines load models in fundamentally different ways, and pretending
              otherwise would make this control lie about one of them. #}
-          Strata serves whatever it started with and cannot load on demand, so this applies on
-          its next start — it is a statement of intent, not a switch.
+          Strata serves whatever it started with and cannot load on demand, so the choice is one
+          of the <strong>installed packs</strong> and it applies on the next start — a statement
+          of intent, not a switch.
         {% else %}
           llama.cpp loads on demand, so this takes effect on the next request asking for
           <span class="font-mono">llama</span>.
@@ -48,8 +49,11 @@
       <input type="hidden" name="engine" value="{{ e }}">
       <select name="model" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
         <option value="">(none)</option>
-        {% for m in per_engine.get(e, []) %}
-        <option value="{{ m }}" {% if defaults.get(e) == m %}selected{% endif %}>{{ m }}</option>
+        {# (value, label): for llama both are the model id; for Strata the value is the INSTALL
+           TAG, because the choosable unit there is an installed pack rather than the one model
+           it happens to be serving. #}
+        {% for val, label in per_engine.get(e, []) %}
+        <option value="{{ val }}" {% if defaults.get(e) == val %}selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
