@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
@@ -41,6 +41,32 @@ def _fmt_ts(v) -> str:
 
 
 templates.env.filters["ts"] = _fmt_ts
+
+
+# Paths a read-only instance may still write to: its own router settings, which live in its own
+# database and drive nothing on the host.
+_READONLY_ALLOW = ("/router/",)
+
+
+@app.middleware("http")
+async def _readonly_guard(request: Request, call_next):
+    """Refuse every mutating request when this instance is not the one in charge.
+
+    Model Loader owns real lifecycle: it starts and stops engines, writes models.ini, writes the
+    Strata pin file and drives the engine switch. Running a second instance for development is
+    only safe if it cannot do any of that - otherwise two schedulers fight over the same two
+    cards, and the symptom is a container that will not start, which is exactly the failure this
+    setup keeps producing. The guard is here rather than in compose because a read-only VOLUME
+    does not stop a container restart through the docker socket.
+    """
+    if (settings.router_readonly
+            and request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and not request.url.path.startswith(_READONLY_ALLOW)):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "read-only instance: the live Model Loader owns this action"},
+        )
+    return await call_next(request)
 
 
 @app.on_event("startup")

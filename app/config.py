@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     llama_containers: str = ""  # empty = auto-discover any ghcr.io/ggml-org/llama.cpp:* container
     gpu_vram: str = ""  # optional container_name:vram_gib overrides — auto-probed via nvidia-smi/rocm-smi if empty
     bind_port: int = 8090
+
+    # A parallel instance (model-router-v2) runs the same code against the same engines. Two
+    # instances able to start, stop and switch them would race over 64 GB of VRAM, and that
+    # failure looks exactly like the crash loops this setup has already produced. With this set
+    # the app observes and routes but never acts: every mutating route is refused.
+    router_readonly: bool = False
+    # Where the router surface listens, and the key it demands (empty = none, LAN testing only).
+    router_port: int = 8086
+    router_require_key: str = ""
     max_concurrent_downloads: int = 2
     # RAM the OS, page cache and everything else on the box need. Subtracted before deciding
     # whether a model fits in system memory, because total RAM is never all yours: sizing
