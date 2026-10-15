@@ -31,7 +31,7 @@ import time
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse, StreamingResponse
 
 from . import db, services
 from .config import settings
@@ -160,15 +160,28 @@ async def _models_of(client: httpx.AsyncClient, b: dict) -> list[str]:
     return []
 
 
+def _rank(b: dict) -> tuple:
+    """Preference order when more than one backend offers the same model.
+
+    llama-cpu and llama-voice both serve the whole of models.ini, so most ids are offered by
+    several backends and "whichever docker listed first" is not an answer - it can quietly send
+    a 27B model to CPU inference and look like the GPU has gone slow. A CPU backend is therefore
+    always last, and a purpose-named one (voice, asr) comes after the general router, so the
+    default is the thing a person would have picked.
+    """
+    name = b["name"].lower()
+    return (("cpu" in name), any(k in name for k in ("voice", "asr", "embed")), name)
+
+
 async def _live_map() -> tuple[list[dict], dict[str, dict]]:
-    """(backends with their models, {model_id: backend})."""
-    bs = _backends()
+    """(backends with their models, {model_id: the PREFERRED backend for it})."""
+    bs = sorted(_backends(), key=_rank)
     by_model: dict[str, dict] = {}
     async with httpx.AsyncClient() as client:
         for b in bs:
             b["models"] = await _models_of(client, b)
             for m in b["models"]:
-                by_model.setdefault(m, b)
+                by_model.setdefault(m, b)      # first wins, and the list is ranked
     return bs, by_model
 
 
@@ -244,8 +257,12 @@ async def list_models() -> dict:
     for e in ENGINES:
         if any(b["engine"] == e for b in bs):
             data.append({"id": e, "object": "model", "created": now, "owned_by": "model-router"})
+    seen: set[str] = set()
     for b in bs:
         for m in b["models"]:
+            if m in seen:
+                continue              # several backends serve one models.ini; list each id once
+            seen.add(m)
             data.append({"id": m, "object": "model", "created": now, "owned_by": b["engine"]})
     return {"object": "list", "data": data}
 
@@ -268,15 +285,6 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
     conv, client_id = conversation_key(body), _client_of(request)
     streaming = bool(body.get("stream"))
 
-    if streaming:
-        # Stage 1 does not relay SSE. Saying so is better than quietly answering non-streamed:
-        # a client that asked to stream and got one block back looks like a hung model.
-        _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape, stream=1,
-                status=501, error="streaming not implemented yet")
-        return JSONResponse(status_code=501, content={"error": {
-            "message": "this router does not relay streaming responses yet; retry with "
-                       "\"stream\": false, or use the engine directly"}})
-
     try:
         backend, model = await resolve(asked or ENGINES[0])
     except Unresolved as e:
@@ -286,6 +294,10 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
 
     out = dict(body)
     out["model"] = model          # llama picks by name; Strata ignores it
+
+    if streaming:
+        return await _forward_stream(out, backend, model, path, shape, conv, client_id, asked, t0)
+
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
                                                            connect=_CONNECT_TIMEOUT_S)) as c:
@@ -322,3 +334,100 @@ async def completions(request: Request):
 async def anthropic_messages(request: Request):
     """Strata serves the Anthropic shape as well, and the IDE here has used it."""
     return await _forward(request, "/v1/messages", "anthropic")
+
+
+# --------------------------------------------------------------------------- streaming
+
+def _usage_from_sse(line: str, shape: str, acc: dict) -> None:
+    """Pull token counts out of a relayed SSE line, without buffering the stream.
+
+    Counting tokens here instead would mean owning a tokenizer, and the cost of getting that
+    wrong is on display elsewhere on this box: Open WebUI estimates with cl100k_base against a
+    model whose vocabulary is 248,320, and reports roughly four times the real figure. The
+    engine already knows the answer, so the engine is the only honest source.
+    """
+    if not line.startswith("data:"):
+        return
+    payload = line[5:].strip()
+    if not payload or payload == "[DONE]":
+        return
+    try:
+        d = json.loads(payload)
+    except ValueError:
+        return
+    if shape == "anthropic":
+        u = (d.get("message") or {}).get("usage") or d.get("usage") or {}
+        if u.get("input_tokens"):
+            acc["prompt_tokens"] = int(u["input_tokens"])
+        if u.get("output_tokens"):
+            acc["completion_tokens"] = int(u["output_tokens"])
+        return
+    u = d.get("usage") or {}
+    if u:
+        acc["prompt_tokens"] = int(u.get("prompt_tokens") or acc.get("prompt_tokens") or 0)
+        acc["completion_tokens"] = int(u.get("completion_tokens") or acc.get("completion_tokens") or 0)
+        acc["cached_tokens"] = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+
+
+async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape: str,
+                          conv: str, client_id: str, asked: str, t0: float):
+    """Relay an SSE response chunk for chunk.
+
+    TWO THINGS THIS HAS TO GET RIGHT, both invisible while they work:
+
+    1. Do not buffer. The point of streaming is the first token arriving early; collecting the
+       response to inspect it would hand the client one block at the end - the same thing the
+       old 501 was avoiding, only slower and pretending to work.
+
+    2. Let a client disconnect reach the engine. When the caller goes away this generator is
+       closed, the httpx stream context exits, and the upstream connection drops - which is how
+       Strata learns to cancel. Swallowing that would leave a 200K-token prefill burning both
+       cards for a minute after somebody pressed stop.
+    """
+    if shape != "anthropic":
+        # Ask for the usage chunk. Without it an OpenAI-shaped stream carries no token counts at
+        # all, and the accounting for every streamed request - i.e. nearly all of them - is blank.
+        opts = dict(out.get("stream_options") or {})
+        opts["include_usage"] = True
+        out["stream_options"] = opts
+
+    acc: dict = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+    state: dict = {"ttft_ms": 0.0, "status": 0, "error": ""}
+
+    async def gen():
+        pending = b""
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
+                                                               connect=_CONNECT_TIMEOUT_S)) as c:
+                async with c.stream("POST", f"{backend['url']}{path}", json=out) as r:
+                    state["status"] = r.status_code
+                    async for chunk in r.aiter_bytes():
+                        if not chunk:
+                            continue
+                        if not state["ttft_ms"]:
+                            state["ttft_ms"] = (time.time() - t0) * 1000
+                        yield chunk
+                        # Split a copy for inspection only; the bytes above already went out
+                        # untouched, so nothing here can delay or alter what the client sees.
+                        pending += chunk
+                        while b"\n" in pending:
+                            line, pending = pending.split(b"\n", 1)
+                            _usage_from_sse(line.decode("utf-8", "replace"), shape, acc)
+        except httpx.HTTPError as e:
+            state["error"] = f"{type(e).__name__}: {e}"
+            state["status"] = state["status"] or 502
+            yield b"data: " + json.dumps(
+                {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
+        finally:
+            # Runs on normal completion AND on client disconnect, so a cancelled request is
+            # recorded rather than vanishing - those are often the ones worth seeing.
+            _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                    backend=backend["name"], model=model, shape=shape, stream=1,
+                    status=state["status"], error=state["error"],
+                    prompt_tokens=acc["prompt_tokens"],
+                    completion_tokens=acc["completion_tokens"],
+                    cached_tokens=acc["cached_tokens"],
+                    ttft_ms=state["ttft_ms"], total_ms=(time.time() - t0) * 1000)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
