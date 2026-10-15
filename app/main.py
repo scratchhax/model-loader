@@ -2953,9 +2953,12 @@ def engines_activate(engine: str, soft: str = Form(""), share: str = Form("")) -
     container is the only thing that makes it give the cards back.
 
     `soft` (the checkbox on the Engine row) asks backends that support it to unload instead:
-    Strata gives the same VRAM and RAM back in ~0.3 s and stays warm, so the return trip is
-    seconds. Hard remains the default because a parked server can still be woken by a stray
-    request, and "who owns the cards" deserves an answer that cannot change its mind.
+    Strata gives the same VRAM and RAM back in ~0.3 s and keeps its container and settings. It
+    does NOT make the return trip quick - measured at 104 s on 2026-10-15, no better than a
+    cold start, because the other engine reads its own model in between and evicts the page
+    cache the old claim here assumed would still be warm. Hard remains the default because a
+    parked server can still be woken by a stray request, and "who owns the cards" deserves an
+    answer that cannot change its mind.
 
     `share` (the Share button, offered only when a running engine demonstrably holds a
     strict subset of the cards) starts this engine and displaces nothing - the cards are

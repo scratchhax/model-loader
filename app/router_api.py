@@ -785,14 +785,15 @@ async def may_autoswitch(target: str) -> tuple[bool, str]:
 
 
 async def request_switch(engine: str) -> tuple[bool, str]:
-    """Ask the UI process to hand the cards to `engine`. Soft, so the way back is cheap.
+    """Ask the UI process to hand the cards to `engine`.
 
     A POST to the same endpoint the engine control uses, for the reason given on that endpoint:
     `_switch_lock` and `_switch_state` are per-process and this container runs two, so the UI
     process owns the switch and everyone else asks. Soft parks a displaced Strata instead of
-    stopping it, which returns the same VRAM in ~0.3 s and keeps the page cache warm, so
-    switching back costs seconds rather than a 90 s cold start - the difference between a
-    dropdown you can change twice and one you change once.
+    stopping it, which returns the VRAM in ~0.3 s and leaves the container and its settings up.
+    That makes the RELEASE immediate, which is what lets the engine being asked for start
+    sooner. It does not make the return leg quick: a parked Strata asked back took 104 s when
+    measured, so a dropdown you change twice costs roughly 45 s one way and 110 s the other.
     """
     db.set_setting("router.autoswitch.last_at", str(time.time()))
     try:
