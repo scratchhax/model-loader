@@ -566,6 +566,13 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
 
     pending = b""
     token = _inflight_add(backend["engine"])
+    # A streamed response commits to its status code with the first byte, so an engine that dies
+    # half way through a generation was recorded as a 200 - which is how a model that crashed
+    # twice in a row showed up in the Router tab as two healthy requests, and then got picked by
+    # last_model_for() as "the model you were using". A stream is only complete when it says so,
+    # and these are the two ways it says it.
+    saw_end = False
+    client_gone = False
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
                                                            connect=_CONNECT_TIMEOUT_S)) as c:
@@ -582,7 +589,18 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
                     pending += chunk
                     while b"\n" in pending:
                         line, pending = pending.split(b"\n", 1)
-                        _usage_from_sse(line.decode("utf-8", "replace"), shape, acc)
+                        text = line.decode("utf-8", "replace")
+                        _usage_from_sse(text, shape, acc)
+                        stripped = text.strip()
+                        if stripped == "data: [DONE]" or stripped == "event: message_stop":
+                            saw_end = True
+    except GeneratorExit:
+        # The CLIENT went away: this generator was closed from the outside. Not the engine's
+        # fault, and it must not be blamed for one - so it is recorded as whatever it was up to
+        # that point, exactly as before. Re-raised because swallowing it would leave the
+        # upstream connection open and the engine generating into nothing.
+        client_gone = True
+        raise
     except httpx.HTTPError as e:
         state["error"] = f"{type(e).__name__}: {e}"
         state["status"] = state["status"] or 502
@@ -590,6 +608,13 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
             {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
     finally:
         _inflight_drop(token)
+        if not saw_end and not client_gone and not state["error"] and state["status"] == 200:
+            # The upstream hung up mid-generation. llama.cpp's router logs "http client error:
+            # Failed to read connection" on its side when a model instance aborts; this is the
+            # same event seen from in front of it.
+            state["status"] = 502
+            state["error"] = (f"{backend['name']} ended the stream before finishing "
+                              f"({model} may have crashed)")
         # Runs on normal completion AND on client disconnect, so a cancelled request is
         # recorded rather than vanishing - those are often the ones worth seeing.
         _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
