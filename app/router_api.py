@@ -201,6 +201,17 @@ def default_for(engine: str) -> str:
     return db.get_setting(f"router.default.{engine}", "")
 
 
+def pinned_backend(engine: str) -> str:
+    """The container an engine's traffic must go to, or "" for automatic.
+
+    Automatic ranks CPU last and purpose-named servers after the general router, which is a
+    guess dressed as a rule: llama-cpu and llama-voice both serve the whole of models.ini, so
+    with the GPU router stopped "llama" lands on the VOICE server - it answers, slowly, and
+    nothing says why. A name is not a statement of intent, so this lets you make one.
+    """
+    return db.get_setting(f"router.backend.{engine}", "")
+
+
 # --------------------------------------------------------------------------- routing
 
 class Unresolved(Exception):
@@ -223,12 +234,24 @@ async def resolve(asked: str) -> tuple[dict, str]:
             raise Unresolved(
                 f"{asked} is not the engine holding the cards right now (running: {other}). "
                 f"The engines here are exclusive; switch them in Model Loader.")
+        pin = pinned_backend(asked)
+        if pin:
+            # A pin is an instruction, so a missing pinned backend is an error rather than a
+            # quiet fallback. Falling back would send traffic somewhere the user explicitly did
+            # not choose and say nothing - which is the behaviour the pin exists to stop.
+            match = [b for b in live if b["name"] == pin]
+            if not match:
+                raise Unresolved(f"{asked} is pinned to {pin}, which is not running "
+                                 f"(available: {', '.join(b['name'] for b in live)})")
+            live = match
         b = live[0]
         # Strata serves exactly one model and ignores the name it is given, so whatever it has
         # loaded IS the answer. llama's router picks by name, so a default has to be chosen.
         if b["engine"] == "strata":
             return b, (b["models"][0] if b["models"] else asked)
         want = default_for("llama")
+        if want and want in b["models"]:
+            return b, want            # honour the pin: ask THIS backend for the default
         if want and want in by_model:
             return by_model[want], want
         if want:

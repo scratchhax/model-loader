@@ -3593,6 +3593,9 @@ async def router_page(request: Request) -> HTMLResponse:
         "engines": router_api.ENGINES,
         "per_engine": per_engine,
         "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
+        "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
+        "backends_by_engine": {e: [b["name"] for b in bs if b["engine"] == e]
+                               for e in router_api.ENGINES},
         "live_engines": sorted({b["engine"] for b in bs}),
         "backends": bs,
         "recording": db.get_setting("router.record", "1") != "0",
@@ -3630,6 +3633,19 @@ def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLRe
             title=msg + (" — restart Strata to apply" if ok else "")))
     return HTMLResponse(_QUEUED_CHIP.format(
         label="Saved", title=f"{engine} now defaults to {model or '(none)'}"))
+
+
+@app.post("/router/backend", response_class=HTMLResponse)
+def router_set_backend(engine: str = Form(...), backend: str = Form("")) -> HTMLResponse:
+    """Pin an engine's traffic to one container, or clear it back to automatic."""
+    if engine not in router_api.ENGINES:
+        return _blocked_chip(f"unknown engine {engine!r}")
+    db.set_setting(f"router.backend.{engine}", backend.strip())
+    return HTMLResponse(_QUEUED_CHIP.format(
+        label="Saved",
+        title=f"{engine} pinned to {backend}" if backend.strip()
+              else f"{engine} back to automatic (CPU last, purpose-named servers after the "
+                   f"general router)"))
 
 
 @app.post("/router/recording", response_class=HTMLResponse)
