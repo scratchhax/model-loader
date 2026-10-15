@@ -25,6 +25,7 @@ rather than silently bouncing an engine somebody is using.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -275,9 +276,23 @@ async def resolve(asked: str) -> tuple[dict, str]:
 # --------------------------------------------------------------------------- endpoints
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     db.init()
     _init_db()
+    _init_rollup()
+
+    async def _compactor():
+        # Hourly, and once at startup. Compaction is cheap when there is nothing old enough to
+        # fold, so running it often costs nothing and means a box left off for a month catches
+        # up on its own rather than needing a maintenance step nobody remembers.
+        while True:
+            try:
+                await asyncio.to_thread(compact)
+            except Exception:  # noqa: BLE001 - housekeeping must never take the router down
+                pass
+            await asyncio.sleep(3600)
+
+    asyncio.create_task(_compactor())
 
 
 @app.get("/healthz")
@@ -540,3 +555,148 @@ async def props() -> JSONResponse:
         return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
     except httpx.HTTPError as e:
         return JSONResponse(status_code=502, content={"error": {"message": f"{backend['name']}: {e}"}})
+
+
+# --------------------------------------------------------------------------- retention
+#
+# Detail is worth most when it is fresh. A request from an hour ago is something you might read
+# line by line; one from six months ago is only interesting as part of a trend. So the data gets
+# coarser with age rather than being kept whole or discarded whole:
+#
+#   0-14 days     every request, exactly as it happened
+#   14-90 days    hourly totals per engine and model - the conversation key is DROPPED, being
+#                 the highest-cardinality column, and nobody asks which individual chat ran two
+#                 months ago
+#   90-365 days   daily totals per engine and model
+#   past a year   deleted
+#
+# Compaction is destructive, which is why each step writes the summary BEFORE deleting what it
+# summarised, inside one transaction: a crash halfway leaves duplicated detail, which is
+# recoverable, rather than a hole, which is not.
+RETAIN_RAW_DAYS = 14
+RETAIN_HOURLY_DAYS = 90
+RETAIN_TOTAL_DAYS = 365
+_DAY = 86400.0
+
+_ROLLUP_UPSERT = (
+    "INSERT INTO router_rollup(grain, bucket, engine, model, requests, failures, "
+    " prompt_tokens, completion_tokens, cached_tokens, ttft_ms_sum, ttft_n, total_ms_sum) "
+    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(grain, bucket, engine, model) DO UPDATE SET "
+    " requests = requests + excluded.requests, failures = failures + excluded.failures, "
+    " prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
+    " completion_tokens = completion_tokens + excluded.completion_tokens, "
+    " cached_tokens = cached_tokens + excluded.cached_tokens, "
+    " ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum, ttft_n = ttft_n + excluded.ttft_n, "
+    " total_ms_sum = total_ms_sum + excluded.total_ms_sum"
+)
+
+
+def _init_rollup() -> None:
+    with db._LOCK, db._conn() as c:
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS router_rollup (
+                grain             TEXT NOT NULL,
+                bucket            REAL NOT NULL,
+                engine            TEXT NOT NULL DEFAULT '',
+                model             TEXT NOT NULL DEFAULT '',
+                requests          INTEGER NOT NULL DEFAULT 0,
+                failures          INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens     INTEGER NOT NULL DEFAULT 0,
+                ttft_ms_sum       REAL NOT NULL DEFAULT 0,
+                ttft_n            INTEGER NOT NULL DEFAULT 0,
+                total_ms_sum      REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (grain, bucket, engine, model)
+            );
+            CREATE INDEX IF NOT EXISTS router_rollup_bucket ON router_rollup(bucket DESC);
+            """
+        )
+
+
+def compact(now: float | None = None) -> dict:
+    """Run the retention tiers. Safe to call repeatedly; returns what it did.
+
+    Every write is an upsert because compaction may cover the same window twice after a restart,
+    and a second pass must add nothing rather than double the totals.
+    """
+    now = now or time.time()
+    raw_before = now - RETAIN_RAW_DAYS * _DAY
+    hourly_before = now - RETAIN_HOURLY_DAYS * _DAY
+    expire_before = now - RETAIN_TOTAL_DAYS * _DAY
+    out = {"hourly": 0, "daily": 0, "raw_deleted": 0, "rollup_deleted": 0}
+    with db._LOCK, db._conn() as c:
+        rows = c.execute(
+            "SELECT CAST(ts / 3600 AS INTEGER) * 3600.0, engine, model, COUNT(*), "
+            "       SUM(status >= 400), SUM(prompt_tokens), SUM(completion_tokens), "
+            "       SUM(cached_tokens), SUM(ttft_ms), SUM(ttft_ms > 0), SUM(total_ms) "
+            "FROM router_request WHERE ts < ? GROUP BY 1, engine, model",
+            (raw_before,)).fetchall()
+        for r in rows:
+            c.execute(_ROLLUP_UPSERT, ("hour", r[0], r[1] or "", r[2] or "", r[3], r[4] or 0,
+                                       r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0.0,
+                                       r[9] or 0, r[10] or 0.0))
+        out["hourly"] = len(rows)
+        out["raw_deleted"] = c.execute("DELETE FROM router_request WHERE ts < ?",
+                                       (raw_before,)).rowcount
+
+        rows = c.execute(
+            "SELECT CAST(bucket / 86400 AS INTEGER) * 86400.0, engine, model, SUM(requests), "
+            "       SUM(failures), SUM(prompt_tokens), SUM(completion_tokens), "
+            "       SUM(cached_tokens), SUM(ttft_ms_sum), SUM(ttft_n), SUM(total_ms_sum) "
+            "FROM router_rollup WHERE grain = 'hour' AND bucket < ? GROUP BY 1, engine, model",
+            (hourly_before,)).fetchall()
+        for r in rows:
+            c.execute(_ROLLUP_UPSERT, ("day", r[0], r[1] or "", r[2] or "", r[3], r[4] or 0,
+                                       r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0.0,
+                                       r[9] or 0, r[10] or 0.0))
+        out["daily"] = len(rows)
+        out["rollup_deleted"] = c.execute(
+            "DELETE FROM router_rollup WHERE grain = 'hour' AND bucket < ?",
+            (hourly_before,)).rowcount
+        out["rollup_deleted"] += c.execute(
+            "DELETE FROM router_rollup WHERE bucket < ?", (expire_before,)).rowcount
+    return out
+
+
+def totals(since: float) -> dict:
+    """Request and token totals from `since` to now, ACROSS BOTH TIERS.
+
+    A window reaching past the raw retention has to read the rollups too, or a "last 90 days"
+    quietly means "last 14" - a wrong answer that looks like a right one.
+    """
+    out = {"requests": 0, "failures": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "cached_tokens": 0, "total_ms": 0.0, "ttft_ms_sum": 0.0, "ttft_n": 0}
+    keys = ("requests", "failures", "prompt_tokens", "completion_tokens", "cached_tokens",
+            "total_ms", "ttft_ms_sum", "ttft_n")
+    with db._conn() as c:
+        for sql, params in (
+            ("SELECT COUNT(*), SUM(status >= 400), SUM(prompt_tokens), SUM(completion_tokens), "
+             "       SUM(cached_tokens), SUM(total_ms), SUM(ttft_ms), SUM(ttft_ms > 0) "
+             "FROM router_request WHERE ts >= ?", (since,)),
+            ("SELECT SUM(requests), SUM(failures), SUM(prompt_tokens), SUM(completion_tokens), "
+             "       SUM(cached_tokens), SUM(total_ms_sum), SUM(ttft_ms_sum), SUM(ttft_n) "
+             "FROM router_rollup WHERE bucket >= ?", (since,)),
+        ):
+            r = c.execute(sql, params).fetchone()
+            if r:
+                for k, v in zip(keys, r):
+                    out[k] += v or 0
+    return out
+
+
+def retention_state() -> dict:
+    """What is actually stored, so the page can describe its own coverage rather than claim it."""
+    with db._conn() as c:
+        raw_n, raw_oldest = c.execute(
+            "SELECT COUNT(*), MIN(ts) FROM router_request").fetchone()
+        roll = {g: (n, old) for g, n, old in c.execute(
+            "SELECT grain, COUNT(*), MIN(bucket) FROM router_rollup GROUP BY grain")}
+    return {"raw_rows": raw_n or 0, "raw_oldest": raw_oldest or 0,
+            "hourly_rows": (roll.get("hour") or (0, 0))[0],
+            "daily_rows": (roll.get("day") or (0, 0))[0],
+            "oldest": min([t for t in [raw_oldest] + [v[1] for v in roll.values()] if t] or [0]),
+            "raw_days": RETAIN_RAW_DAYS, "hourly_days": RETAIN_HOURLY_DAYS,
+            "total_days": RETAIN_TOTAL_DAYS}

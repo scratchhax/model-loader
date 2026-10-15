@@ -103,6 +103,43 @@
   </form>
 </div>
 
+<!-- range + totals -------------------------------------------------------- -->
+<div class="mt-7 flex flex-wrap items-center gap-2">
+  {% for key, label, _secs in ranges %}
+  <a href="/router?range={{ key }}"
+     class="rounded-md border px-2.5 py-1 text-xs
+            {% if range == key %}border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900
+            {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-800{% endif %}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+  {% set t = totals %}
+  {% set tiles = [
+      ('Requests', '{:,}'.format(t.requests)),
+      ('Failed', '{:,}'.format(t.failures)),
+      ('Prompt tokens', '{:,}'.format(t.prompt_tokens)),
+      ('Reused', '{:,}'.format(t.cached_tokens)),
+      ('Output tokens', '{:,}'.format(t.completion_tokens)),
+      ('Avg TTFT', ((t.ttft_ms_sum / t.ttft_n / 1000) | round(2) ~ 's') if t.ttft_n else '—'),
+  ] %}
+  {% for label, value in tiles %}
+  <div class="rounded-md border border-slate-200 dark:border-slate-700 px-3 py-2">
+    <div class="text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400">{{ label }}</div>
+    <div class="mt-0.5 text-lg font-semibold tabular-nums">{{ value }}</div>
+  </div>
+  {% endfor %}
+</div>
+<p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+  {# Totals span both the per-request rows and the rollups, so a long window is a real answer
+     rather than quietly meaning "as far back as the detail happens to go". #}
+  Totals cover rollups as well as individual requests. Detail is kept for
+  {{ retention.raw_days }} days ({{ '{:,}'.format(retention.raw_rows) }} requests stored), then
+  hourly to {{ retention.hourly_days }} days ({{ '{:,}'.format(retention.hourly_rows) }}), then
+  daily to {{ retention.total_days }} ({{ '{:,}'.format(retention.daily_rows) }}), after which it
+  is deleted.
+</p>
+
 <!-- conversations --------------------------------------------------------- -->
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
   Conversations <span class="font-normal normal-case">— grouped by prompt prefix, since the API has no conversation id</span>
@@ -126,7 +163,7 @@
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
       {% for c in conversations %}
       <tr>
-        <td class="px-3 py-2 font-mono text-xs">{{ c.conv }}
+        <td class="px-3 py-2 font-mono text-xs"><a href="/router/conversation/{{ c.conv }}" class="hover:underline">{{ c.conv }}</a>
           {% if c.failures %}<span class="ml-1 rounded bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 px-1 text-[10px]">{{ c.failures }} failed</span>{% endif %}
         </td>
         <td class="px-3 py-2 text-xs">

@@ -3513,15 +3513,29 @@ def strata_select(family: str = Form(...), model: str = Form(...),
 # instance's own database and drive nothing on the host - no container, no models.ini, no engine.
 
 
-def _router_rows(limit: int = 25) -> list[dict]:
+# Windows the page offers. "all" is deliberately last and unbounded: with retention in place it
+# is a real question again rather than an unbounded scan of everything ever recorded.
+ROUTER_RANGES = (("24h", "last 24 hours", 86400.0), ("7d", "last 7 days", 7 * 86400.0),
+                 ("30d", "last 30 days", 30 * 86400.0), ("90d", "last 90 days", 90 * 86400.0),
+                 ("1y", "last year", 365 * 86400.0), ("all", "everything kept", 0.0))
+
+
+def _router_since(rng: str) -> float:
+    for key, _label, secs in ROUTER_RANGES:
+        if key == rng:
+            return (time.time() - secs) if secs else 0.0
+    return time.time() - 86400.0
+
+
+def _router_rows(since: float = 0.0, limit: int = 100) -> list[dict]:
     with db._conn() as c:
         return [dict(r) for r in c.execute(
             "SELECT ts, conv, client, asked, engine, backend, model, shape, stream, status, "
             "error, prompt_tokens, completion_tokens, cached_tokens, ttft_ms, total_ms "
-            "FROM router_request ORDER BY ts DESC LIMIT ?", (limit,))]
+            "FROM router_request WHERE ts >= ? ORDER BY ts DESC LIMIT ?", (since, limit))]
 
 
-def _router_conversations(limit: int = 15) -> list[dict]:
+def _router_conversations(since: float = 0.0, limit: int = 50) -> list[dict]:
     """One row per conversation, newest first.
 
     A conversation is the unit a person thinks in - "that chat got slow", "that one burned a lot
@@ -3545,8 +3559,8 @@ def _router_conversations(limit: int = 15) -> list[dict]:
             "       (SELECT model  FROM router_request x WHERE x.conv = r.conv AND x.model  <> '' "
             "         ORDER BY x.ts DESC LIMIT 1) AS model, "
             "       MAX(client) AS client "
-            "FROM router_request r WHERE conv <> '' "
-            "GROUP BY conv ORDER BY last_ts DESC LIMIT ?", (limit,))]
+            "FROM router_request r WHERE conv <> '' AND ts >= ? "
+            "GROUP BY conv ORDER BY last_ts DESC LIMIT ?", (since, limit))]
 
 
 def _strata_choices() -> list[tuple[str, str]]:
@@ -3575,8 +3589,28 @@ def _strata_choices() -> list[tuple[str, str]]:
     return out
 
 
+@app.get("/router/conversation/{conv}", response_class=HTMLResponse)
+def router_conversation(request: Request, conv: str) -> HTMLResponse:
+    """Every turn of one conversation.
+
+    Only possible inside the raw window - once a conversation has been folded into hourly totals
+    its individual turns are gone, by design. The page says so rather than showing an empty
+    table that looks like a bug.
+    """
+    with db._conn() as c:
+        turns = [dict(r) for r in c.execute(
+            "SELECT ts, asked, engine, backend, model, stream, status, error, prompt_tokens, "
+            "cached_tokens, completion_tokens, ttft_ms, total_ms "
+            "FROM router_request WHERE conv = ? ORDER BY ts", (conv,))]
+    return templates.TemplateResponse("router_conversation.html", {
+        "request": request, "conv": conv, "turns": turns,
+        "retention": router_api.retention_state(),
+    })
+
+
 @app.get("/router", response_class=HTMLResponse)
-async def router_page(request: Request) -> HTMLResponse:
+async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
+    since = _router_since(range)
     bs, by_model = await router_api._live_map()
     per_engine: dict[str, list] = {}
     for b in bs:
@@ -3604,9 +3638,13 @@ async def router_page(request: Request) -> HTMLResponse:
         "live_engines": sorted({b["engine"] for b in bs}),
         "backends": bs,
         "recording": db.get_setting("router.record", "1") != "0",
-        "conversations": _router_conversations(),
-        "rows": _router_rows(),
+        "conversations": _router_conversations(since),
+        "rows": _router_rows(since),
         "port": settings.router_port,
+        "ranges": ROUTER_RANGES,
+        "range": range,
+        "totals": router_api.totals(since),
+        "retention": router_api.retention_state(),
     })
 
 
