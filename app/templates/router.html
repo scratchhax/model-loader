@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'router' %}
+{% block title %}Router · Model Loader{% endblock %}
+{% block content %}
+
+<div class="flex items-baseline justify-between">
+  <h1 class="text-xl font-semibold tracking-tight">Router</h1>
+  <span class="font-mono text-xs text-slate-500 dark:text-slate-400">:{{ port }}/v1</span>
+</div>
+
+<p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
+  One endpoint for everything that needs inference here. Point a client at
+  <span class="font-mono">http://wheatley:{{ port }}/v1</span> and ask for
+  <span class="font-mono">strata</span> or <span class="font-mono">llama</span> — those names stay
+  valid when the engine changes, which the real model ids do not. Real ids still work when you
+  mean one specific model.
+</p>
+
+<!-- defaults ------------------------------------------------------------- -->
+<h2 class="mt-6 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Default per engine</h2>
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  {% for e in engines %}
+  {% set live = e in live_engines %}
+  <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3 {% if not loop.first %}border-t border-slate-200 dark:border-slate-700{% endif %}">
+    <div class="min-w-0">
+      <div class="flex items-center gap-2">
+        <span class="font-mono text-sm">{{ e }}</span>
+        {% if live %}
+          <span class="rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 px-2 py-0.5 text-[10px]">running</span>
+        {% else %}
+          <span class="rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 px-2 py-0.5 text-[10px]">not holding the cards</span>
+        {% endif %}
+      </div>
+      <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        {% if e == 'strata' %}
+          {# The two engines load models in fundamentally different ways, and pretending
+             otherwise would make this control lie about one of them. #}
+          Strata serves whatever it started with and cannot load on demand, so the choice is one
+          of the <strong>installed packs</strong> and it applies on the next start — a statement
+          of intent, not a switch.
+        {% else %}
+          llama.cpp loads on demand, so this takes effect on the next request asking for
+          <span class="font-mono">llama</span>.
+        {% endif %}
+      </p>
+    </div>
+    <div class="flex shrink-0 flex-wrap items-center gap-2">
+    {# Pinning is separate from the default because they answer different questions: WHICH
+       SERVER handles this engine, and WHICH MODEL it should load. Automatic ranking is a guess
+       from container names; this is where you say what you meant. #}
+    {% if backends_by_engine.get(e) | length > 1 or pins.get(e) %}
+    {# Stopped backends are listed too - see the note in _backends(). Pinning to one is allowed
+       and takes effect when it next runs; a request meanwhile is refused by name rather than
+       sent somewhere else. #}
+    <form hx-post="/router/backend" hx-swap="outerHTML" class="flex items-center gap-1">
+      <input type="hidden" name="engine" value="{{ e }}">
+      <select name="backend" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
+        <option value="">auto</option>
+        {% for n, running in backends_by_engine.get(e, []) %}
+        <option value="{{ n }}" {% if pins.get(e) == n %}selected{% endif %}>{{ n }}{% if not running %} (stopped){% endif %}</option>
+        {% endfor %}
+      </select>
+      <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Pin</button>
+    </form>
+    {% endif %}
+    <form hx-post="/router/default" hx-swap="outerHTML" class="flex items-center gap-2">
+      <input type="hidden" name="engine" value="{{ e }}">
+      <select name="model" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
+        <option value="">(none)</option>
+        {# (value, label): for llama both are the model id; for Strata the value is the INSTALL
+           TAG, because the choosable unit there is an installed pack rather than the one model
+           it happens to be serving. #}
+        {% for val, label in per_engine.get(e, []) %}
+        <option value="{{ val }}" {% if defaults.get(e) == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+    </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- backends + kill switch ------------------------------------------------ -->
+<div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 dark:border-slate-700 px-4 py-3">
+  <div class="min-w-0 text-xs text-slate-500 dark:text-slate-400">
+    Reachable now:
+    {% for b in backends %}
+      <span class="font-mono">{{ b.name }}</span><span class="text-slate-400">({{ b.engine }}, {{ b.models | length }})</span>{% if not loop.last %}, {% endif %}
+    {% else %}
+      nothing
+    {% endfor %}
+  </div>
+  <form hx-post="/router/recording" hx-swap="outerHTML" class="flex shrink-0 items-center gap-2">
+    {# Routing and bookkeeping are separable on purpose: if accounting ever misbehaves, taking it
+       out of the path should not mean taking inference down with it. #}
+    <input type="hidden" name="on" value="{{ '0' if recording else '1' }}">
+    <span class="text-xs text-slate-500 dark:text-slate-400">recording {{ 'on' if recording else 'off' }}</span>
+    <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">
+      turn {{ 'off' if recording else 'on' }}
+    </button>
+  </form>
+</div>
+
+<!-- range + totals -------------------------------------------------------- -->
+<div class="mt-7 flex flex-wrap items-center gap-2">
+  {% for key, label, _secs in ranges %}
+  <a href="/router?range={{ key }}"
+     class="rounded-md border px-2.5 py-1 text-xs
+            {% if range == key %}border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900
+            {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-800{% endif %}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+  {% set t = totals %}
+  {% set tiles = [
+      ('Requests', '{:,}'.format(t.requests)),
+      ('Failed', '{:,}'.format(t.failures)),
+      ('Prompt tokens', '{:,}'.format(t.prompt_tokens)),
+      ('Reused', '{:,}'.format(t.cached_tokens)),
+      ('Output tokens', '{:,}'.format(t.completion_tokens)),
+      ('Avg TTFT', ((t.ttft_ms_sum / t.ttft_n / 1000) | round(2) ~ 's') if t.ttft_n else '—'),
+  ] %}
+  {% for label, value in tiles %}
+  <div class="rounded-md border border-slate-200 dark:border-slate-700 px-3 py-2">
+    <div class="text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400">{{ label }}</div>
+    <div class="mt-0.5 text-lg font-semibold tabular-nums">{{ value }}</div>
+  </div>
+  {% endfor %}
+</div>
+<p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+  {# Totals span both the per-request rows and the rollups, so a long window is a real answer
+     rather than quietly meaning "as far back as the detail happens to go". #}
+  Totals cover rollups as well as individual requests. Detail is kept for
+  {{ retention.raw_days }} days ({{ '{:,}'.format(retention.raw_rows) }} requests stored), then
+  hourly to {{ retention.hourly_days }} days ({{ '{:,}'.format(retention.hourly_rows) }}), then
+  daily to {{ retention.total_days }} ({{ '{:,}'.format(retention.daily_rows) }}), after which it
+  is deleted.
+</p>
+
+<!-- charts ---------------------------------------------------------------- -->
+{% if not charts.empty %}
+{#
+  Two charts, not one with two y-axes. Tokens run to six figures and requests to two, so a
+  shared axis would flatten one of them into the floor - the dual-axis chart being the single
+  most common way a dashboard lies.
+
+  Colours are the validated categorical slots 1-3 (blue/orange/aqua), checked with the palette
+  validator in BOTH modes before use: worst adjacent CVD deltaE 9.2 light / 9.4 dark against an 8
+  target. Light-mode aqua sits under 3:1 on the light surface, so the relief rule applies - the
+  legend labels every series and the tables below are the table view.
+
+  Scoped to this app's own theming (`.dark` on <html>, Tailwind's class strategy) rather than a
+  media query, so the chart follows the toggle in the header like everything else.
+#}
+<style>
+  .viz {
+    --s-read:   #2a78d6;   /* slot 1 - prompt tokens actually processed */
+    --s-output: #eb6834;   /* slot 2 - tokens generated */
+    --s-reused: #1baf7a;   /* slot 3 - prompt tokens served from cache */
+    --s-fail:   #d03b3b;   /* status: critical - never a series colour */
+    --viz-grid: rgb(100 116 139 / .22);
+    --viz-ink:  rgb(100 116 139);
+  }
+  .dark .viz {
+    --s-read:   #3987e5;
+    --s-output: #d95926;
+    --s-reused: #199e70;
+    --s-fail:   #d03b3b;
+    --viz-grid: rgb(148 163 184 / .20);
+    --viz-ink:  rgb(148 163 184);
+  }
+  .viz rect.bar { transition: opacity .12s ease; }
+  .viz g.col:hover rect.bar { opacity: .72; }
+  .viz g.col rect.hit { fill: transparent; }
+</style>
+
+<div class="viz mt-4 grid gap-3 lg:grid-cols-2">
+
+  <!-- tokens -->
+  <div class="rounded-md border border-slate-200 dark:border-slate-700 p-3">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h3 class="text-sm font-medium">Tokens per {{ charts.grain }}</h3>
+      <div class="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+        {# A legend for every series, always: identity is never carried by colour alone. #}
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-reused)"></span>reused</span>
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-read)"></span>read</span>
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-output)"></span>output</span>
+      </div>
+    </div>
+    <svg viewBox="0 0 {{ charts.w }} {{ charts.h }}" class="mt-2 w-full" style="height:132px" role="img"
+         aria-label="Stacked tokens per {{ charts.grain }}: reused, read and output">
+      {# Recessive baseline only - a full grid competes with marks this small. #}
+      <line x1="0" y1="116" x2="{{ charts.w }}" y2="116" stroke="var(--viz-grid)" stroke-width="1"/>
+      {% for b in charts.tokens %}
+      <g class="col">
+        <title>{{ b.t | ts }} — {{ '{:,}'.format(b.total) }} tokens: {{ '{:,}'.format(b.reused) }} reused, {{ '{:,}'.format(b.read) }} read, {{ '{:,}'.format(b.output) }} output</title>
+        {% for s in b.segs %}
+        <rect class="bar" x="{{ s.x }}" y="{{ s.y }}" width="{{ s.w }}" height="{{ s.h }}" rx="2"
+              fill="{% if s.key == 'read' %}var(--s-read){% elif s.key == 'output' %}var(--s-output){% else %}var(--s-reused){% endif %}"/>
+        {% endfor %}
+        {# A hit target the full height of the plot, so hovering a one-pixel bar still works. #}
+        <rect class="hit" x="{{ b.x }}" y="0" width="{{ b.w }}" height="116"/>
+      </g>
+      {% endfor %}
+      {% for tk in charts.ticks %}
+      <text x="{{ tk.x }}" y="128" text-anchor="middle" font-size="9" fill="var(--viz-ink)">{{ tk.t | ts }}</text>
+      {% endfor %}
+    </svg>
+    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+      {# The distinction the chart exists to make. #}
+      <strong>read</strong> is prompt tokens the engine had to process; <strong>reused</strong> came
+      from cache and cost almost nothing. A long conversation staying cheap shows up as a growing
+      green band, not growing work.
+    </p>
+  </div>
+
+  <!-- requests -->
+  <div class="rounded-md border border-slate-200 dark:border-slate-700 p-3">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h3 class="text-sm font-medium">Requests per {{ charts.grain }}</h3>
+      <div class="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-read)"></span>ok</span>
+        {# Status colour, so it ships with a label and never means something by hue alone. #}
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-fail)"></span>failed</span>
+      </div>
+    </div>
+    <svg viewBox="0 0 {{ charts.w }} {{ charts.h }}" class="mt-2 w-full" style="height:132px" role="img"
+         aria-label="Requests per {{ charts.grain }}, failures shown separately">
+      <line x1="0" y1="116" x2="{{ charts.w }}" y2="116" stroke="var(--viz-grid)" stroke-width="1"/>
+      {% for b in charts.requests %}
+      <g class="col">
+        <title>{{ b.t | ts }} — {{ b.requests }} request{{ 's' if b.requests != 1 }}{% if b.failures %}, {{ b.failures }} failed{% endif %}</title>
+        {% if b.ok_h %}<rect class="bar" x="{{ b.x }}" y="{{ b.ok_y }}" width="{{ b.w }}" height="{{ b.ok_h }}" rx="2" fill="var(--s-read)"/>{% endif %}
+        {% if b.bad_h %}<rect class="bar" x="{{ b.x }}" y="{{ b.bad_y }}" width="{{ b.w }}" height="{{ b.bad_h }}" rx="2" fill="var(--s-fail)"/>{% endif %}
+        <rect class="hit" x="{{ b.x }}" y="0" width="{{ b.w }}" height="116"/>
+      </g>
+      {% endfor %}
+      {% for tk in charts.ticks %}
+      <text x="{{ tk.x }}" y="128" text-anchor="middle" font-size="9" fill="var(--viz-ink)">{{ tk.t | ts }}</text>
+      {% endfor %}
+    </svg>
+    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+      Peak {{ '{:,}'.format(charts.request_max) }} in one {{ charts.grain }}. Failures are drawn on
+      top so a bad patch is visible against the volume that produced it.
+    </p>
+  </div>
+</div>
+{% endif %}
+
+<!-- conversations --------------------------------------------------------- -->
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+  Conversations <span class="font-normal normal-case">— grouped by prompt prefix, since the API has no conversation id</span>
+</h2>
+{% if conversations %}
+<div class="mt-2 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 dark:bg-slate-800/60 text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <tr>
+        <th class="px-3 py-2 text-left font-medium">Conversation</th>
+        <th class="px-3 py-2 text-left font-medium">Model</th>
+        <th class="px-3 py-2 text-right font-medium">Turns</th>
+        <th class="px-3 py-2 text-right font-medium">Prompt</th>
+        <th class="px-3 py-2 text-right font-medium">Reused</th>
+        <th class="px-3 py-2 text-right font-medium">Output</th>
+        <th class="px-3 py-2 text-right font-medium">TTFT</th>
+        <th class="px-3 py-2 text-right font-medium">Avg</th>
+        <th class="px-3 py-2 text-right font-medium">Last</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+      {% for c in conversations %}
+      <tr>
+        <td class="px-3 py-2 font-mono text-xs"><a href="/router/conversation/{{ c.conv }}" class="hover:underline">{{ c.conv }}</a>
+          {% if c.failures %}<span class="ml-1 rounded bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 px-1 text-[10px]">{{ c.failures }} failed</span>{% endif %}
+        </td>
+        <td class="px-3 py-2 text-xs">
+          <span class="text-slate-400">{{ c.engine }}</span> {{ c.model }}
+          {# A conversation CAN legitimately span models - the same prompt sent to two engines -
+             so say when the named one is only the most recent rather than the only one. #}
+          {% if (c.models_used or 0) > 1 %}
+          <span class="ml-1 rounded bg-slate-100 dark:bg-slate-800 px-1 text-[10px] text-slate-500 dark:text-slate-400"
+                title="This conversation used {{ c.models_used }} different models; the one named is its most recent.">+{{ c.models_used - 1 }} more</span>
+          {% endif %}
+        </td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ c.turns }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(c.prompt_tokens or 0) }}</td>
+        {# Reused is the number that explains a long conversation staying fast: the engines
+           re-read only what is new. Without it a big prompt total looks alarming. #}
+        <td class="px-3 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">{{ '{:,}'.format(c.cached_tokens or 0) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(c.completion_tokens or 0) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{% if c.avg_ttft %}{{ (c.avg_ttft / 1000) | round(2) }}s{% else %}—{% endif %}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ (c.avg_total / 1000) | round(1) }}s</td>
+        <td class="px-3 py-2 text-right text-xs text-slate-500 dark:text-slate-400">{{ c.last_ts | ts }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing routed yet.</p>
+{% endif %}
+
+<!-- requests -------------------------------------------------------------- -->
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Recent requests</h2>
+<div class="mt-2 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 dark:bg-slate-800/60 text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <tr>
+        <th class="px-3 py-2 text-left font-medium">When</th>
+        <th class="px-3 py-2 text-left font-medium">Asked for</th>
+        <th class="px-3 py-2 text-left font-medium">Served by</th>
+        <th class="px-3 py-2 text-right font-medium">Prompt</th>
+        <th class="px-3 py-2 text-right font-medium">Output</th>
+        <th class="px-3 py-2 text-right font-medium">TTFT</th>
+        <th class="px-3 py-2 text-right font-medium">Total</th>
+        <th class="px-3 py-2 text-left font-medium">Status</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+      {% for r in rows %}
+      <tr class="{% if r.status >= 400 %}bg-rose-50/40 dark:bg-rose-950/10{% endif %}">
+        <td class="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">{{ r.ts | ts }}</td>
+        <td class="px-3 py-2 font-mono text-xs">{{ r.asked or '—' }}{% if r.stream %}<span class="ml-1 text-slate-400">stream</span>{% endif %}</td>
+        <td class="px-3 py-2 text-xs"><span class="text-slate-400">{{ r.backend or '—' }}</span> {{ r.model }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(r.prompt_tokens) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(r.completion_tokens) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{% if r.ttft_ms %}{{ (r.ttft_ms / 1000) | round(2) }}s{% else %}—{% endif %}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ (r.total_ms / 1000) | round(1) }}s</td>
+        <td class="px-3 py-2 text-xs">
+          {% if r.status >= 400 %}
+            {# The reason, not just the number: a refusal here is almost always "that engine is
+               not the one holding the cards", and saying so is the difference between a fixable
+               message and a mystery. #}
+            <span class="text-rose-700 dark:text-rose-400" title="{{ r.error }}">{{ r.status }}</span>
+            <span class="text-slate-500 dark:text-slate-400">{{ r.error[:60] }}</span>
+          {% else %}{{ r.status }}{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

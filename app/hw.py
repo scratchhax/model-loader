@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -771,7 +772,12 @@ def power_history() -> tuple[list[float], list[float]]:
         return [w for _t, w, _c, _l in _power_history], [c for _t, _w, c, _l in _power_history]
 
 
-_HOST_SENSORS_PATH = Path("/data/host_sensors.json")
+# Published by host-sensors.service into the LIVE instance's data directory. A second instance
+# has its own data directory and therefore cannot see it, which showed up as "CPU power not
+# reporting" on an otherwise working box - the reading was fine, the file was simply elsewhere.
+# Overridable so a parallel instance can be pointed at the real publisher read-only, rather than
+# each instance needing its own copy of a host service.
+_HOST_SENSORS_PATH = Path(os.environ.get("HOST_SENSORS_PATH") or "/data/host_sensors.json")
 _HOST_SENSORS_MAX_AGE_S = 15.0     # a stale file is worse than no file
 
 
