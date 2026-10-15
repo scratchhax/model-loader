@@ -443,3 +443,35 @@ async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --------------------------------------------------------------------------- prefix tolerance
+#
+# The same four endpoints without the /v1 prefix.
+#
+# Clients disagree about where the version lives: some want the base URL to END in /v1 and
+# append "/models", others take a bare host and append "/v1/models". Open WebUI does the former,
+# so a base URL of "http://host:8086" produced GET /models -> 404, surfaced as "Server connection
+# failed" during model discovery - a message that says nothing about the cause.
+#
+# A router is a front door. Being strict here buys nothing and costs a confusing failure at the
+# first thing a new client does, so both spellings are served and neither is special.
+
+@app.get("/models")
+async def list_models_noprefix() -> dict:
+    return await list_models()
+
+
+@app.post("/chat/completions")
+async def chat_completions_noprefix(request: Request):
+    return await _forward(request, "/v1/chat/completions", "openai")
+
+
+@app.post("/completions")
+async def completions_noprefix(request: Request):
+    return await _forward(request, "/v1/completions", "openai")
+
+
+@app.post("/messages")
+async def anthropic_messages_noprefix(request: Request):
+    return await _forward(request, "/v1/messages", "anthropic")
