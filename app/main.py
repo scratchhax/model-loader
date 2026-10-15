@@ -2924,6 +2924,25 @@ def gpu_tenant_power(name: str, action: str) -> HTMLResponse:
     return _toast(ok, msg)
 
 
+@app.get("/engines/switch")
+def engines_switch_state() -> dict:
+    """What the running (or last) engine switch is doing. {} when none has run.
+
+    JSON rather than a rendered panel, and a GET so the read-only guard is indifferent to it,
+    because the caller is not a browser: the router process polls this to narrate a swap into a
+    streaming chat response while the client waits.
+
+    It has to be an HTTP read and not an import. `services._switch_state` is a module-level dict
+    and `_switch_lock` a threading.Lock, so each process gets its OWN copy - and this container
+    runs two, `app.main` on 8090 and `app.router_api` on 8086. The router importing
+    activate_engine() directly would mean two schedulers, each holding the only lock it can see,
+    racing over the same two cards: the exact failure the read-only guard was written to stop,
+    reintroduced inside one container. So the UI process owns the switch and this is how anyone
+    else finds out about it.
+    """
+    return services.engine_switch_state()
+
+
 @app.post("/engines/{engine}/activate", response_class=HTMLResponse)
 def engines_activate(engine: str, soft: str = Form(""), share: str = Form("")) -> HTMLResponse:
     """Hand the cards to one engine: release everything else holding a GPU, then start it.

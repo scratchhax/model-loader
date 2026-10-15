@@ -29,12 +29,13 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import db, services
+from . import db, narrate, services
 from .config import settings
 from .utils import docker_client
 
@@ -426,9 +427,13 @@ def _usage_from_sse(line: str, shape: str, acc: dict) -> None:
         acc["cached_tokens"] = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
 
-async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape: str,
-                          conv: str, client_id: str, asked: str, t0: float):
-    """Relay an SSE response chunk for chunk.
+async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str,
+                     conv: str, client_id: str, asked: str, t0: float,
+                     t_ready: float | None = None):
+    """Relay an SSE response chunk for chunk, and record what it cost.
+
+    A generator rather than a response, so something can be streamed AHEAD of it: a request that
+    had to wait for an engine swap narrates the swap first and then relays this, in one response.
 
     TWO THINGS THIS HAS TO GET RIGHT, both invisible while they work:
 
@@ -440,6 +445,12 @@ async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape
        closed, the httpx stream context exits, and the upstream connection drops - which is how
        Strata learns to cancel. Swallowing that would leave a 200K-token prefill burning both
        cards for a minute after somebody pressed stop.
+
+    `t_ready` is when the BACKEND became usable, which is not when the request arrived if the
+    client waited through a swap first. TTFT is measured from it, so the number keeps meaning
+    "how long until this engine said something", while total_ms still runs from t0 so the wait
+    stays visible as the gap between the two. Without the distinction a 90 s cold start reads as
+    a 90 s time-to-first-token and the charts accuse the engine of being broken.
     """
     if shape != "anthropic":
         # Ask for the usage chunk. Without it an OpenAI-shaped stream carries no token counts at
@@ -450,44 +461,187 @@ async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape
 
     acc: dict = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
     state: dict = {"ttft_ms": 0.0, "status": 0, "error": ""}
+    first_from = t0 if t_ready is None else t_ready
 
-    async def gen():
-        pending = b""
+    pending = b""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
+                                                           connect=_CONNECT_TIMEOUT_S)) as c:
+            async with c.stream("POST", f"{backend['url']}{path}", json=out) as r:
+                state["status"] = r.status_code
+                async for chunk in r.aiter_bytes():
+                    if not chunk:
+                        continue
+                    if not state["ttft_ms"]:
+                        state["ttft_ms"] = (time.time() - first_from) * 1000
+                    yield chunk
+                    # Split a copy for inspection only; the bytes above already went out
+                    # untouched, so nothing here can delay or alter what the client sees.
+                    pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        _usage_from_sse(line.decode("utf-8", "replace"), shape, acc)
+    except httpx.HTTPError as e:
+        state["error"] = f"{type(e).__name__}: {e}"
+        state["status"] = state["status"] or 502
+        yield b"data: " + json.dumps(
+            {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
+    finally:
+        # Runs on normal completion AND on client disconnect, so a cancelled request is
+        # recorded rather than vanishing - those are often the ones worth seeing.
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                backend=backend["name"], model=model, shape=shape, stream=1,
+                status=state["status"], error=state["error"],
+                prompt_tokens=acc["prompt_tokens"],
+                completion_tokens=acc["completion_tokens"],
+                cached_tokens=acc["cached_tokens"],
+                ttft_ms=state["ttft_ms"], total_ms=(time.time() - t0) * 1000)
+
+
+async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape: str,
+                          conv: str, client_id: str, asked: str, t0: float,
+                          t_ready: float | None = None):
+    return StreamingResponse(
+        _relay_gen(out, backend, model, path, shape, conv, client_id, asked, t0, t_ready),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --------------------------------------------------------------------------- narrated waiting
+#
+# READING ONLY. Nothing in this section starts a switch. The trigger and its policy are
+# deliberately not here yet, so the worst this code can do is describe something the UI process
+# was already doing on its own. Keeping the POST that moves hardware out of this piece means it
+# can be deployed and watched before anything is allowed to evict an engine.
+
+_UI_BASE = "http://127.0.0.1:8090"
+
+# The UI process allows 420 s for a backend to answer after `docker start`, so waiting longer
+# than that here would only report on a switch that has already given up.
+_NARRATE_MAX_S = 480.0
+
+
+def narrate_channel() -> str:
+    """Which delta field status lines go in. A setting, because the right answer depends on a
+    client behaviour nobody here controls: reasoning_content renders as a collapsible block and
+    SHOULD be left out of the next turn's history, but whether a given client actually leaves it
+    out is its business, not ours. Flip to content if it turns out not to."""
+    want = db.get_setting("router.narrate.channel", narrate.CHANNEL_REASONING)
+    return want if want in (narrate.CHANNEL_REASONING, narrate.CHANNEL_CONTENT) \
+        else narrate.CHANNEL_REASONING
+
+
+async def switch_state() -> dict:
+    """What the UI process says the current switch is doing, or {} if it cannot be asked.
+
+    Over HTTP on purpose - see the endpoint's own docstring. `services._switch_state` in THIS
+    process is a different dict that nothing in this process ever writes to, so importing it
+    would report an eternal calm while containers stopped.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as c:
+            r = await c.get(f"{_UI_BASE}/engines/switch")
+            return r.json() if r.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError):
+        return {}
+
+
+_LIVE_PHASES = ("stopping", "draining", "starting", "loading")
+
+
+def swap_progress(asked: str, deadline: float):
+    """Build the progress callable narrate_wait() drives: is `asked` routable yet?
+
+    Readiness is "resolve() succeeds", not "the switch says done". The switch reports on
+    containers; resolve answers the only question the request actually has, which is whether
+    some backend will serve it. On this box those differ: a Strata that is up and parked answers
+    /health with loaded:false and is not a usable target.
+    """
+    async def progress() -> tuple[str, str]:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
-                                                               connect=_CONNECT_TIMEOUT_S)) as c:
-                async with c.stream("POST", f"{backend['url']}{path}", json=out) as r:
-                    state["status"] = r.status_code
-                    async for chunk in r.aiter_bytes():
-                        if not chunk:
-                            continue
-                        if not state["ttft_ms"]:
-                            state["ttft_ms"] = (time.time() - t0) * 1000
-                        yield chunk
-                        # Split a copy for inspection only; the bytes above already went out
-                        # untouched, so nothing here can delay or alter what the client sees.
-                        pending += chunk
-                        while b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                            _usage_from_sse(line.decode("utf-8", "replace"), shape, acc)
-        except httpx.HTTPError as e:
-            state["error"] = f"{type(e).__name__}: {e}"
-            state["status"] = state["status"] or 502
-            yield b"data: " + json.dumps(
-                {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
-        finally:
-            # Runs on normal completion AND on client disconnect, so a cancelled request is
-            # recorded rather than vanishing - those are often the ones worth seeing.
-            _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
-                    backend=backend["name"], model=model, shape=shape, stream=1,
-                    status=state["status"], error=state["error"],
-                    prompt_tokens=acc["prompt_tokens"],
-                    completion_tokens=acc["completion_tokens"],
-                    cached_tokens=acc["cached_tokens"],
-                    ttft_ms=state["ttft_ms"], total_ms=(time.time() - t0) * 1000)
+            await resolve(asked)
+            return "ready", ""
+        except Unresolved as e:
+            why = str(e)
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        state = await switch_state()
+        phase = str(state.get("phase") or "")
+
+        if phase == "failed":
+            return "failed", narrate.phase_line(state)
+
+        if phase == "done":
+            # The switch finished and the engine STILL does not resolve. Waiting cannot fix
+            # this - it is a configuration answer, not a timing one, and the most common shape
+            # of it is a llama router that started perfectly with no default model chosen. So
+            # say both halves: the switch worked, the routing did not.
+            return "failed", f"{narrate.phase_line(state)} The request still cannot be " \
+                             f"routed: {why}"
+
+        if not (phase in _LIVE_PHASES or phase == "slow"):
+            # Nothing is switching and the engine is not routable, so there is nothing to wait
+            # for. Saying so beats a spinner that never ends.
+            return "failed", f"Nothing is switching and the engine is not available: {why}"
+
+        if time.time() >= deadline:
+            return "failed", f"Gave up after {int(_NARRATE_MAX_S)}s. " \
+                             f"{narrate.phase_line(state) or 'The switch is still running.'}"
+
+        return "waiting", narrate.phase_line(state)
+
+    return progress
+
+
+async def narrated_stream(out: dict, path: str, shape: str, conv: str, client_id: str,
+                          asked: str, t0: float, channel: str | None = None):
+    """One response: the swap narrated, then the real stream relayed into the same body.
+
+    This sends 200 before knowing whether the swap will work, which is the trade narration
+    makes. So the failure path records the TRUTH - 503 and the reason - rather than the 200
+    already on the wire. Recording the wire status would take the Router tab's failure count to
+    zero while things were visibly breaking in the chat.
+    """
+    cid = "chatcmpl-" + uuid.uuid4().hex[:24]
+    created = int(t0)
+    result: dict = {}
+
+    async for blob in narrate.narrate_wait(
+            swap_progress(asked, t0 + _NARRATE_MAX_S), result,
+            cid=cid, model=asked, created=created,
+            channel=channel or narrate_channel()):
+        yield blob
+
+    if result.get("state") != "ready":
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape, stream=1,
+                status=503, error=str(result.get("text") or "")[:500],
+                total_ms=(time.time() - t0) * 1000)
+        return
+
+    # Resolve again rather than trusting the probe: between "it resolved" and "we connect" the
+    # answer can change, and this is the call whose result is actually used.
+    try:
+        backend, model = await resolve(asked)
+    except Unresolved as e:
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape, stream=1,
+                status=503, error=str(e)[:500], total_ms=(time.time() - t0) * 1000)
+        yield narrate.line(cid, created, model=asked, text=f"\n{e}\n",
+                           channel=channel or narrate_channel())
+        yield narrate.closing(cid, created, asked)
+        return
+
+    sent = dict(out)
+    sent["model"] = model
+    async for blob in _relay_gen(sent, backend, model, path, shape, conv, client_id, asked,
+                                 t0, time.time()):
+        yield blob
+
+
+def narrated_response(out: dict, path: str, shape: str, conv: str, client_id: str,
+                      asked: str, t0: float, channel: str | None = None) -> StreamingResponse:
+    return StreamingResponse(
+        narrated_stream(out, path, shape, conv, client_id, asked, t0, channel),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # --------------------------------------------------------------------------- prefix tolerance
