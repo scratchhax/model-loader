@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import AsyncIterator, Awaitable, Callable
 
@@ -46,6 +47,14 @@ POLL_S = 1.0
 # built-in default applies and we do not get to know what it is; not relying on it is cheaper
 # than finding out at second 90 of a cold start.
 KEEPALIVE_AFTER_S = 5.0
+
+# How often a phase that is still running repeats itself with a fresher number. The switch
+# polls every 2 s; echoing that is a wall of text, and saying nothing for two minutes looks
+# stalled. This is the gap between those two failures.
+PROGRESS_EVERY_S = 15.0
+
+# Digits masked out, so "up 42s" and "up 44s" are recognised as the same line.
+_DIGITS = re.compile(r"[0-9]+")
 
 # Which delta field the status goes in.
 #   "reasoning" -> reasoning_content, which renders as a collapsible thinking block. This stack
@@ -144,6 +153,7 @@ async def narrate_wait(
     channel: str = CHANNEL_REASONING,
     poll_s: float = POLL_S,
     keepalive_after_s: float = KEEPALIVE_AFTER_S,
+    progress_every_s: float = PROGRESS_EVERY_S,
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AsyncIterator[bytes]:
@@ -164,7 +174,9 @@ async def narrate_wait(
     """
     created = created if created is not None else int(clock())
     t0 = clock()
-    shown = ""
+    shown_shape = ""
+    any_shown = False
+    last_line = t0
     last_emit = t0
     count = 0
 
@@ -182,9 +194,21 @@ async def narrate_wait(
                 yield closing(cid, created, model)
             return
 
-        if text and text != shown:
-            yield line(cid, created, model, ("\n" if shown else "") + text, channel)
-            shown, last_emit, count = text, clock(), count + 1
+        # Dedup on the line's SHAPE, not its text. The switch builds its message with the
+        # elapsed seconds in it ("Strata up 42s, model not loaded yet"), so the text changes
+        # every single poll and exact-match dedup never fires: a 141 s Strata load produced
+        # seventy near-identical lines in a real chat, which is worse than silence because it
+        # buries the two lines that actually said something. Comparing with the digits masked
+        # means a phase speaks once, and then only often enough to show it is still moving.
+        shape = _DIGITS.sub("#", text) if text else ""
+        new_phase = bool(text) and shape != shown_shape
+        stale = bool(text) and (clock() - last_line) >= progress_every_s
+
+        if new_phase or stale:
+            yield line(cid, created, model, ("\n" if any_shown else "") + text, channel)
+            shown_shape, any_shown = shape, True
+            last_line = last_emit = clock()
+            count += 1
         elif (clock() - last_emit) >= keepalive_after_s:
             yield keepalive()
             last_emit = clock()
