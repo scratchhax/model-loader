@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
+import threading
 import time
 import uuid
 
@@ -246,6 +248,23 @@ def default_for(engine: str) -> str:
     return db.get_setting(f"router.default.{engine}", "")
 
 
+
+
+def last_model_for(engine: str) -> str:
+    """The model this engine last served successfully, or "".
+
+    Read from the router's own request log rather than kept as a setting, because the log is
+    already the record of what happened and a parallel copy would be one more thing that can
+    disagree with it. Only 200s count: a model that failed to load is not what you were using.
+    """
+    try:
+        with db._conn() as c:
+            row = c.execute(
+                "SELECT model FROM router_request WHERE engine = ? AND status = 200 "
+                "AND model <> '' ORDER BY ts DESC LIMIT 1", (engine,)).fetchone()
+        return row["model"] if row else ""
+    except Exception:  # noqa: BLE001 - a log read must never be the reason routing fails
+        return ""
 def pinned_backend(engine: str) -> str:
     """The container an engine's traffic must go to, or "" for automatic.
 
@@ -302,16 +321,23 @@ async def resolve(asked: str) -> tuple[dict, str]:
         # loaded IS the answer. llama's router picks by name, so a default has to be chosen.
         if b["engine"] == "strata":
             return b, (b["models"][0] if b["models"] else asked)
-        want = default_for("llama")
+        want, src = default_for("llama"), "default"
+        if not want:
+            # Fall back to whatever llama last actually served. "Pick the engine and get the
+            # model I was using" is the behaviour a model dropdown implies, and requiring a
+            # default to be configured first turned the first use of the alias into an error
+            # message instead of an answer.
+            want, src = last_model_for("llama"), "last-used"
         if want and want in b["models"]:
             return b, want            # honour the pin: ask THIS backend for the default
         if want and want in by_model:
             return by_model[want], want
         if want:
-            raise Unresolved(f"the default llama model {want!r} is not offered by {b['name']}")
+            raise Unresolved(f"the {src} llama model {want!r} is not offered by {b['name']}")
         if len(b["models"]) == 1:
             return b, b["models"][0]
-        raise Unresolved("no default model is set for llama — choose one in the Router tab")
+        raise Unresolved("no default model is set for llama and it has not served anything yet "
+                         "— choose a default in the Router tab")
 
     if asked in by_model:
         return by_model[asked], asked
@@ -391,15 +417,31 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
     try:
         backend, model = await resolve(want)
     except Unresolved as e:
-        if streaming and shape == "openai" and await swap_in_flight_for(want):
-            # A switch the USER started is already running, and it is bringing up the very
-            # engine this request asked for. The honest answer is "wait, and here is what it is
-            # doing", not a 503 that blames the request for arriving during a swap it did not
-            # cause. Nothing on this path STARTS a switch - see swap_in_flight_for.
+        # Only a streamed OpenAI-shaped request can be told to wait, because that is the only
+        # shape with somewhere to put the explanation. Everything else keeps the 503, which now
+        # at least says why no switch happened.
+        narratable = streaming and shape == "openai"
+        detail = str(e)
+
+        if narratable and await swap_in_flight_for(want):
+            # A switch is ALREADY running toward this engine, whoever started it. Describe it.
             return narrated_response(body, path, shape, conv, client_id, want, t0)
+
+        if narratable:
+            ok, why = await may_autoswitch(want)
+            if ok:
+                started, msg = await request_switch(want)
+                if started:
+                    # The switch is running. narrated_response describes it from here and
+                    # relays the answer into the same response when the engine is up.
+                    return narrated_response(body, path, shape, conv, client_id, want, t0)
+                detail = f"{detail} Tried to switch automatically but {msg}"
+            else:
+                detail = f"{detail} Not switching automatically: {why}"
+
         _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape,
-                status=503, error=str(e), total_ms=(time.time() - t0) * 1000)
-        return JSONResponse(status_code=503, content={"error": {"message": str(e)}})
+                status=503, error=detail, total_ms=(time.time() - t0) * 1000)
+        return JSONResponse(status_code=503, content={"error": {"message": detail}})
 
     out = dict(body)
     out["model"] = model          # llama picks by name; Strata ignores it
@@ -407,26 +449,34 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
     if streaming:
         return await _forward_stream(out, backend, model, path, shape, conv, client_id, asked, t0)
 
+    token = _inflight_add(backend["engine"])
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
-                                                           connect=_CONNECT_TIMEOUT_S)) as c:
-            r = await c.post(f"{backend['url']}{path}", json=out)
-        payload = r.json() if r.content else {}
-    except httpx.HTTPError as e:
-        _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
-                backend=backend["name"], model=model, shape=shape, status=502,
-                error=f"{type(e).__name__}: {e}", total_ms=(time.time() - t0) * 1000)
-        return JSONResponse(status_code=502, content={"error": {"message": f"{backend['name']}: {e}"}})
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
+                                                               connect=_CONNECT_TIMEOUT_S)) as c:
+                r = await c.post(f"{backend['url']}{path}", json=out)
+            payload = r.json() if r.content else {}
+        except httpx.HTTPError as e:
+            _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                    backend=backend["name"], model=model, shape=shape, status=502,
+                    error=f"{type(e).__name__}: {e}", total_ms=(time.time() - t0) * 1000)
+            return JSONResponse(status_code=502,
+                                content={"error": {"message": f"{backend['name']}: {e}"}})
 
-    usage = (payload.get("usage") or {}) if isinstance(payload, dict) else {}
-    details = usage.get("prompt_tokens_details") or {}
-    _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
-            backend=backend["name"], model=model, shape=shape, status=r.status_code,
-            prompt_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
-            completion_tokens=int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
-            cached_tokens=int(details.get("cached_tokens") or 0),
-            total_ms=(time.time() - t0) * 1000)
-    return JSONResponse(status_code=r.status_code, content=payload)
+        usage = (payload.get("usage") or {}) if isinstance(payload, dict) else {}
+        details = usage.get("prompt_tokens_details") or {}
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                backend=backend["name"], model=model, shape=shape, status=r.status_code,
+                prompt_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens")
+                                      or usage.get("output_tokens") or 0),
+                cached_tokens=int(details.get("cached_tokens") or 0),
+                total_ms=(time.time() - t0) * 1000)
+        return JSONResponse(status_code=r.status_code, content=payload)
+    finally:
+        # Every exit, or a failed non-streamed request leaves a phantom in flight that vetoes
+        # every future automatic switch.
+        _inflight_drop(token)
 
 
 @app.post("/v1/chat/completions")
@@ -515,6 +565,7 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
     first_from = t0 if t_ready is None else t_ready
 
     pending = b""
+    token = _inflight_add(backend["engine"])
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
                                                            connect=_CONNECT_TIMEOUT_S)) as c:
@@ -538,6 +589,7 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
         yield b"data: " + json.dumps(
             {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
     finally:
+        _inflight_drop(token)
         # Runs on normal completion AND on client disconnect, so a cancelled request is
         # recorded rather than vanishing - those are often the ones worth seeing.
         _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
@@ -623,6 +675,134 @@ async def swap_in_flight_for(asked: str) -> bool:
     return (str(state.get("phase") or "") in _LIVE_PHASES
             and str(state.get("engine") or "") == asked)
 
+
+
+# --------------------------------------------------------------------------- auto-switch policy
+#
+# The goal this serves, stated plainly: pick an engine in a client's model dropdown, and that
+# engine comes up with its configured default (or the model it last served) and answers. Pick
+# the other one, and it hands the cards over and does the same.
+#
+# Which means this section is the part that MOVES HARDWARE, on a box where the two engines
+# cannot share it. So it is gated four ways, and every refusal carries a sentence saying which
+# gate stopped it - a silent "no" here looks exactly like a hang.
+
+_DWELL_DEFAULT_S = 60.0
+
+# A streamed request that is abandoned without its generator closing would otherwise sit in the
+# in-flight table forever and veto every future switch. Nothing legitimate runs this long, so
+# anything older is swept: a leak degrades to a wrong answer for half an hour, not permanently.
+_INFLIGHT_MAX_AGE_S = 1800.0
+
+_INFLIGHT: dict[int, tuple[str, float]] = {}
+_INFLIGHT_SEQ = itertools.count(1)
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _inflight_add(engine: str) -> int:
+    token = next(_INFLIGHT_SEQ)
+    with _INFLIGHT_LOCK:
+        _INFLIGHT[token] = (engine, time.time())
+    return token
+
+
+def _inflight_drop(token: int) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.pop(token, None)
+
+
+def inflight_for(engine: str) -> int:
+    """How many requests this process is currently serving on `engine`.
+
+    Accurate because only the router process serves inference; the UI process never forwards.
+    Sweeps stale entries on the way through rather than on a timer, so there is no thread to
+    get wedged.
+    """
+    cutoff = time.time() - _INFLIGHT_MAX_AGE_S
+    with _INFLIGHT_LOCK:
+        for tok in [t for t, (_, started) in _INFLIGHT.items() if started < cutoff]:
+            _INFLIGHT.pop(tok, None)
+        return sum(1 for eng, _ in _INFLIGHT.values() if eng == engine)
+
+
+def autoswitch_enabled(engine: str) -> bool:
+    return db.get_setting(f"router.autoswitch.{engine}", "") == "1"
+
+
+def dwell_s() -> float:
+    try:
+        return max(0.0, float(db.get_setting("router.autoswitch.dwell", "")
+                              or _DWELL_DEFAULT_S))
+    except ValueError:
+        return _DWELL_DEFAULT_S
+
+
+def _last_switch_at() -> float:
+    try:
+        return float(db.get_setting("router.autoswitch.last_at", "") or 0.0)
+    except ValueError:
+        return 0.0
+
+
+async def may_autoswitch(target: str) -> tuple[bool, str]:
+    """Is this request allowed to hand the cards to `target`? (ok, reason it was refused).
+
+    Checked cheapest first, and the order matters: the two that read over HTTP or scan state go
+    last so an everyday "it is switched off" costs one settings read.
+
+    There is deliberately NO idle grace here. An earlier draft refused to switch if the current
+    engine had served anything in the last few minutes, which is the right rule for protecting
+    somebody else's session and the wrong rule for the person who just changed their own
+    dropdown twenty seconds after reading an answer - it refused the exact thing the feature
+    exists to do. In-flight is the honest test: nothing is being taken from anyone if nothing
+    is being served. The grace belongs back here the day a second person's work gets yanked,
+    and `conversation_key` is how it would tell "mine" from "theirs".
+    """
+    if target not in ENGINES:
+        return False, f"{target!r} is not an engine name"
+    if not autoswitch_enabled(target):
+        return False, (f"automatic switching to {target} is off. Turn it on in the Router tab, "
+                       f"or switch engines in Model Loader.")
+
+    since = time.time() - _last_switch_at()
+    dwell = dwell_s()
+    if since < dwell:
+        # Without this, two clients that disagree about which engine they want flap the box,
+        # each swap killing the model the previous one just loaded.
+        return False, (f"a switch finished {int(since)}s ago and the engines settle for "
+                       f"{int(dwell)}s. Try again shortly.")
+
+    state = await switch_state()
+    if str(state.get("phase") or "") in _LIVE_PHASES:
+        return False, f"a switch to {state.get('engine') or 'another engine'} is already running"
+
+    busy = [(e, inflight_for(e)) for e in ENGINES if e != target and inflight_for(e)]
+    if busy:
+        who = ", ".join(f"{e} ({n} in flight)" for e, n in busy)
+        return False, (f"not taking the cards from {who} mid-request. "
+                       f"Try again when it is idle.")
+    return True, ""
+
+
+async def request_switch(engine: str) -> tuple[bool, str]:
+    """Ask the UI process to hand the cards to `engine`. Soft, so the way back is cheap.
+
+    A POST to the same endpoint the engine control uses, for the reason given on that endpoint:
+    `_switch_lock` and `_switch_state` are per-process and this container runs two, so the UI
+    process owns the switch and everyone else asks. Soft parks a displaced Strata instead of
+    stopping it, which returns the same VRAM in ~0.3 s and keeps the page cache warm, so
+    switching back costs seconds rather than a 90 s cold start - the difference between a
+    dropdown you can change twice and one you change once.
+    """
+    db.set_setting("router.autoswitch.last_at", str(time.time()))
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as c:
+            r = await c.post(f"{_UI_BASE}/engines/{engine}/activate", data={"soft": "1"})
+        if r.status_code != 200:
+            return False, f"the engine control refused: HTTP {r.status_code}"
+        return True, ""
+    except httpx.HTTPError as e:
+        return False, f"could not reach the engine control: {type(e).__name__}: {e}"
 
 def swap_progress(asked: str, deadline: float):
     """Build the progress callable narrate_wait() drives: is `asked` routable yet?

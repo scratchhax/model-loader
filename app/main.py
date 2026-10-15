@@ -3719,6 +3719,8 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
         "per_engine": per_engine,
         "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
         "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
+        "autoswitch": {e: router_api.autoswitch_enabled(e) for e in router_api.ENGINES},
+        "autoswitch_dwell": int(router_api.dwell_s()),
         # Stopped ones included ON PURPOSE: the backend worth pinning is usually the one that
         # is not running, because the engines take turns.
         "backends_by_engine": {
@@ -3794,3 +3796,22 @@ def router_set_recording(on: str = Form("1")) -> HTMLResponse:
     db.set_setting("router.record", "1" if on == "1" else "0")
     return HTMLResponse(_QUEUED_CHIP.format(
         label="Saved", title="recording on" if on == "1" else "recording off — routing continues"))
+
+
+@app.post("/router/autoswitch", response_class=HTMLResponse)
+def router_set_autoswitch(engine: str = Form(...), on: str = Form("")) -> HTMLResponse:
+    """Let a request for `engine` hand it the cards, instead of being refused.
+
+    Per engine and off by default, because this is the one control here that moves hardware on
+    its own: turning it on means a client picking a name in a model dropdown can stop the engine
+    somebody else is using. The guards live in router_api.may_autoswitch() - it refuses while
+    anything is in flight on the other engine, and for a settle period after the last switch -
+    but the decision to allow it at all is this switch, and it is yours.
+    """
+    if engine not in router_api.ENGINES:
+        return _toast(False, f"unknown engine {engine}")
+    db.set_setting(f"router.autoswitch.{engine}", "1" if on == "1" else "")
+    return HTMLResponse(_QUEUED_CHIP.format(
+        label="Saved",
+        title=(f"requests for {engine} may switch the engines"
+               if on == "1" else f"requests for {engine} will be refused instead of switching")))
