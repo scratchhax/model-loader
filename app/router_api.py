@@ -594,11 +594,17 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
                         stripped = text.strip()
                         if stripped == "data: [DONE]" or stripped == "event: message_stop":
                             saw_end = True
-    except GeneratorExit:
-        # The CLIENT went away: this generator was closed from the outside. Not the engine's
-        # fault, and it must not be blamed for one - so it is recorded as whatever it was up to
-        # that point, exactly as before. Re-raised because swallowing it would leave the
-        # upstream connection open and the engine generating into nothing.
+    except (GeneratorExit, asyncio.CancelledError):
+        # The CLIENT went away. Two different exceptions mean the same thing here: GeneratorExit
+        # if this generator was closed directly, asyncio.CancelledError if the ASGI server
+        # cancelled the task, which is what actually happens on a disconnect. CancelledError is
+        # a BaseException, so an earlier version catching only GeneratorExit never saw it and
+        # blamed the engine instead: a client that died of its own bug was recorded as
+        # "llama-9700x2 ended the stream before finishing" while the model completed normally.
+        #
+        # So this is recorded as whatever it had reached, not as a failure. Re-raised because
+        # swallowing it would leave the upstream connection open and the engine generating into
+        # nothing.
         client_gone = True
         raise
     except httpx.HTTPError as e:
