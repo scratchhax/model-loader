@@ -73,10 +73,14 @@ async def _readonly_guard(request: Request, call_next):
 @app.on_event("startup")
 def _startup() -> None:
     db.init()
-    # Both processes in this container create it; CREATE TABLE IF NOT EXISTS makes that safe,
-    # and it means the tab works even if the UI happens to start before the router has served
-    # anything.
+    # BOTH router tables, here as well as in the router process. CREATE TABLE IF NOT EXISTS
+    # makes the overlap safe, and it is not redundant: the deployed container runs a single
+    # uvicorn (app.main), so this is the only startup that runs there. The Router tab reads the
+    # rollup through totals(), series() and retention_state(), and creating only the request
+    # table left all three raising "no such table: router_rollup" on a fresh database - it
+    # worked in the two-process dev container and nowhere else.
     router_api._init_db()
+    router_api._init_rollup()
     db.seed_bench_prompts()
     hw.start_sampler()
     threading.Thread(target=_reconcile_strata_config, daemon=True, name="strata-config").start()
