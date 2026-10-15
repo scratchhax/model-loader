@@ -887,6 +887,19 @@ async def narrated_stream(out: dict, path: str, shape: str, conv: str, client_id
 
     sent = dict(out)
     sent["model"] = model
+
+    # Close the status off before the model speaks. Both the narration and most of these models'
+    # own thinking land in the SAME delta field, so without an explicit terminator the two run
+    # together into one sentence - observed verbatim in a real chat as
+    # "...port not answering yet.The user just switched models", router status and private
+    # reasoning indistinguishable. A closing line plus a blank one gives the handoff a visible
+    # seam and says which backend actually took the request, which is the one fact the narration
+    # could not state until now.
+    if result.get("lines"):
+        yield narrate.line(cid, created, asked,
+                           f"\nReady, routing to {backend['name']} ({model}).\n\n",
+                           channel or narrate_channel())
+
     async for blob in _relay_gen(sent, backend, model, path, shape, conv, client_id, asked,
                                  t0, time.time()):
         yield blob
