@@ -91,6 +91,11 @@ def _record(**row) -> None:
             "ttft_ms", "total_ms")
     vals = [row.get(k, 0 if k.endswith(("_tokens", "_ms", "status", "stream")) else "") for k in cols]
     try:
+        # The kill switch. Off, the router still routes and only the bookkeeping stops, so a
+        # misbehaving write can be taken out of the path in one click instead of a config edit
+        # and a restart while people are using it.
+        if db.get_setting("router.record", "1") == "0":
+            return
         with db._LOCK, db._conn() as c:
             c.execute(f"INSERT INTO router_request({','.join(cols)}) "
                       f"VALUES({','.join('?' * len(cols))})", vals)

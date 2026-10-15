@@ -18,6 +18,7 @@ from . import telemetry
 from . import bench, db, gguf_meta, gpu_procs, hf, hw, ini, services, vram_live
 from . import strata as strata_engine
 from . import strata_models
+from . import router_api
 from .config import settings
 from .downloader import manager
 from .utils import human_bytes, shard_key
@@ -72,6 +73,10 @@ async def _readonly_guard(request: Request, call_next):
 @app.on_event("startup")
 def _startup() -> None:
     db.init()
+    # Both processes in this container create it; CREATE TABLE IF NOT EXISTS makes that safe,
+    # and it means the tab works even if the UI happens to start before the router has served
+    # anything.
+    router_api._init_db()
     db.seed_bench_prompts()
     hw.start_sampler()
     threading.Thread(target=_reconcile_strata_config, daemon=True, name="strata-config").start()
@@ -3500,3 +3505,88 @@ def strata_select(family: str = Form(...), model: str = Form(...),
     if not ok:
         return _blocked_chip(msg)
     return HTMLResponse(_QUEUED_CHIP.format(label="Saved", title=msg + " — restart Strata to apply"))
+
+
+# ===================================================================== Router
+#
+# These routes are exempt from the read-only guard (see _READONLY_ALLOW): they write only to this
+# instance's own database and drive nothing on the host - no container, no models.ini, no engine.
+
+
+def _router_rows(limit: int = 25) -> list[dict]:
+    with db._conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT ts, conv, client, asked, engine, backend, model, shape, stream, status, "
+            "error, prompt_tokens, completion_tokens, cached_tokens, ttft_ms, total_ms "
+            "FROM router_request ORDER BY ts DESC LIMIT ?", (limit,))]
+
+
+def _router_conversations(limit: int = 15) -> list[dict]:
+    """One row per conversation, newest first.
+
+    A conversation is the unit a person thinks in - "that chat got slow", "that one burned a lot
+    of context" - and it is the thing the OpenAI protocol refuses to give you. Grouping on the
+    prefix hash is what makes these questions answerable at all.
+    """
+    with db._conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT conv, COUNT(*) AS turns, MAX(ts) AS last_ts, "
+            "       SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "
+            "       SUM(cached_tokens) AS cached_tokens, "
+            "       AVG(NULLIF(ttft_ms,0)) AS avg_ttft, AVG(total_ms) AS avg_total, "
+            "       SUM(status >= 400) AS failures, "
+            "       MAX(engine) AS engine, MAX(model) AS model, MAX(client) AS client "
+            "FROM router_request WHERE conv <> '' "
+            "GROUP BY conv ORDER BY last_ts DESC LIMIT ?", (limit,))]
+
+
+@app.get("/router", response_class=HTMLResponse)
+async def router_page(request: Request) -> HTMLResponse:
+    bs, by_model = await router_api._live_map()
+    per_engine: dict[str, list[str]] = {}
+    for b in bs:
+        per_engine.setdefault(b["engine"], [])
+        for m in b["models"]:
+            if m not in per_engine[b["engine"]]:
+                per_engine[b["engine"]].append(m)
+    return templates.TemplateResponse("router.html", {
+        "request": request,
+        "engines": router_api.ENGINES,
+        "per_engine": per_engine,
+        "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
+        "live_engines": sorted({b["engine"] for b in bs}),
+        "backends": bs,
+        "recording": db.get_setting("router.record", "1") != "0",
+        "conversations": _router_conversations(),
+        "rows": _router_rows(),
+        "port": settings.router_port,
+    })
+
+
+@app.post("/router/default", response_class=HTMLResponse)
+def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLResponse:
+    if engine not in router_api.ENGINES:
+        return _blocked_chip(f"unknown engine {engine!r}")
+    db.set_setting(f"router.default.{engine}", model.strip())
+    if engine == "strata" and model.strip():
+        # Strata cannot load on demand: its model is whatever the container started with, so a
+        # default here is a statement about the NEXT start, not something that can take effect
+        # now. Saying so beats silently bouncing an engine somebody is using.
+        return HTMLResponse(_QUEUED_CHIP.format(
+            label="Saved", title=f"{model} is the Strata default — Strata serves whatever it "
+                                 f"started with, so this applies when it next starts"))
+    return HTMLResponse(_QUEUED_CHIP.format(
+        label="Saved", title=f"{engine} now defaults to {model or '(none)'}"))
+
+
+@app.post("/router/recording", response_class=HTMLResponse)
+def router_set_recording(on: str = Form("1")) -> HTMLResponse:
+    """The kill switch. Off, the router still routes but writes nothing.
+
+    It exists so that if accounting ever misbehaves - a lock, a slow write, a bad migration -
+    turning it off is one click rather than editing config and restarting under pressure, while
+    inference keeps working.
+    """
+    db.set_setting("router.record", "1" if on == "1" else "0")
+    return HTMLResponse(_QUEUED_CHIP.format(
+        label="Saved", title="recording on" if on == "1" else "recording off — routing continues"))
