@@ -140,6 +140,116 @@
   is deleted.
 </p>
 
+<!-- charts ---------------------------------------------------------------- -->
+{% if not charts.empty %}
+{#
+  Two charts, not one with two y-axes. Tokens run to six figures and requests to two, so a
+  shared axis would flatten one of them into the floor - the dual-axis chart being the single
+  most common way a dashboard lies.
+
+  Colours are the validated categorical slots 1-3 (blue/orange/aqua), checked with the palette
+  validator in BOTH modes before use: worst adjacent CVD deltaE 9.2 light / 9.4 dark against an 8
+  target. Light-mode aqua sits under 3:1 on the light surface, so the relief rule applies - the
+  legend labels every series and the tables below are the table view.
+
+  Scoped to this app's own theming (`.dark` on <html>, Tailwind's class strategy) rather than a
+  media query, so the chart follows the toggle in the header like everything else.
+#}
+<style>
+  .viz {
+    --s-read:   #2a78d6;   /* slot 1 - prompt tokens actually processed */
+    --s-output: #eb6834;   /* slot 2 - tokens generated */
+    --s-reused: #1baf7a;   /* slot 3 - prompt tokens served from cache */
+    --s-fail:   #d03b3b;   /* status: critical - never a series colour */
+    --viz-grid: rgb(100 116 139 / .22);
+    --viz-ink:  rgb(100 116 139);
+  }
+  .dark .viz {
+    --s-read:   #3987e5;
+    --s-output: #d95926;
+    --s-reused: #199e70;
+    --s-fail:   #d03b3b;
+    --viz-grid: rgb(148 163 184 / .20);
+    --viz-ink:  rgb(148 163 184);
+  }
+  .viz rect.bar { transition: opacity .12s ease; }
+  .viz g.col:hover rect.bar { opacity: .72; }
+  .viz g.col rect.hit { fill: transparent; }
+</style>
+
+<div class="viz mt-4 grid gap-3 lg:grid-cols-2">
+
+  <!-- tokens -->
+  <div class="rounded-md border border-slate-200 dark:border-slate-700 p-3">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h3 class="text-sm font-medium">Tokens per {{ charts.grain }}</h3>
+      <div class="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+        {# A legend for every series, always: identity is never carried by colour alone. #}
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-reused)"></span>reused</span>
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-read)"></span>read</span>
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-output)"></span>output</span>
+      </div>
+    </div>
+    <svg viewBox="0 0 {{ charts.w }} {{ charts.h }}" class="mt-2 w-full" style="height:132px" role="img"
+         aria-label="Stacked tokens per {{ charts.grain }}: reused, read and output">
+      {# Recessive baseline only - a full grid competes with marks this small. #}
+      <line x1="0" y1="116" x2="{{ charts.w }}" y2="116" stroke="var(--viz-grid)" stroke-width="1"/>
+      {% for b in charts.tokens %}
+      <g class="col">
+        <title>{{ b.t | ts }} — {{ '{:,}'.format(b.total) }} tokens: {{ '{:,}'.format(b.reused) }} reused, {{ '{:,}'.format(b.read) }} read, {{ '{:,}'.format(b.output) }} output</title>
+        {% for s in b.segs %}
+        <rect class="bar" x="{{ s.x }}" y="{{ s.y }}" width="{{ s.w }}" height="{{ s.h }}" rx="2"
+              fill="{% if s.key == 'read' %}var(--s-read){% elif s.key == 'output' %}var(--s-output){% else %}var(--s-reused){% endif %}"/>
+        {% endfor %}
+        {# A hit target the full height of the plot, so hovering a one-pixel bar still works. #}
+        <rect class="hit" x="{{ b.x }}" y="0" width="{{ b.w }}" height="116"/>
+      </g>
+      {% endfor %}
+      {% for tk in charts.ticks %}
+      <text x="{{ tk.x }}" y="128" text-anchor="middle" font-size="9" fill="var(--viz-ink)">{{ tk.t | ts }}</text>
+      {% endfor %}
+    </svg>
+    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+      {# The distinction the chart exists to make. #}
+      <strong>read</strong> is prompt tokens the engine had to process; <strong>reused</strong> came
+      from cache and cost almost nothing. A long conversation staying cheap shows up as a growing
+      green band, not growing work.
+    </p>
+  </div>
+
+  <!-- requests -->
+  <div class="rounded-md border border-slate-200 dark:border-slate-700 p-3">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <h3 class="text-sm font-medium">Requests per {{ charts.grain }}</h3>
+      <div class="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-read)"></span>ok</span>
+        {# Status colour, so it ships with a label and never means something by hue alone. #}
+        <span class="inline-flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-sm" style="background:var(--s-fail)"></span>failed</span>
+      </div>
+    </div>
+    <svg viewBox="0 0 {{ charts.w }} {{ charts.h }}" class="mt-2 w-full" style="height:132px" role="img"
+         aria-label="Requests per {{ charts.grain }}, failures shown separately">
+      <line x1="0" y1="116" x2="{{ charts.w }}" y2="116" stroke="var(--viz-grid)" stroke-width="1"/>
+      {% for b in charts.requests %}
+      <g class="col">
+        <title>{{ b.t | ts }} — {{ b.requests }} request{{ 's' if b.requests != 1 }}{% if b.failures %}, {{ b.failures }} failed{% endif %}</title>
+        {% if b.ok_h %}<rect class="bar" x="{{ b.x }}" y="{{ b.ok_y }}" width="{{ b.w }}" height="{{ b.ok_h }}" rx="2" fill="var(--s-read)"/>{% endif %}
+        {% if b.bad_h %}<rect class="bar" x="{{ b.x }}" y="{{ b.bad_y }}" width="{{ b.w }}" height="{{ b.bad_h }}" rx="2" fill="var(--s-fail)"/>{% endif %}
+        <rect class="hit" x="{{ b.x }}" y="0" width="{{ b.w }}" height="116"/>
+      </g>
+      {% endfor %}
+      {% for tk in charts.ticks %}
+      <text x="{{ tk.x }}" y="128" text-anchor="middle" font-size="9" fill="var(--viz-ink)">{{ tk.t | ts }}</text>
+      {% endfor %}
+    </svg>
+    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+      Peak {{ '{:,}'.format(charts.request_max) }} in one {{ charts.grain }}. Failures are drawn on
+      top so a bad patch is visible against the volume that produced it.
+    </p>
+  </div>
+</div>
+{% endif %}
+
 <!-- conversations --------------------------------------------------------- -->
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
   Conversations <span class="font-normal normal-case">— grouped by prompt prefix, since the API has no conversation id</span>

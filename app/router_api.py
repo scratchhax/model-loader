@@ -700,3 +700,59 @@ def retention_state() -> dict:
             "oldest": min([t for t in [raw_oldest] + [v[1] for v in roll.values()] if t] or [0]),
             "raw_days": RETAIN_RAW_DAYS, "hourly_days": RETAIN_HOURLY_DAYS,
             "total_days": RETAIN_TOTAL_DAYS}
+
+
+def series(since: float, now: float | None = None) -> dict:
+    """Bucketed activity between `since` and now, reading raw rows AND rollups.
+
+    The bucket is chosen from the window rather than fixed, because the same chart has to answer
+    "what happened this afternoon" and "what did this year look like": hours for a week or less,
+    days beyond. A fixed bucket makes one of those unreadable.
+
+    Returns {"grain", "points": [{t, requests, failures, read, reused, output}]}. `read` is
+    prompt tokens MINUS the reused ones - the part the engine actually had to process. Charting
+    raw prompt totals would show a long conversation as ever-growing work when the opposite is
+    true: almost all of it is cache hits, which is the single most important thing these engines
+    do and the reason a 200K-token chat stays fast.
+    """
+    now = now or time.time()
+    span = now - (since or 0.0)
+    step = 3600.0 if (since and span <= 8 * _DAY) else _DAY
+    grain = "hour" if step == 3600.0 else "day"
+    buckets: dict[float, dict] = {}
+
+    def slot(ts: float) -> dict:
+        b = (int(ts // step)) * step
+        return buckets.setdefault(b, {"t": b, "requests": 0, "failures": 0,
+                                      "read": 0, "reused": 0, "output": 0})
+
+    with db._conn() as c:
+        for r in c.execute(
+                "SELECT ts, status, prompt_tokens, cached_tokens, completion_tokens "
+                "FROM router_request WHERE ts >= ?", (since,)):
+            d = slot(r[0])
+            d["requests"] += 1
+            d["failures"] += 1 if (r[1] or 0) >= 400 else 0
+            d["reused"] += r[3] or 0
+            d["read"] += max(0, (r[2] or 0) - (r[3] or 0))
+            d["output"] += r[4] or 0
+        for r in c.execute(
+                "SELECT bucket, requests, failures, prompt_tokens, cached_tokens, "
+                "       completion_tokens FROM router_rollup WHERE bucket >= ?", (since,)):
+            d = slot(r[0])
+            d["requests"] += r[1] or 0
+            d["failures"] += r[2] or 0
+            d["reused"] += r[4] or 0
+            d["read"] += max(0, (r[3] or 0) - (r[4] or 0))
+            d["output"] += r[5] or 0
+
+    if not buckets:
+        return {"grain": grain, "points": []}
+    # Fill the gaps. Without this a quiet night is drawn as a continuous bar next to a busy one
+    # and the time axis silently lies about duration.
+    lo, hi = min(buckets), max(buckets)
+    t = lo
+    while t <= hi:
+        slot(t)
+        t += step
+    return {"grain": grain, "points": [buckets[k] for k in sorted(buckets)]}
