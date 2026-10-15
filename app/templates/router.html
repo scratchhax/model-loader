@@ -50,12 +50,15 @@
        SERVER handles this engine, and WHICH MODEL it should load. Automatic ranking is a guess
        from container names; this is where you say what you meant. #}
     {% if backends_by_engine.get(e) | length > 1 or pins.get(e) %}
+    {# Stopped backends are listed too - see the note in _backends(). Pinning to one is allowed
+       and takes effect when it next runs; a request meanwhile is refused by name rather than
+       sent somewhere else. #}
     <form hx-post="/router/backend" hx-swap="outerHTML" class="flex items-center gap-1">
       <input type="hidden" name="engine" value="{{ e }}">
       <select name="backend" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
         <option value="">auto</option>
-        {% for n in backends_by_engine.get(e, []) %}
-        <option value="{{ n }}" {% if pins.get(e) == n %}selected{% endif %}>{{ n }}</option>
+        {% for n, running in backends_by_engine.get(e, []) %}
+        <option value="{{ n }}" {% if pins.get(e) == n %}selected{% endif %}>{{ n }}{% if not running %} (stopped){% endif %}</option>
         {% endfor %}
       </select>
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Pin</button>

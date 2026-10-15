@@ -131,19 +131,26 @@ def conversation_key(body: dict) -> str:
 
 # --------------------------------------------------------------------------- discovery
 
-def _backends() -> list[dict]:
-    """Running inference containers, as {name, engine, url, models}.
+def _backends(include_stopped: bool = False) -> list[dict]:
+    """Inference containers, as {name, engine, url, models, running}.
 
     Discovered the same way the UI discovers them - the `ai-lab.engine` label, falling back to
     the llama.cpp image name - so the router and the app can never disagree about what exists.
+
+    `include_stopped` exists for the pin UI and nothing else. The engines here are exclusive, so
+    the backend you most want to pin is usually the one that is NOT running: pinning llama to
+    the GPU router matters precisely while Strata holds the cards, and offering only running
+    containers hid that choice exactly when it was worth making. Routing still considers running
+    backends only - a pin to something stopped is refused, loudly, at request time.
     """
     cli = docker_client()
     if cli is None:
         return []
     out: list[dict] = []
     try:
-        for c in cli.containers.list():
-            if c.status != "running":
+        for c in cli.containers.list(all=include_stopped):
+            running = c.status == "running"
+            if not running and not include_stopped:
                 continue
             labels = (c.attrs.get("Config") or {}).get("Labels") or {}
             engine = labels.get("ai-lab.engine") or ""
@@ -153,10 +160,10 @@ def _backends() -> list[dict]:
                     continue
                 engine = "llama"
             _, port = services._extract_ports(c.attrs)
-            if port is None:
-                continue
-            out.append({"name": c.name, "engine": engine,
-                        "url": f"http://{c.name}:{port}", "models": []})
+            if port is None and running:
+                continue              # a running backend with no reachable port is unusable
+            out.append({"name": c.name, "engine": engine, "running": running,
+                        "url": f"http://{c.name}:{port}" if port else "", "models": []})
     except Exception:  # noqa: BLE001 - a docker hiccup is "nothing found", never a 500
         return []
     return out

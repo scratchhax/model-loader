@@ -3594,8 +3594,13 @@ async def router_page(request: Request) -> HTMLResponse:
         "per_engine": per_engine,
         "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
         "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
-        "backends_by_engine": {e: [b["name"] for b in bs if b["engine"] == e]
-                               for e in router_api.ENGINES},
+        # Stopped ones included ON PURPOSE: the backend worth pinning is usually the one that
+        # is not running, because the engines take turns.
+        "backends_by_engine": {
+            e: [(b["name"], b.get("running", True))
+                for b in sorted(router_api._backends(include_stopped=True), key=router_api._rank)
+                if b["engine"] == e]
+            for e in router_api.ENGINES},
         "live_engines": sorted({b["engine"] for b in bs}),
         "backends": bs,
         "recording": db.get_setting("router.record", "1") != "0",
