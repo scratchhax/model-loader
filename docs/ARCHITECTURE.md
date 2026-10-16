@@ -111,4 +111,4 @@ Once you do press Fill, though, it is **destructive within its declared domain**
 - **No metrics export.** Prometheus/Grafana are out of scope. The dashboard is the "monitoring UI."
 - **No user prefs beyond a global HF token.** Single-user tool.
 - **No frontend build.** Tailwind from CDN. No PostCSS, no Vite, no npm at all.
-- **No tests.** Correctness is enforced by shipping to production of one (the developer) and fixing what breaks. Do not adopt this policy on a team.
+- **Tests exist and grow.** `python3 -m pytest` (dev-only pytest in `requirements-dev.txt`). They are characterization-style — pinning today's behavior — and every new feature ships with them. Correctness beyond the suite is still "production of one"; do not adopt this policy on a team.
