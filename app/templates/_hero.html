@@ -203,22 +203,24 @@
                  speed and speed.state == 'prefill', 'sky',
                  pp_spark, pp_peak, pp_samples,
                  'one point per prompt read, newest last - not a continuous line like out', 'prompts') }}
-      {# Continuous like "out": a slot holds its context between requests, so every poll is a
-         true reading. The peak is in TOKENS while the headline is in k, which the tooltip
-         says, because rounding the peak to k would print "peak 0" on a short conversation.
+       {# Continuous like "out": a slot holds its context between requests, so every poll is a
+          true reading. The peak is in TOKENS while the headline is in k, which the tooltip
+          says, because rounding the peak to k would print "peak 0" on a short conversation.
 
-         The tile stays slate until a LIVE conversation actually nears its budget. The
-         pool-wide number would only warm once every slot filled, but the thing that truncates
-         is ONE conversation hitting its per-slot ceiling - so the colour tracks the tightest
-         live generation, not the displayed sum. Amber at 75%, rose at 90%: the hues this app
-         already uses for "watch it" and "nearly out". #}
-      {% set ns = namespace(fill=0) %}
-      {% for s in (speed.slots if speed else []) %}{% if s.state != 'idle' and s.ctx_pct > ns.fill %}{% set ns.fill = s.ctx_pct %}{% endif %}{% endfor %}
-      {% if speed and speed.solo and speed.solo.state != 'idle' and speed.solo.ctx_pct > ns.fill %}{% set ns.fill = speed.solo.ctx_pct %}{% endif %}
-      {% set ctx_tint = 'rose' if ns.fill >= 90 else ('amber' if ns.fill >= 75 else 'slate') %}
-      {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
-                 ns.fill >= 75, ctx_tint, cx_spark, cx_peak, cx_samples,
-                 'how full the window has been over the last few minutes; the peak is in tokens. The tile colours at 75% and 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.') }}
+          Slate means idle, green means the box is filling context right now - the same emerald
+          the "out" tile wears while generating, so the two agree about whether the model is
+          working. The escalations then track the ceiling: the pool-wide number would only warm
+          once every slot filled, but the thing that truncates is ONE conversation hitting its
+          per-slot budget, so amber at 75% and rose at 90% of the tightest live generation -
+          the hues this app already uses for "watch it" and "nearly out". #}
+       {% set ns = namespace(fill=0) %}
+       {% for s in (speed.slots if speed else []) %}{% if s.state != 'idle' and s.ctx_pct > ns.fill %}{% set ns.fill = s.ctx_pct %}{% endif %}{% endfor %}
+       {% if speed and speed.solo and speed.solo.state != 'idle' and speed.solo.ctx_pct > ns.fill %}{% set ns.fill = speed.solo.ctx_pct %}{% endif %}
+       {% set ctx_live = speed and speed.state != 'idle' %}
+       {% set ctx_tint = 'rose' if ns.fill >= 90 else ('amber' if ns.fill >= 75 else ('emerald' if ctx_live else 'slate')) %}
+       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
+                  ctx_live, ctx_tint, cx_spark, cx_peak, cx_samples,
+                  'how full the window has been over the last few minutes; the peak is in tokens. Green while a generation is live, amber at 75% and rose at 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.') }}
 
       {# ---- speculation's scorecard ----
          Only drawn when the RUNNING instance was spawned with a spec-type — the claim is what
