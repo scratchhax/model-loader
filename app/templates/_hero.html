@@ -205,10 +205,20 @@
                  'one point per prompt read, newest last - not a continuous line like out', 'prompts') }}
       {# Continuous like "out": a slot holds its context between requests, so every poll is a
          true reading. The peak is in TOKENS while the headline is in k, which the tooltip
-         says, because rounding the peak to k would print "peak 0" on a short conversation. #}
+         says, because rounding the peak to k would print "peak 0" on a short conversation.
+
+         The tile stays slate until a LIVE conversation actually nears its budget. The
+         pool-wide number would only warm once every slot filled, but the thing that truncates
+         is ONE conversation hitting its per-slot ceiling - so the colour tracks the tightest
+         live generation, not the displayed sum. Amber at 75%, rose at 90%: the hues this app
+         already uses for "watch it" and "nearly out". #}
+      {% set ns = namespace(fill=0) %}
+      {% for s in (speed.slots if speed else []) %}{% if s.state != 'idle' and s.ctx_pct > ns.fill %}{% set ns.fill = s.ctx_pct %}{% endif %}{% endfor %}
+      {% if speed and speed.solo and speed.solo.state != 'idle' and speed.solo.ctx_pct > ns.fill %}{% set ns.fill = speed.solo.ctx_pct %}{% endif %}
+      {% set ctx_tint = 'rose' if ns.fill >= 90 else ('amber' if ns.fill >= 75 else 'slate') %}
       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
-                 false, 'slate', cx_spark, cx_peak, cx_samples,
-                 'how full the window has been over the last few minutes; the peak is in tokens') }}
+                 ns.fill >= 75, ctx_tint, cx_spark, cx_peak, cx_samples,
+                 'how full the window has been over the last few minutes; the peak is in tokens. The tile colours at 75% and 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.') }}
 
       {# ---- speculation's scorecard ----
          Only drawn when the RUNNING instance was spawned with a spec-type — the claim is what
@@ -372,8 +382,11 @@
 
        A Strata solo request lives in NO slot (see _outside_slots), so it gets its own row
        above the grid - without it the one thing generating has no bar at all, just a row of
-       idle slots and a headline. And when exactly one llama slot is the only thing generating,
-       its row carries a chip saying so, because the headline number IS that row's number then. #}
+       idle slots and a headline. The row stays present whenever Strata has batch slots and
+       shows the last solo pass dimmed when the path is empty: the strip resizing on every
+       solo-to-batch hand-off is more distracting than a row that is idle half the time.
+       And when exactly one llama slot is the only thing generating, its row carries a chip
+       saying so, because the headline number IS that row's number then. #}
     {% if speed and (speed.slots | length > 1 or speed.solo) %}
     {% set roomy = slot_density == 'roomy' %}
     {% set dense = slot_density == 'dense' %}
@@ -394,16 +407,17 @@
       </div>
       {% if speed.solo %}
       {% set s = speed.solo %}
+      {% set solo_live = s.state != 'idle' %}
       {% set tint = 'emerald' if s.state == 'generating' else ('sky' if s.state == 'prefill' else 'slate') %}
       <div class="flex items-center gap-2 py-1 text-[10px] tabular-nums"
-           title="The solo path: this request runs outside the batch slots, which is why every slot row below sits idle while it works - it is the only thing generating. {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens{% if s.gen_tps %} · {{ '%.1f' % s.gen_tps }} tok/s{% endif %}. A second concurrent request moves the conversation into a slot and this row goes away.">
-        <span class="w-3 shrink-0 text-right text-slate-500" title="solo path, not a slot">S</span>
-        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-400"></span>
+           title="{% if solo_live %}The solo path: this request runs outside the batch slots, which is why every slot row below sits idle while it works - it is the only thing generating. {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens · {{ '%.1f' % s.gen_tps }} tok/s. A second concurrent request moves the conversation into a slot.{% elif s.gen_tps %}The solo path, idle. Last solo pass: {{ '%.1f' % s.gen_tps }} tok/s, {{ '{:,}'.format(s.decoded) }} tokens, {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} context{% if speed.solo_last_ts %} at {{ speed.solo_last_ts | ts }}{% endif %}. The row stays so the strip does not resize on every hand-off.{% else %}The solo path, idle - no solo pass since the app started. The row stays so the strip does not resize on every hand-off.{% endif %}">
+        <span class="w-3 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-600' }}" title="solo path, not a slot">S</span>
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if solo_live else '700' }}"></span>
         <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-800">
-          <div class="h-full bg-{{ tint }}-500/70 transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
+          <div class="h-full bg-{{ tint }}-{{ '500/70' if solo_live else '600/40' }} transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
         </div>
-        <span class="w-24 shrink-0 text-right text-slate-500">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
+        <span class="w-24 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-600' }}">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
       </div>
       {% endif %}
       <div class="grid gap-x-4" style="grid-template-columns: repeat({{ slot_columns }}, minmax(0, 1fr));">
