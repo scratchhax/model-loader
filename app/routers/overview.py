@@ -4,7 +4,7 @@ import asyncio
 import time
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .. import db, gpu_procs, hf, hw, ini, services, telemetry, vram_live
 from .. import strata as strata_engine

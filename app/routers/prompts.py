@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 
 from .. import db
 from ..web import templates

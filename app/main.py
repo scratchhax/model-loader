@@ -4,9 +4,8 @@ import threading
 import time
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import autoconfig
 from . import db, hw, ini, services
 from . import strata as strata_engine
 from . import strata_models

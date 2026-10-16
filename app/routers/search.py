@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 
 from .. import autoconfig, db, hf, services, strata_models
 from ..fit import _preset_estimates

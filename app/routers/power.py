@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 
 from .. import db, hw
 from ..config import settings
