@@ -5,7 +5,7 @@ import os
 
 import httpx
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 
 from .. import hf, services, strata_models
 from ..config import settings

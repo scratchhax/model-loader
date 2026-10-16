@@ -1,30 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import configparser
-import re
-import shutil
-import socket
-import threading
-import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterable
 
-import docker
-import httpx
-from docker.errors import APIError, DockerException, NotFound
+from docker.errors import DockerException
 
-from .. import diagnose
-from .. import ini
-from .. import strata as strata_engine
-from ..config import settings
-from ..utils import docker_client, human_bytes, shard_key
 
 from .dockerbase import _docker_client
 from .backends import discover_llama_containers
-from .. import hw
 
 
 def _gpu_device_container(attrs: dict) -> bool:

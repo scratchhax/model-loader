@@ -38,7 +38,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import db, narrate, services
-from .config import settings
 from .utils import docker_client
 
 app = FastAPI(title="Model Router")

@@ -1,33 +1,13 @@
 from __future__ import annotations
 
-import asyncio
-import configparser
-import re
-import shutil
-import socket
-import threading
-import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterable
 
-import docker
-import httpx
-from docker.errors import APIError, DockerException, NotFound
+from docker.errors import APIError, DockerException
 
-from .. import diagnose
-from .. import ini
-from .. import strata as strata_engine
-from ..config import settings
-from ..utils import docker_client, human_bytes, shard_key
 
 from .backends import discover_llama_containers
 from .dockerbase import _docker_client
-from .modalities import projector_modalities, section_modalities
-from .openwebui import (_find_open_webui, align_openwebui_capabilities,
-                        openwebui_capability_plan, openwebui_state,
-                        set_openwebui_model_filter)
+from .openwebui import (_find_open_webui, openwebui_capability_plan,
+                        openwebui_state, set_openwebui_model_filter)
 
 
 def openwebui_capability_state() -> dict[str, "bool | None"]:

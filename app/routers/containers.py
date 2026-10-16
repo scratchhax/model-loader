@@ -8,7 +8,6 @@ from fastapi.responses import HTMLResponse, Response
 from .. import db, gpu_procs, hw, ini, services, vram_live
 from .. import strata as strata_engine
 from ..downloader import manager
-from ..config import settings
 from ..fit import _gpu_tenants, _solo_backend
 from ..web import templates, _toast
 from .models import _update_status_map
