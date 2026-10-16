@@ -851,10 +851,25 @@ TUNABLES = {
     "conversation-cache-mib": {
         "label": "Conversation cache",
         "about": ("Keeps each client's conversation so an agent resending its history does not "
-                  "re-read it. Upstream measured clients re-reading ~90% of their prompts "
-                  "without it (#882 #440). Costs this much VRAM."),
+                  "re-read it. Measured here 2026-10-16 with six conversations alternating: "
+                  "follow-up turns 3.05s -> 0.52s to first token with 99% of the prompt "
+                  "reused, first turns unchanged, and expert residency 95% either way - it "
+                  "costs nothing in decode. Needs enough slots below, or it parks and evicts "
+                  "without ever reading back."),
         "choices": [("0", "off"), ("4096", "4 GB"), ("8192", "8 GB"), ("16384", "16 GB")],
         "metric": "conversation_cache_mib",   # the engine reports this, so the UI shows truth
+    },
+    "conversation-cache-slots": {
+        "label": "Parked conversations",
+        "about": ("How many conversations the cache may hold, which is a separate limit from "
+                  "its size and usually the binding one: a parked conversation of ~5.4k tokens "
+                  "snapshots at ~320 MB, so 8 GB has room for roughly 25 but the slot count "
+                  "stops it far earlier. With more live conversations than slots the cache "
+                  "parks and evicts without ever being read back (the engine log says "
+                  "reused_kv_bytes=0). Set it above the number of conversations an agent keeps "
+                  "in flight."),
+        "choices": [("4", "4"), ("8", "8"), ("16", "16")],
+        "metric": "conversation_cache_slots",
     },
     "prefill": {
         "label": "Prompt chunk",
