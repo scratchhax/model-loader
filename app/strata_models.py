@@ -835,6 +835,19 @@ def strata_only(filename: str) -> bool:
 # wrong value there is a container that will not start - the failure mode this engine already
 # has too many of. Those wait for a fit check that can refuse BEFORE the restart.
 TUNABLES = {
+    "batch": {
+        "label": "Concurrent slots",
+        "about": ("How many conversations decode together. Measured here 2026-10-16 on both "
+                  "cards, IQ3_S, greedy, 256 tokens, agent-shaped prompts (shared prefix, "
+                  "different task per caller): at 4 callers total throughput 66.6 -> 103.2 "
+                  "tok/s (+55%) and the slowest wait 12.6s -> 2.7s; at 2 callers 65.6 -> 71.8 "
+                  "and 4.6s -> 1.0s. The price is a single request alone: 85.6 -> 74.5 tok/s "
+                  "(-13%), because the slots' sessions come out of the expert cache and "
+                  "residency fell 100% -> 95%. Worth it for agents that fan out, backwards "
+                  "for one chat at a time."),
+        "choices": [("1", "off (one at a time)"), ("2", "2 slots"), ("4", "4 slots")],
+        "metric": "batch_slots",   # the engine reports what it actually runs, not what we asked
+    },
     "conversation-cache-mib": {
         "label": "Conversation cache",
         "about": ("Keeps each client's conversation so an agent resending its history does not "
