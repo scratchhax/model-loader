@@ -6,7 +6,8 @@ without either importing the other.
 
 from __future__ import annotations
 
-from . import autoconfig, hw, services
+from . import autoconfig, gguf_meta, hw, ini, services
+from .config import settings
 
 
 def _fit_host_ram() -> float:
@@ -83,3 +84,115 @@ def _preset_estimates(summary: dict, size_bytes: int, mmproj_gb: float = 0.0) ->
         if len(out) > 1 and out[-1]["ctx"] == out[0]["ctx"] and not out[-1]["offload"]:
             out.pop()
     return out
+
+
+def _container_baseline(name: str) -> list[str]:
+    """Return the Config.Cmd list for a running container, or [] on failure."""
+    try:
+        client = services._docker_client()
+        if client is None:
+            return []
+        c = client.containers.get(name)
+        return list((c.attrs or {}).get("Config", {}).get("Cmd") or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+
+
+def _backend_list() -> list[dict]:
+    """Backend descriptors for autoconfig, from the env whitelist or auto-discovery.
+
+    Extracted so the benchmark results page can ask for the same fit estimate the autoconfig
+    panel shows, rather than growing a second, drifting copy of this.
+    """
+    out = []
+    for bn in services._effective_container_names():
+        # Autoconfig's whole budget is llama.cpp's: GPU-resident weights, its KV cache layout,
+        # its per-card compute buffers, its argv. A backend of another engine holds a card and
+        # is a real backend, but none of those numbers describe it - Strata streams experts
+        # from host RAM against a cache it sizes itself - so listing it here would produce a
+        # confident fit table for a stack that does not work that way, and an "assign to" that
+        # writes llama arguments nothing will read.
+        if services.engine_for(bn) != "llama":
+            continue
+        vram = hw.vram_gb_for(bn)
+        if vram <= 0:
+            continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
+        # detect vendor via hw sampler cache (or docker inspect image)
+        vendor = "unknown"
+        try:
+            client = services._docker_client()
+            if client is not None:
+                img = ((client.containers.get(bn).image.tags or [""]) or [""])[0].lower()
+                if "rocm" in img:
+                    vendor = "rocm"
+                elif "cuda" in img:
+                    vendor = "cuda"
+        except Exception:  # noqa: BLE001
+            pass
+        cmd = _container_baseline(bn)
+        base = autoconfig.parse_baseline(cmd) if cmd else {}
+        out.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
+                    "gpu_count": hw.gpu_count_for(bn), "card_vram_gb": _fit_card_vram(bn),
+            "host_ram_gb": _fit_host_ram(),
+                    "baseline": base})
+    return out
+
+
+def _predicted_vram_gb(section: str) -> float | None:
+    """Autoconfig's budget for this section: weights + KV only, in GB.
+
+    NOT the total the cards will hold. Compute buffers and the projector are budgeted elsewhere
+    and are not small - llama.cpp's own estimator puts gemma-4-E4B's compute buffers at 4 GB
+    against 2.4 GB of weights - so a measured peak reads several GB above this by construction.
+    The chart labels both bars accordingly; presenting them as rivals would make a correct
+    estimate look 5 GB wrong.
+    """
+    try:
+        gguf_path, model_rel, rel = _resolve_section_gguf(section)
+        if gguf_path is None or not gguf_path.is_file():
+            return None
+        summary = gguf_meta.summarize(gguf_meta.read_raw(gguf_path))
+        backends = _backend_list()
+        if not backends:
+            return None
+        subdir = rel.split("/", 1)[0] if rel and "/" in rel else ""
+        vals = ini.get_section(section) or {}
+        rec = autoconfig.analyze(
+            summary=summary, file_size=gguf_path.stat().st_size, backends=backends,
+            model_rel=model_rel, current_section=vals, models_dir=settings.models_dir,
+            section_name=section, model_subdir=subdir)
+        if not rec.frontier:
+            return None
+        # Compare at the context the section is actually configured for, not at whatever
+        # autoconfig would recommend - the measurement was taken under the former.
+        try:
+            want = int(str(vals.get("ctx-size", "")).strip() or 0)
+        except ValueError:
+            want = 0
+        want = want or rec.recommended_total_ctx or rec.recommended_ctx
+        row = min(rec.frontier, key=lambda r: abs(r.ctx - want)) if want else rec.frontier[0]
+        return round(row.gpu_gb + row.kv_gb, 2)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+
+def _solo_backend() -> str:
+    """The single running backend that sees GPUs, or "" when zero or several do.
+
+    The live VRAM breakdown estimates the components of ONE backend's load against the card,
+    so several GPU-bearing backends means the residual segment would silently absorb the
+    second one's model - the meter falls back to the plain measured bar instead. Backends
+    without GPU cards (a CPU build, a voice pipeline) cannot put anything on the device, so
+    they do not break sole ownership, and the "other" residual would catch them if they did.
+
+    Note what this does NOT cover, and never could: a GPU process the app did not start. It
+    enumerates BACKENDS, and a TTS server or an image generator is not one. That gap is what
+    gpu_procs closes - sole ownership among backends is still the condition for drawing the
+    meter, and the meter is now told about the tenants that are not backends.
+    """
+    gpu_backends = [n for n in services._effective_container_names()
+                    if (st := hw.stats_for(n)).ok and st.gpu and st.gpu.cards]
+    return gpu_backends[0] if len(gpu_backends) == 1 else ""
