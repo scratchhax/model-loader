@@ -480,15 +480,6 @@ def delete_gguf(display_name: str, subdir: str = "") -> tuple[bool, str, int]:
 _docker_client = docker_client
 
 
-@dataclass
-class ContainerInfo:
-    name: str
-    found: bool
-    status: str | None = None
-    image: str | None = None
-    id: str | None = None
-
-
 # ---------- llama backends: richer view + restart + probe ----------
 
 # error-of-last-restart per container, shown in the card until it clears
