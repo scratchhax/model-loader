@@ -4,6 +4,7 @@ import asyncio
 import configparser
 import re
 import shutil
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -2794,6 +2795,34 @@ def openwebui_state() -> dict:
         if not any(u in current_urls for u in candidate_urls):
             missing.append({"name": c.name, "vendor": strata_engine.ENGINE, "url": candidate_urls[0]})
 
+    # If Open WebUI is pointed at THIS app's router, the per-backend connections are absent on
+    # purpose and none of them is missing.
+    #
+    # Without this the page is permanently wrong, and not merely noisily: every llama router on
+    # the box reads as missing forever, the Reconcile banner never clears, and pressing it adds
+    # those connections back - undoing the single-endpoint setup the router exists to provide.
+    # Observed with exactly one connection configured, http://model-loader:8086/v1, and
+    # llama-9700x2, llama-cpu and llama-voice all listed as missing.
+    #
+    # The check is for this container's own name or compose service on the router port, so it
+    # recognises the router only when Open WebUI is actually talking to US. A different host on
+    # 8086 is somebody else's proxy and says nothing about whether these backends are reachable.
+    router_urls: list[str] = []
+    try:
+        own = client.containers.get(socket.gethostname())
+        rport = int(settings.router_port)
+        names = [own.name]
+        svc = (own.labels or {}).get("com.docker.compose.service")
+        if svc and svc != own.name:          # compose usually makes these identical
+            names.append(svc)
+        router_urls = [f"http://{n}:{rport}/v1" for n in names if n]
+    except (DockerException, NotFound, ValueError, TypeError):
+        router_urls = []
+
+    routed_via = next((u for u in router_urls if u in current_urls), "")
+    if routed_via:
+        missing = []
+
     # Detect stale entries — URLs pointing at compose-local hosts that no longer exist
     valid_hosts: set[str] = set()
     try:
@@ -2877,6 +2906,8 @@ def openwebui_state() -> dict:
         "companions": _openwebui_companions(client, ow, valid_hosts),
         "missing_backends": missing,
         "stale_urls": stale,
+        # Set when Open WebUI reaches these backends through our router instead of directly.
+        "routed_via": routed_via,
     }
 
 
