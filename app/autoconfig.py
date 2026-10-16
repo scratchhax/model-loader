@@ -2280,10 +2280,37 @@ def analyze(*,
 
     # Multi-GPU: be explicit about the split strategy rather than relying on the
     # container's CLI baseline to supply it.
+    #
+    # TENSOR, not layer. Layer split runs the cards in SEQUENCE: card 0 computes its layers,
+    # hands the activations to card 1, card 1 finishes. Only one card is reading weights at any
+    # moment, so a decode step gets a single card's memory bandwidth no matter how many are
+    # fitted, with a PCIe hop and a pipeline bubble on top. Measured on this box with
+    # gemma-4-31B-it-Q6_K across two R9700s: 19.4 tok/s, which works out at roughly 230 GB/s
+    # effective against ~640 GB/s per card. Tensor split has both cards reading their own shard
+    # at the same time.
+    #
+    # A speculative head is dropped wherever tensor is chosen, and that is the deliberate half
+    # of this rule rather than an oversight. llama.cpp cannot do both: under tensor split it
+    # reports "backend sampling not supported with SPLIT_MODE_TENSOR; using CPU", the MTP draft
+    # falls back to a CPU sampler, and the run then aborts inside the flash-attention kernel
+    # once the KV cache is long enough - observed three times as fattn.cu:762 killing gemma
+    # after a ~15k-token prefill. Speculation was buying about 2.13 tokens per forward pass;
+    # a second card's bandwidth is worth more, so tensor wins and MTP is what you fall back to
+    # on hardware where tensor is not available.
+    #
+    # Single-GPU and CPU backends never reach here, so they keep whatever the baseline gives
+    # them and may still use a spec head. That is what stops a GPU-tuned section from becoming
+    # unloadable on llama-cpu or llama-voice: SPLIT_MODE_TENSOR needs at least one device, and
+    # on a CPU-only build it is a fatal load, not a slow one.
     if recommended:
         _rb = next((b for b in backends if b["name"] == recommended.name), None)
         if int((_rb or {}).get("gpu_count", 1)) > 1:
-            values["split-mode"] = "layer"
+            values["split-mode"] = "tensor"
+            # Written empty rather than omitted, for the reason the spec block above gives:
+            # Fill writes exactly `values`, so a key that is not present is left at whatever
+            # the previous save put there.
+            for _k in ("spec-type", "spec-draft-model", "spec-draft-ngl", *SPEC_PROFILE_KEYS):
+                values[_k] = ""
 
     # baseline-redundant: any key that matches the recommended backend's baseline
     baseline_redundant: dict[str, str] = {}
