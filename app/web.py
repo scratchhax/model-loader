@@ -40,3 +40,22 @@ def _blocked_chip(reason: str) -> HTMLResponse:
         '<span class="shrink-0 inline-flex items-center rounded-md bg-red-100 dark:bg-red-950 '
         'text-red-800 dark:text-red-300 px-3 py-1.5 text-xs font-medium" '
         f'title="{html.escape(reason)}">Blocked: llama.cpp can&rsquo;t load this</span>')
+
+
+def _toast(ok: bool, msg: str) -> HTMLResponse:
+    """The banner the models page swaps into #models-owui-toast. Shared so three routes that
+    report into the same strip cannot drift apart in markup."""
+    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
+           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
+    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">'
+                        f'{"&check;" if ok else "Failed:"} {html.escape(msg)}</div>')
+
+
+
+
+_QUEUED_CHIP = (
+    '<a href="/downloads" title="{title}" '
+    'class="shrink-0 inline-flex items-center gap-1 rounded-md bg-emerald-100 dark:bg-emerald-950 '
+    'text-emerald-800 dark:text-emerald-300 px-3 py-1.5 text-xs font-medium">'
+    '✓ {label}</a>'
+)

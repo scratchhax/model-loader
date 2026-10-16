@@ -9,17 +9,11 @@ from fastapi.responses import HTMLResponse, Response
 
 from .. import autoconfig, hf
 from ..downloader import manager
-from ..web import templates, _blocked_chip
+from ..web import templates, _blocked_chip, _QUEUED_CHIP
 
 router = APIRouter()
 
 
-_QUEUED_CHIP = (
-    '<a href="/downloads" title="{title}" '
-    'class="shrink-0 inline-flex items-center gap-1 rounded-md bg-emerald-100 dark:bg-emerald-950 '
-    'text-emerald-800 dark:text-emerald-300 px-3 py-1.5 text-xs font-medium">'
-    '✓ {label}</a>'
-)
 
 
 def _fit_host_ram() -> float:
