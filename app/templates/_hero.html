@@ -368,10 +368,17 @@
 
        Worth showing because the numbers genuinely diverge: measured on a parallel = 3 section,
        two slots decoding in the same batch held 38.5 and 27.4 tok/s for seven seconds, and
-       their contexts ended at 439, 423 and 83 tokens. #}
-    {% if speed and speed.slots | length > 1 %}
+       their contexts ended at 439, 423 and 83 tokens.
+
+       A Strata solo request lives in NO slot (see _outside_slots), so it gets its own row
+       above the grid - without it the one thing generating has no bar at all, just a row of
+       idle slots and a headline. And when exactly one llama slot is the only thing generating,
+       its row carries a chip saying so, because the headline number IS that row's number then. #}
+    {% if speed and (speed.slots | length > 1 or speed.solo) %}
     {% set roomy = slot_density == 'roomy' %}
     {% set dense = slot_density == 'dense' %}
+    {% set active = speed.slots | rejectattr('state', 'eq', 'idle') | list %}
+    {% set lone = not speed.solo and active | length == 1 %}
     {% set fs = 'text-[10px]' if roomy else 'text-[9px]' %}
     {% set rowpad = 'py-1' if roomy else ('py-0.5' if not dense else '') %}
     {% set per_slot_ctx = speed.slots[0].ctx_total %}
@@ -385,6 +392,20 @@
         </span>
         {% endif %}
       </div>
+      {% if speed.solo %}
+      {% set s = speed.solo %}
+      {% set tint = 'emerald' if s.state == 'generating' else ('sky' if s.state == 'prefill' else 'slate') %}
+      <div class="flex items-center gap-2 py-1 text-[10px] tabular-nums"
+           title="The solo path: this request runs outside the batch slots, which is why every slot row below sits idle while it works - it is the only thing generating. {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens{% if s.gen_tps %} · {{ '%.1f' % s.gen_tps }} tok/s{% endif %}. A second concurrent request moves the conversation into a slot and this row goes away.">
+        <span class="w-3 shrink-0 text-right text-slate-500" title="solo path, not a slot">S</span>
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-400"></span>
+        <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
+        <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-800">
+          <div class="h-full bg-{{ tint }}-500/70 transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
+        </div>
+        <span class="w-24 shrink-0 text-right text-slate-500">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
+      </div>
+      {% endif %}
       <div class="grid gap-x-4" style="grid-template-columns: repeat({{ slot_columns }}, minmax(0, 1fr));">
       {% for s in speed.slots %}
       {% set tint = 'emerald' if s.state == 'generating' else ('sky' if s.state == 'prefill' else 'slate') %}
@@ -392,6 +413,10 @@
            title="slot {{ s.index }} · {{ s.state }}{% if s.task_id is not none %} · task {{ s.task_id }}{% endif %} · {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens{% if s.gen_tps %} · {{ '%.1f' % s.gen_tps }} tok/s{% endif %}">
         <span class="w-3 shrink-0 text-right text-slate-600">{{ s.index }}</span>
         <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if s.state != 'idle' else '700' }}"></span>
+        {% if lone and s.state != 'idle' %}
+        <span class="shrink-0 rounded bg-slate-700/60 px-1 text-[8px] uppercase tracking-wide text-slate-400"
+              title="The only slot generating - the machine's headline rate above is this row's number.">solo</span>
+        {% endif %}
         {% if not dense %}
         <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         {% endif %}

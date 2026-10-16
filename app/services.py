@@ -1922,6 +1922,11 @@ class InferenceSpeed:
     ctx_cached: int = 0        # of ctx_used, how many came from cache instead of being re-read
     live: bool = False         # rates describe work happening NOW, not the last run
     slots: list = field(default_factory=list)   # list[SlotSpeed], one per live slot
+    # Strata's solo path: the request the engine is working on OUTSIDE any batch slot (see
+    # _outside_slots). None of `slots` holds it, so the strip needs its own row or the one
+    # thing generating has no bar at all. None on every other engine and whenever the work
+    # IS in a slot.
+    solo: "SlotSpeed | None" = None
     # Strata only: the share of routed experts served from the GPU's cache on the last request,
     # which its `done:` line reports. There is no llama.cpp equivalent - llama has no expert
     # cache - so this is None on every other engine and the tile is simply absent.
@@ -2300,7 +2305,7 @@ def _rates_from_log_strata(name: str) -> dict:
     second, which they do under an agent client.
     """
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
-           "cur_pp_done": 0, "cur_pp_total": 0,
+           "cur_pp_done": 0, "cur_pp_total": 0, "cur_prompt_tokens": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
            "open_task": None, "open_slot": 0, "expert_hit_pct": None}
 
@@ -2314,6 +2319,10 @@ def _rates_from_log_strata(name: str) -> dict:
         state = live.get("state") or "idle"
         out["cur_gen_tps"] = float(live.get("tok_s") or 0.0)
         out["cur_gen_tokens"] = int(live.get("generated") or 0)
+        # The conversation the SOLO pass is carrying, needed for its context bar during
+        # GENERATION - prompt_total/prompt_read only appear while reading, and the solo
+        # request lives in no slot, so nothing else reports its size once the read is done.
+        out["cur_prompt_tokens"] = int(live.get("prompt_tokens") or 0)
         if state == "reading":
             out["cur_pp_tps"] = float(live.get("prefill_tok_s_mean") or 0.0)
             pt, pr = live.get("prompt_total"), live.get("prompt_read")
@@ -2403,6 +2412,7 @@ def _rates_from_log_strata(name: str) -> dict:
         done, total = _int_c(newest_prompt.group(1)), _int_c(newest_prompt.group(2))
         secs = _int_c(newest_prompt.group(3))
         out["cur_pp_done"] = done
+        out["cur_prompt_tokens"] = total
         out["cur_pp_pct"] = min(100, round(done * 100 / total)) if total else 0
         # "N s so far" is whole seconds and starts at 0, so the first sample of a short prompt
         # would divide by zero. Reporting no rate beats reporting an infinite one.
@@ -2647,6 +2657,29 @@ async def inference_speed(container_name: str, internal_port: int | None,
     else:
         state = "idle"
 
+    # The solo pass gets its own row because none of the slot rows holds it: Strata runs a
+    # lone request outside the batch slots (see _outside_slots), so without this the one
+    # thing generating has no bar at all - just four idle slot rows and a headline.
+    solo = None
+    if outside:
+        prompt_tok = int(r.get("cur_prompt_tokens") or 0)
+        gen_tok = int(r.get("cur_gen_tokens") or 0)
+        solo = SlotSpeed(
+            index=-1,
+            state="prefill" if r.get("newest") == "prefill" else "generating",
+            gen_tps=r["cur_gen_tps"],
+            decoded=gen_tok,
+            # Context fill like the slot rows: what the conversation holds, over the budget
+            # one conversation gets. The log fallback has no prompt size mid-generation, so
+            # the bar degrades to generated-only there rather than guessing.
+            ctx_used=prompt_tok + gen_tok,
+            ctx_total=max((sl.ctx_total for sl in slots), default=0),
+            prefill_pct=r["cur_pp_pct"],
+            prefill_done=r["cur_pp_done"],
+            prefill_total=r["cur_pp_total"],
+            prompt_tokens=prompt_tok,
+        )
+
     # The machine's rate, not one slot's. Summing is the honest aggregate: slots decode in the
     # same batch, so their rates add up to what the box is actually producing.
     gen_tps = sum(sl.gen_tps for sl in generating)
@@ -2694,7 +2727,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         prefill_done=prefill_done, prefill_total=prefill_total,
         prompt_tokens=prompt_tokens,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
-        live=busy, slots=slots, expert_hit_pct=r.get("expert_hit_pct"),
+        live=busy, slots=slots, solo=solo, expert_hit_pct=r.get("expert_hit_pct"),
     )
     _speed_cache[container_name] = (time.time(), out)
     return out
