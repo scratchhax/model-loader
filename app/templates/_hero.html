@@ -203,8 +203,12 @@
                  speed and speed.state == 'prefill', 'sky',
                  pp_spark, pp_peak, pp_samples,
                  'one point per prompt read, newest last - not a continuous line like out', 'prompts') }}
+      {# Continuous like "out": a slot holds its context between requests, so every poll is a
+         true reading. The peak is in TOKENS while the headline is in k, which the tooltip
+         says, because rounding the peak to k would print "peak 0" on a short conversation. #}
       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
-                 false, 'slate', '', 0, 0) }}
+                 false, 'slate', cx_spark, cx_peak, cx_samples,
+                 'how full the window has been over the last few minutes; the peak is in tokens') }}
 
       {# ---- speculation's scorecard ----
          Only drawn when the RUNNING instance was spawned with a spec-type — the claim is what

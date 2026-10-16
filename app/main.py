@@ -385,7 +385,8 @@ async def _hero_context() -> dict:
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
                 "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0,
-                "pp_spark": "", "pp_peak": 0.0, "pp_samples": 0, "hero_mtp": None,
+                "pp_spark": "", "pp_peak": 0.0, "pp_samples": 0, 
+                "cx_spark": "", "cx_peak": 0.0, "cx_samples": 0, "hero_mtp": None,
                 "hero_loading": False, "hero_loading_s": 0.0,
                 "hero_foreign": _hero_foreign_only(), "hero_asleep": False,
                 "hero_others": []}
@@ -518,6 +519,8 @@ async def _hero_context() -> dict:
     # Sparse by construction: one point per completed prefill, not one per poll.
     pp = services.prefill_history(b.name)
     pp_peak = max(pp) if pp else 0.0
+    cx = services.ctx_history(b.name)
+    cx_peak = max(cx) if cx else 0.0
     return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
             "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
@@ -532,6 +535,12 @@ async def _hero_context() -> dict:
                          else hw.sparkline(pp, pp_peak or None) if len(pp) > 2 else ""),
             "pp_peak": 0.0 if hero_loading else pp_peak,
             "pp_samples": 0 if hero_loading else len(pp),
+            # Against its own window peak, like the two above it: a 15k conversation in a 256k
+            # window drawn against the CONFIGURED ceiling would be a flat line on the floor.
+            "cx_spark": ("" if hero_loading
+                         else hw.sparkline(cx, cx_peak or None) if len(cx) > 2 else ""),
+            "cx_peak": 0.0 if hero_loading else cx_peak,
+            "cx_samples": 0 if hero_loading else len(cx),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
             "hero_foreign": hero_foreign,
@@ -866,8 +875,17 @@ def _host_stats_context() -> dict:
     ram_avail = hw.host_ram_available_gb()
     arena = hw.strata_arena_gb()
 
+    # Both drawn against a REAL ceiling rather than their own window: load against core count,
+    # free RAM against total. The height of the line is then the headroom, which is the thing
+    # being asked. Scaled to its own range, a quiet box and one about to run out would draw the
+    # same picture - the argument the power panel already makes for its own sparklines.
+    lh = hw.host_load_history()
+    rh = hw.host_ram_history()
     return {"host": {
         "load": load,
+        "load_spark": hw.sparkline(lh, 100.0) if len(lh) > 2 else "",
+        "ram_spark": hw.sparkline(rh, ram_total or None) if len(rh) > 2 else "",
+        "hist_n": len(lh),
         "load_warn": load["pct"] >= _LOAD_WARN_PCT and load["pct"] < _LOAD_CRIT_PCT,
         "load_crit": load["pct"] >= _LOAD_CRIT_PCT,
 

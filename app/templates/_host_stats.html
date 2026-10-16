@@ -18,6 +18,21 @@
   fraction consumed. The load bar is the exception and is drawn against core count, because
   that is the only denominator that makes a load figure mean anything.
 #}
+{# Load and memory get a sparkline instead of a bar; swap and disk keep theirs.
+   The split is by whether the value MOVES. Load and free RAM change second to second, so the
+   recent shape says more than the instant does, and because both lines are drawn against a real
+   ceiling (core count, total RAM) the height still reads as the fraction a bar would have shown
+   - the sparkline subsumes it rather than sitting beside it. Swap and disk move on the scale of
+   a model download; a line of 240 identical samples would be decoration. #}
+{% macro spark(points, crit, warn) -%}
+<svg viewBox="0 0 100 20" class="mt-2 block h-6 w-full
+            {% if crit %}text-red-400{% elif warn %}text-amber-400{% else %}text-emerald-400/80{% endif %}"
+     preserveAspectRatio="none">
+  <polyline fill="none" stroke="currentColor" stroke-width="1.5"
+            vector-effect="non-scaling-stroke" points="{{ points }}"/>
+</svg>
+{%- endmacro %}
+
 {% macro bar(pct, crit, warn) -%}
 {# Clamped here rather than inline: an unclamped width silently renders a bar wider than its
    track, and a load over 100% of cores is a normal reading, not an error. #}
@@ -47,7 +62,7 @@ rounded-xl border px-4 py-3 transition-colors duration-500
       {% if host.load_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">saturated</span>
       {% elif host.load_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">busy</span>{% endif %}
     </div>
-    {{ bar(host.load.pct, host.load_crit, host.load_warn) }}
+    {% if host.load_spark %}{{ spark(host.load_spark, host.load_crit, host.load_warn) }}{% else %}{{ bar(host.load.pct, host.load_crit, host.load_warn) }}{% endif %}
     <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
       <span title="1, 5 and 15 minute averages">{{ '%.2f' % host.load.load5 }} · {{ '%.2f' % host.load.load15 }}</span>
       <span>{{ '%.0f' % host.load.pct }}% of {{ host.load.cores }} cores</span>
@@ -63,7 +78,7 @@ rounded-xl border px-4 py-3 transition-colors duration-500
       {% if host.ram_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">no headroom</span>
       {% elif host.ram_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">tight</span>{% endif %}
     </div>
-    {{ bar(host.ram_used_pct, host.ram_crit, host.ram_warn) }}
+    {% if host.ram_spark %}{{ spark(host.ram_spark, host.ram_crit, host.ram_warn) }}{% else %}{{ bar(host.ram_used_pct, host.ram_crit, host.ram_warn) }}{% endif %}
     <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
       <span>{{ '%.0f' % host.ram_total }} GB total</span>
       {# The arena is called out because it is the one tenant that does not give itself back. #}

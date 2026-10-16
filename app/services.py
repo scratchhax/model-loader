@@ -2145,6 +2145,28 @@ def _record_tps(container_name: str, value: float) -> None:
 _pp_history: dict[str, list[tuple[float, float]]] = {}
 
 
+
+
+# Context in use, continuous like generation and unlike prefill: a slot holds its context
+# between requests, so every poll is a true reading of what the window currently contains.
+# Zeros are recorded rather than skipped for the same reason they are in _record_tps - the
+# gaps are part of the shape, and a line drawn only from busy moments implies continuous work.
+_ctx_history: dict[str, list[tuple[float, float]]] = {}
+
+
+def ctx_history(container_name: str) -> list[float]:
+    """Recent context-in-use readings for a backend, in tokens, oldest first."""
+    return [v for _ts, v in _ctx_history.get(container_name, [])]
+
+
+def _record_ctx(container_name: str, tokens: float) -> None:
+    hist = _ctx_history.setdefault(container_name, [])
+    now = time.time()
+    if hist and (now - hist[-1][0]) < _TPS_MIN_GAP_S:
+        return
+    hist.append((now, float(tokens or 0.0)))
+    if len(hist) > _TPS_HISTORY_MAX:
+        del hist[:len(hist) - _TPS_HISTORY_MAX]
 def prefill_history(container_name: str) -> list[float]:
     """Completed prefill rates for a backend, oldest first, one per request."""
     return [v for _ts, v in _pp_history.get(container_name, [])]
@@ -2629,6 +2651,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     _record_tps(container_name, gen_tps if state == "generating" else 0.0)
     # The completed figure only, so one point per request. See _record_prefill_tps.
     _record_prefill_tps(container_name, r["last_pp_tps"])
+    _record_ctx(container_name, ctx_used)
 
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,

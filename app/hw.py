@@ -684,6 +684,7 @@ def _sample_loop() -> None:
     from . import services
     while True:
         discovery_ok = True
+        _record_host_history()
         try:
             names = services._effective_container_names()
         except Exception:  # noqa: BLE001
@@ -961,6 +962,39 @@ def host_swap_gb() -> tuple[float, float]:
     return (round(max(0.0, total - free), 1), round(total, 1))
 
 
+
+
+# Host history, for the load and RAM sparklines on the overview.
+#
+# Recorded in the SAMPLER rather than in the /hoststats request handler, because a history that
+# only advances while a browser is open is not a history: it would be empty on first paint and
+# full of gaps that mean "nobody was looking" rather than "nothing happened".
+_HOST_HISTORY_MAX = 240
+_host_history: deque = deque(maxlen=_HOST_HISTORY_MAX)   # (ts, load_pct, ram_available_gb)
+_HOST_HIST_LOCK = threading.Lock()
+
+
+def _record_host_history() -> None:
+    """One host sample per sampler tick. Never raises: the caller is the sampling loop."""
+    try:
+        pct = float(host_load().get("pct") or 0.0)
+        avail = host_ram_available_gb()
+    except Exception:  # noqa: BLE001 - a /proc hiccup must not stop backend sampling
+        return
+    with _HOST_HIST_LOCK:
+        _host_history.append((time.time(), pct, avail))
+
+
+def host_load_history() -> list[float]:
+    """Load as a percentage of core count, oldest first."""
+    with _HOST_HIST_LOCK:
+        return [p for _ts, p, _r in _host_history]
+
+
+def host_ram_history() -> list[float]:
+    """MemAvailable in GiB, oldest first."""
+    with _HOST_HIST_LOCK:
+        return [r for _ts, _p, r in _host_history]
 def host_disk_gb(path: Path | str) -> tuple[float, float]:
     """(free, total) GiB for the filesystem holding `path`. (0.0, 0.0) if it cannot be read.
 
