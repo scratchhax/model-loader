@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, Response
 from .. import autoconfig, gguf_meta, ini, services, telemetry
 from ..config import settings
 from ..utils import shard_key
-from ..fit import _fit_card_vram, _fit_host_ram
+from ..fit import _backend_list, _fit_card_vram, _fit_host_ram
 from ..web import templates
 from .models import _section_caps
 

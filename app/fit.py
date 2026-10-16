@@ -6,7 +6,7 @@ without either importing the other.
 
 from __future__ import annotations
 
-from . import autoconfig, gguf_meta, hw, ini, services
+from . import autoconfig, gguf_meta, gpu_procs, hw, ini, services
 from .config import settings
 
 
@@ -196,3 +196,17 @@ def _solo_backend() -> str:
     gpu_backends = [n for n in services._effective_container_names()
                     if (st := hw.stats_for(n)).ok and st.gpu and st.gpu.cards]
     return gpu_backends[0] if len(gpu_backends) == 1 else ""
+
+
+def _gpu_tenants() -> list:
+    """Every process on the cards, ours and not ours. [] on a box this cannot be read on.
+
+    Lives here rather than in gpu_procs so the module stays a probe with no opinion about
+    which containers the app considers its own.
+    """
+    try:
+        ts = gpu_procs.tenants(set(services._effective_container_names()))
+        gpu_procs.note_seen(ts)
+        return ts
+    except Exception:  # noqa: BLE001 - a tenant table that fails degrades to not being drawn
+        return []
