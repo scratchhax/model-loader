@@ -5,8 +5,10 @@ Lives apart from main.py so router modules can import it without importing the a
 
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from . import db
@@ -30,3 +32,11 @@ def _fmt_ts(v) -> str:
 
 
 templates.env.filters["ts"] = _fmt_ts
+
+
+def _blocked_chip(reason: str) -> HTMLResponse:
+    """What a refused download button turns into. The reason rides in the tooltip."""
+    return HTMLResponse(
+        '<span class="shrink-0 inline-flex items-center rounded-md bg-red-100 dark:bg-red-950 '
+        'text-red-800 dark:text-red-300 px-3 py-1.5 text-xs font-medium" '
+        f'title="{html.escape(reason)}">Blocked: llama.cpp can&rsquo;t load this</span>')
