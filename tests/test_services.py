@@ -35,9 +35,13 @@ def clean_slot_state():
 class TestRatesFromLog:
     @pytest.fixture
     def log(self, monkeypatch):
+        # _rates_from_log lives in the speed submodule and resolves container_logs there,
+        # so the patch target is the submodule, not the package facade.
+        from app.services import speed
+
         def _set(text, ok=True):
             monkeypatch.setattr(
-                s, "container_logs",
+                speed, "container_logs",
                 lambda name, tail, current_run_only: (ok, text))
         return _set
 

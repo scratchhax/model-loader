@@ -9,7 +9,7 @@ from .. import db, gpu_procs, hw, ini, services, vram_live
 from .. import strata as strata_engine
 from ..downloader import manager
 from ..config import settings
-from ..fit import _solo_backend
+from ..fit import _gpu_tenants, _solo_backend
 from ..web import templates, _toast
 from .models import _update_status_map
 
@@ -92,7 +92,7 @@ def _strata_pin_state(backends) -> dict | None:
         client = services._docker_client()
         if client is not None:
             attrs = client.containers.get(b.name).attrs or {}
-            own = _strata_own_attrs(client)
+            own = services.strata_own_attrs(client)
     except Exception:  # noqa: BLE001 - a missing container just means no live pin to compare
         attrs = {}
     # Exec candidates for the topology read: this app has no /dev/kfd, so the card count comes
@@ -200,7 +200,7 @@ def containers_strata_timeshare(name: str, idle_s: str = Form(""), min_free_mib:
     try:
         client = services._docker_client()
         attrs = client.containers.get(name).attrs or {}
-        path = strata_engine.run_config_path(attrs, _strata_own_attrs(client))
+        path = strata_engine.run_config_path(attrs, services.strata_own_attrs(client))
     except Exception as e:  # noqa: BLE001 - saved in the db either way; the note on the card covers the rest
         return _strata_config_toast(True, "saved — but the run config could not be reached "
                                           f"({e}); it will be applied at app start")

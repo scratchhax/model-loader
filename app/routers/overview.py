@@ -10,7 +10,7 @@ from .. import db, gpu_procs, hf, hw, ini, services, telemetry, vram_live
 from .. import strata as strata_engine
 from ..config import settings
 from ..downloader import manager
-from ..fit import _solo_backend
+from ..fit import _gpu_tenants, _solo_backend
 from ..utils import human_bytes
 from ..web import templates
 from .power import _host_stats_context, _power_context, _power_settings_context
@@ -349,20 +349,6 @@ async def _hero_context() -> dict:
             # model that has not finished loading, and the rollup would hand back its
             # predecessor's figures under the new model's name.
             "hero_mtp": hero_mtp}
-
-
-def _gpu_tenants() -> list:
-    """Every process on the cards, ours and not ours. [] on a box this cannot be read on.
-
-    Lives here rather than in gpu_procs so the module stays a probe with no opinion about
-    which containers the app considers its own.
-    """
-    try:
-        ts = gpu_procs.tenants(set(services._effective_container_names()))
-        gpu_procs.note_seen(ts)
-        return ts
-    except Exception:  # noqa: BLE001 - a tenant table that fails degrades to not being drawn
-        return []
 
 
 def _gpu_strip_context() -> dict:

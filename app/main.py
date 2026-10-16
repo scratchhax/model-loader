@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import socket
 import threading
 import time
 
@@ -15,6 +14,7 @@ from . import router_api
 from .config import settings
 from .fit import _backend_list, _predicted_vram_gb
 from .routers import benchmark as benchmark_router
+from .routers.benchmark import _bench_ctx
 from .routers import config as config_router
 from .routers import containers as containers_router
 from .routers import downloads as downloads_router
@@ -25,6 +25,7 @@ from .routers import prompts as prompts_router
 from .routers import search as search_router
 from .routers import settings as settings_router
 from .routers import strata as strata_router
+from .routers.strata import STRATA_DATA, STRATA_ENV_FILE
 from .web import templates, _blocked_chip, _QUEUED_CHIP, _toast
 
 app = FastAPI(title="Model Loader")
@@ -72,16 +73,6 @@ def _startup() -> None:
     threading.Thread(target=_reconcile_strata_config, daemon=True, name="strata-config").start()
 
 
-def _strata_own_attrs(client) -> dict:
-    """This app's own inspect data. Its mounts are the second half of the path translation:
-    a host path only means something here once it has been mapped through what this
-    container mounts where. Outside Docker there is nothing to translate."""
-    try:
-        return client.containers.get(socket.gethostname()).attrs or {}
-    except Exception:  # noqa: BLE001 - a name docker does not know just means "no mapping"
-        return {}
-
-
 def _reconcile_strata_config() -> None:
     """Once at startup, ensure the coexistence keys are in every Strata backend's run config.
 
@@ -97,7 +88,7 @@ def _reconcile_strata_config() -> None:
         client = services._docker_client()
         if client is None:
             return
-        own = _strata_own_attrs(client)
+        own = services.strata_own_attrs(client)
         for c in client.containers.list(all=True, filters={"label": f"ai-lab.engine={strata_engine.ENGINE}"}):
             path = strata_engine.run_config_path(c.attrs, own)
             if path is not None:
