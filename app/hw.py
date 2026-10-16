@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from collections import deque
@@ -909,6 +910,73 @@ def host_ram_available_gb() -> float:
         pass
     return 0.0
 
+
+
+def host_load() -> dict:
+    """Load average with the core count to read it against: {load1, load5, load15, cores, pct}.
+
+    /proc/loadavg is not namespaced, so inside this container it still reports the HOST's
+    figure, which is the one worth showing: the question is whether the box is saturated, not
+    whether this process is.
+
+    `cores` is carried alongside deliberately. A load of 6 means idle on 32 cores and
+    desperate on 4, and a bare number invites exactly the wrong conclusion. `pct` is load1
+    against cores, which is the form a reader can judge without doing arithmetic.
+    """
+    out = {"load1": 0.0, "load5": 0.0, "load15": 0.0, "cores": 0, "pct": 0.0, "ok": False}
+    try:
+        with open("/proc/loadavg", encoding="utf-8") as fh:
+            parts = fh.read().split()
+        out["load1"] = round(float(parts[0]), 2)
+        out["load5"] = round(float(parts[1]), 2)
+        out["load15"] = round(float(parts[2]), 2)
+        out["ok"] = True
+    except (OSError, ValueError, IndexError):
+        return out
+    cores = os.cpu_count() or 0
+    out["cores"] = cores
+    if cores:
+        out["pct"] = round(min(100.0, 100.0 * out["load1"] / cores), 1)
+    return out
+
+
+def host_swap_gb() -> tuple[float, float]:
+    """(used, total) swap in GiB from /proc/meminfo. (0.0, 0.0) when there is none.
+
+    Worth a line precisely because this box has none. With no swap the kernel has no slack:
+    a model sized a few GB too large is an OOM kill rather than a slow run, and the pinned
+    expert arena has nowhere to be pushed. A panel that silently omits swap lets a reader
+    assume a safety net that is not there.
+    """
+    total = free = 0.0
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("SwapTotal:"):
+                    total = int(line.split()[1]) / 1024 / 1024
+                elif line.startswith("SwapFree:"):
+                    free = int(line.split()[1]) / 1024 / 1024
+    except (OSError, ValueError, IndexError):
+        return (0.0, 0.0)
+    return (round(max(0.0, total - free), 1), round(total, 1))
+
+
+def host_disk_gb(path: Path | str) -> tuple[float, float]:
+    """(free, total) GiB for the filesystem holding `path`. (0.0, 0.0) if it cannot be read.
+
+    Deliberately NOT services.snapshot_models_dir(), which also walks the directory to count
+    and size every GGUF. That is the right thing once per page load and the wrong thing in a
+    one-second poll; this is a single statvfs.
+
+    The models volume is the filesystem worth watching rather than the container's own root:
+    it is where the weights land, it is the one that fills up, and on this box it is the NVMe
+    array that everything else shares.
+    """
+    try:
+        u = shutil.disk_usage(str(path))
+        return (round(u.free / 1024 ** 3, 1), round(u.total / 1024 ** 3, 1))
+    except OSError:
+        return (0.0, 0.0)
 
 # The arena probe is a docker exec, and the arena moves on the timescale of a model load,
 # not a poll - a 10 s TTL keeps it off the hot path without ever showing a stale load.

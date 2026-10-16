@@ -1,0 +1,120 @@
+{% from "_icons.html" import icon %}
+{#
+  The host row: load, memory, swap, disk. Sits directly under the power row and shares its
+  dark instrument styling, because the two are the same kind of reading - facts about the
+  machine rather than about a model - and splitting them visually would imply they are not.
+
+  Each card shows the number a DECISION is made on, which is not always the largest one
+  available. Memory shows what is available, not what is used, because the only question ever
+  asked of it here is "will the next model fit". Disk shows free for the same reason: weights
+  are 18-120 GB apiece, so a used-percentage that looks comfortable can still mean the next
+  download fails.
+
+  Swap gets a card even though this box has none, and that is the point. With no swap there is
+  no slack: a model sized a few GB past available RAM is an OOM kill rather than a slow run.
+  A row that omitted swap would let a reader assume a safety net that is not there.
+
+  Bars are drawn against the resource's own total, so the filled fraction is literally the
+  fraction consumed. The load bar is the exception and is drawn against core count, because
+  that is the only denominator that makes a load figure mean anything.
+#}
+{% macro bar(pct, crit, warn) -%}
+{# Clamped here rather than inline: an unclamped width silently renders a bar wider than its
+   track, and a load over 100% of cores is a normal reading, not an error. #}
+{% set w = 0 if pct is none else (100 if pct > 100 else (0 if pct < 0 else pct)) %}
+<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+  <div class="h-full rounded-full transition-[width] duration-700 ease-out
+              {% if crit %}bg-red-400{% elif warn %}bg-amber-400{% else %}bg-emerald-400/80{% endif %}"
+       style="width: {{ '%.1f' % w }}%"></div>
+</div>
+{%- endmacro %}
+
+{% macro shell(crit, warn) -%}
+rounded-xl border px-4 py-3 transition-colors duration-500
+{% if crit %}border-red-500/50 bg-red-950/30
+{% elif warn %}border-amber-500/40 bg-amber-950/20
+{% else %}border-slate-800 bg-slate-950/95{% endif %}
+{%- endmacro %}
+
+<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+
+  {# ---------------- CPU load ---------------- #}
+  <div class="{{ shell(host.load_crit, host.load_warn) }}">
+    <div class="flex items-baseline gap-2">
+      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
+                   {% if host.load_crit %}text-red-300{% elif host.load_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</span>
+      <span class="text-xs text-slate-500">load</span>
+      {% if host.load_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">saturated</span>
+      {% elif host.load_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">busy</span>{% endif %}
+    </div>
+    {{ bar(host.load.pct, host.load_crit, host.load_warn) }}
+    <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
+      <span title="1, 5 and 15 minute averages">{{ '%.2f' % host.load.load5 }} · {{ '%.2f' % host.load.load15 }}</span>
+      <span>{{ '%.0f' % host.load.pct }}% of {{ host.load.cores }} cores</span>
+    </div>
+  </div>
+
+  {# ---------------- memory ---------------- #}
+  <div class="{{ shell(host.ram_crit, host.ram_warn) }}">
+    <div class="flex items-baseline gap-2">
+      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
+                   {% if host.ram_crit %}text-red-300{% elif host.ram_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % host.ram_avail }}</span>
+      <span class="text-xs text-slate-500">GB RAM free</span>
+      {% if host.ram_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">no headroom</span>
+      {% elif host.ram_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">tight</span>{% endif %}
+    </div>
+    {{ bar(host.ram_used_pct, host.ram_crit, host.ram_warn) }}
+    <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
+      <span>{{ '%.0f' % host.ram_total }} GB total</span>
+      {# The arena is called out because it is the one tenant that does not give itself back. #}
+      <span {% if host.arena > 0 %}title="Strata's pinned expert arena. Unlike page cache this is not reclaimable - the kernel taking its pages back is what suspends KFD queues."{% endif %}>
+        {% if host.arena > 0 %}{{ '%.0f' % host.arena }} GB pinned by strata{% else %}nothing pinned{% endif %}
+      </span>
+    </div>
+  </div>
+
+  {# ---------------- swap ---------------- #}
+  <div class="{{ shell(false, host.swap_warn) }}">
+    <div class="flex items-baseline gap-2">
+      {% if host.swap_total <= 0 %}
+      <span class="font-mono text-3xl font-semibold tabular-nums leading-none text-slate-100">none</span>
+      <span class="text-xs text-slate-500">swap</span>
+      {% else %}
+      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
+                   {% if host.swap_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % host.swap_used }}</span>
+      <span class="text-xs text-slate-500">GB swap used</span>
+      {% if host.swap_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">swapping</span>{% endif %}
+      {% endif %}
+    </div>
+    {% if host.swap_total > 0 %}
+      {{ bar(100.0 * host.swap_used / host.swap_total, false, host.swap_warn) }}
+      <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
+        <span>{{ '%.0f' % host.swap_total }} GB total</span>
+        <span>{{ '%.0f' % (100.0 * host.swap_used / host.swap_total) }}%</span>
+      </div>
+    {% else %}
+      {# No bar: there is nothing to fill. The line says what the absence means instead. #}
+      <div class="mt-2 h-1.5 w-full rounded-full bg-slate-800/50"></div>
+      <div class="mt-1.5 text-[10px] text-slate-500"
+           title="With no swap the kernel has no slack. A model sized past available RAM is an OOM kill, not a slow run.">
+        no overflow — oversizing RAM means an OOM kill
+      </div>
+    {% endif %}
+  </div>
+
+  {# ---------------- disk ---------------- #}
+  <div class="{{ shell(host.disk_crit, host.disk_warn) }}">
+    <div class="flex items-baseline gap-2">
+      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
+                   {% if host.disk_crit %}text-red-300{% elif host.disk_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % host.disk_free }}</span>
+      <span class="text-xs text-slate-500">GB free</span>
+      {% if host.disk_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">low</span>
+      {% elif host.disk_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">filling</span>{% endif %}
+    </div>
+    {{ bar(host.disk_used_pct, host.disk_crit, host.disk_warn) }}
+    <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
+      <span>{{ '%.0f' % host.disk_total }} GB total</span>
+      <span class="truncate pl-2 font-mono" title="{{ host.disk_path }}">{{ host.disk_path }}</span>
+    </div>
+  </div>
+</div>

@@ -749,6 +749,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     ctx.update(await _hero_context())
     ctx.update(await asyncio.to_thread(_gpu_strip_context))
     ctx.update(_power_context())
+    ctx.update(_host_stats_context())
     ctx.update(_power_settings_context())
     return templates.TemplateResponse("dashboard.html", ctx)
 
@@ -825,6 +826,70 @@ def power_partial(request: Request) -> HTMLResponse:
     ctx = {"request": request}
     ctx.update(_power_context())
     return templates.TemplateResponse("_power.html", ctx)
+
+
+# Thresholds for the host row. Chosen against what this box actually does rather than generic
+# sysadmin numbers: the things that go wrong here are a model sized past available RAM (an OOM
+# kill, because there is no swap) and a models volume filling up mid-download (weights are
+# 18-120 GB a piece, so "a few GB free" is already too late).
+_LOAD_WARN_PCT = 80.0
+_LOAD_CRIT_PCT = 100.0
+_RAM_WARN_FREE_GB = 16.0
+_RAM_CRIT_FREE_GB = 8.0
+_DISK_WARN_FREE_GB = 150.0
+_DISK_CRIT_FREE_GB = 60.0
+
+
+def _host_stats_context() -> dict:
+    """The host row: load, memory, swap, disk, at the cadence of the other meters.
+
+    Four cheap reads (two /proc files, one statvfs, one cached cgroup probe), so this can sit
+    on the same 1 s poll as the power row without costing anything. Deliberately NOT
+    snapshot_models_dir(), which walks every GGUF to size it.
+
+    Each card carries the figure a decision is made on, not the biggest number available:
+    memory shows what is AVAILABLE rather than what is used, because the question is always
+    "will the next model fit"; disk shows free rather than used, for the same reason.
+    """
+    load = hw.host_load()
+    swap_used, swap_total = hw.host_swap_gb()
+    free_gb, total_gb = hw.host_disk_gb(settings.models_dir)
+    ram_total = hw.host_ram_gb()
+    ram_avail = hw.host_ram_available_gb()
+    arena = hw.strata_arena_gb()
+
+    return {"host": {
+        "load": load,
+        "load_warn": load["pct"] >= _LOAD_WARN_PCT and load["pct"] < _LOAD_CRIT_PCT,
+        "load_crit": load["pct"] >= _LOAD_CRIT_PCT,
+
+        "ram_total": ram_total,
+        "ram_avail": ram_avail,
+        "ram_used_pct": round(100.0 * (ram_total - ram_avail) / ram_total, 1) if ram_total else 0.0,
+        "arena": arena,
+        "ram_warn": 0 < ram_avail < _RAM_WARN_FREE_GB and ram_avail >= _RAM_CRIT_FREE_GB,
+        "ram_crit": 0 < ram_avail < _RAM_CRIT_FREE_GB,
+
+        "swap_used": swap_used,
+        "swap_total": swap_total,
+        # Swapping at all on this box is a problem rather than a cushion: the pinned expert
+        # arena cannot be paged out, so pressure lands on everything else.
+        "swap_warn": swap_total > 0 and swap_used > 0.5,
+
+        "disk_free": free_gb,
+        "disk_total": total_gb,
+        "disk_used_pct": round(100.0 * (total_gb - free_gb) / total_gb, 1) if total_gb else 0.0,
+        "disk_warn": 0 < free_gb < _DISK_WARN_FREE_GB and free_gb >= _DISK_CRIT_FREE_GB,
+        "disk_crit": 0 < free_gb < _DISK_CRIT_FREE_GB,
+        "disk_path": str(settings.models_dir),
+    }}
+
+
+@app.get("/hoststats", response_class=HTMLResponse)
+def host_stats_partial(request: Request) -> HTMLResponse:
+    ctx = {"request": request}
+    ctx.update(_host_stats_context())
+    return templates.TemplateResponse("_host_stats.html", ctx)
 
 
 def _power_settings_context(saved: bool = False) -> dict:
