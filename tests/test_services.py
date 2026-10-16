@@ -137,6 +137,76 @@ class TestSoloPath:
         assert s._outside_slots("strata", {"newest": ""}) is False
 
 
+class TestSoloContextInUse:
+    """The headline context readout must follow the solo path, not just the slots.
+
+    A solo conversation lives in no slot, so summing only the slots left the hero's
+    "context in use" flat at zero for the whole of a solo generation.
+    """
+    def _speed(self, monkeypatch, r_over, raw_slots, engine="strata", seed=None):
+        import asyncio
+        import time as _time
+        from app.services import speed as sp
+        for store in (sp._speed_cache, sp._rates_cache, sp._last_slots,
+                      sp._last_solo, sp._settled_task, sp._tps_history,
+                      sp._ctx_history):
+            store.clear()
+        r = rates(**{"open_task": "t1", "newest": "gen", "cur_gen_tps": 40.0,
+                     "cur_gen_tokens": 50, **r_over})
+        sp._rates_cache["c"] = (_time.time(), r)
+        monkeypatch.setattr(sp, "engine_for", lambda name: engine)
+
+        async def fake_slots(name, port, model):
+            return raw_slots
+        monkeypatch.setattr(sp, "_slot_states", fake_slots)
+        if seed is not None:
+            seed(sp)
+        return sp, asyncio.run(sp.inference_speed("c", 8080, "m1"))
+
+    def test_solo_generation_counts_toward_pool_context(self, monkeypatch):
+        raw = [{"id": i, "n_ctx": 4096, "is_processing": False,
+                "n_prompt_tokens": 0} for i in range(4)]
+        sp, out = self._speed(monkeypatch, {"cur_prompt_tokens": 1000}, raw)
+        assert out.state == "generating"
+        assert out.solo is not None and out.solo.ctx_used == 1050
+        assert out.ctx_used == 1050
+        assert out.ctx_total == 4096 * 4
+        assert sp._ctx_history["c"][-1][1] == 1050.0
+
+    def test_idle_solo_row_is_history_not_pool_context(self, monkeypatch):
+        import time as _time
+        raw = [{"id": i, "n_ctx": 4096, "is_processing": False,
+                "n_prompt_tokens": 0} for i in range(4)]
+
+        def seed(sp):
+            sp._last_solo["c/m1"] = (_time.time(), 40.0, 1000, 50)
+        sp, out = self._speed(
+            monkeypatch,
+            {"open_task": None, "newest": "", "last_gen_tps": 40.0,
+             "last_gen_tokens": 50}, raw, seed=seed)
+        assert out.state == "idle"
+        assert out.solo is not None and out.solo.ctx_used == 1050
+        assert out.ctx_used == 0  # the dimmed row's 1050 is history, not resident KV
+
+    def test_llama_pool_context_unchanged(self, monkeypatch):
+        import asyncio
+        import time as _time
+        from app.services import speed as sp
+        for store in (sp._speed_cache, sp._rates_cache, sp._last_slots,
+                      sp._last_solo, sp._settled_task, sp._tps_history,
+                      sp._ctx_history):
+            store.clear()
+        sp._rates_cache["c"] = (_time.time(), rates())
+        monkeypatch.setattr(sp, "engine_for", lambda name: "llama")
+
+        async def fake_props(name, port, model):
+            return {"n_ctx": 8192, "total_slots": 1}
+        monkeypatch.setattr(sp, "_props_state", fake_props)
+        out = asyncio.run(sp.inference_speed("c", 8080, "m1"))
+        assert out.solo is None
+        assert out.ctx_used == 0 and out.ctx_total == 8192
+
+
 class TestPruneSlotState:
     def test_only_live_slots_survive(self, clean_slot_state):
         s._speed_prev.update({"c#0": (1, 1, 1, True), "c#1": (1, 1, 1, True),

@@ -894,6 +894,13 @@ async def inference_speed(container_name: str, internal_port: int | None,
     ctx_cached = sum(sl.ctx_cached for sl in slots)
     per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
     ctx_total = per_slot_ctx * len(slots)
+    if solo is not None and solo.state in ("prefill", "generating"):
+        # The solo conversation holds KV too - it just lives outside the batch slots, so
+        # summing slots alone left the headline readout and the sparkline flat at zero for
+        # the whole of a solo generation. Only counted while it is actually running: the
+        # dimmed idle row shows the last pass, which is history, not resident KV.
+        ctx_used += solo.ctx_used
+        ctx_cached += solo.ctx_cached
 
     # Idle samples are recorded as zero rather than skipped: the gaps between requests are part
     # of the shape, and a line drawn only from busy moments would imply continuous work.
