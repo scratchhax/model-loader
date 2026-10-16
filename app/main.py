@@ -180,49 +180,6 @@ def palette() -> dict:
     return {"items": items}
 
 
-@app.get("/classic", response_class=HTMLResponse)
-async def dashboard_classic(request: Request) -> HTMLResponse:
-    """The counter-led overview this replaced. Kept reachable for one release in case the new
-    one is missing something; delete it, and dashboard_classic.html, once nobody wants it."""
-    snap = services.snapshot_models_dir()
-    backends = await services.snapshot_llama_backends()
-    sections = ini.list_sections()
-    # recent downloads: successful ones from history, deduped by filename
-    rows = db.recent_downloads(20)
-    seen: set[str] = set()
-    recent: list[dict] = []
-    owners: set[str] = set()
-    for r in rows:
-        if r["status"] != "done":
-            continue
-        if r["filename"] in seen:
-            continue
-        seen.add(r["filename"])
-        owner = (r["repo_id"].split("/", 1)[0] if "/" in r["repo_id"] else "") if r["repo_id"] else ""
-        if owner:
-            owners.add(owner)
-        recent.append({
-            "filename": r["filename"],
-            "size_h": human_bytes(int(r["total_bytes"] or 0)),
-            "owner": owner,
-        })
-        if len(recent) >= 5:
-            break
-    avatars = await hf.owner_avatars(list(owners)) if owners else {}
-    for r in recent:
-        r["avatar_url"] = avatars.get(r["owner"], "")
-    active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
-    return templates.TemplateResponse("dashboard_classic.html", {
-        "request": request,
-        "snap": snap,
-        "backends": backends,
-        "stats": _stats_by_name(),
-        "ini_sections": sections,
-        "recent_downloads": recent,
-        "active_downloads": active,
-    })
-
-
 # ---------- Mission control (v2 overview) ----------
 
 def _host_line() -> str:

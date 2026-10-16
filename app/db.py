@@ -267,13 +267,6 @@ def record_download(*, repo_id: str, filename: str, dest_path: str, total_bytes:
         )
 
 
-def recent_downloads(limit: int = 50) -> list[sqlite3.Row]:
-    with _LOCK, _conn() as c:
-        return list(c.execute(
-            "SELECT * FROM download_history ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall())
-
-
 def owner_by_filename() -> dict[str, str]:
     """filename -> owner, from successful downloads."""
     with _LOCK, _conn() as c:
