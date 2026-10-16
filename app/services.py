@@ -2411,6 +2411,27 @@ def _rates_from_log_strata(name: str) -> dict:
     return out
 
 
+
+
+def _outside_slots(engine: str, r: dict) -> bool:
+    """Is the engine working on something that lives in no slot?
+
+    Strata runs a LONE request on its solo path - the fastest route, the one that keeps its MTP
+    drafts - and only moves a conversation into a batch slot when a second request arrives. So
+    with parallel > 1 every slot reports is_processing=false for the whole of a single request,
+    while /metrics says live.running=1 and live.outside_slots=1 and the log reader says
+    newest='generating'.
+
+    Reading busy-ness from the slots alone was therefore wrong the moment slots were enabled:
+    the settled-task guard concluded the request had finished mid-generation, dropped the slot
+    read, and the panel fell to the idle branch - grey sparklines, an IDLE badge and the previous
+    request's frozen numbers, for every request. Measured during a live generation:
+    is_processing=[False,False,False,False] with running=1, outside_slots=1.
+
+    The slot strip stays honest about this: none of them holds the work, and it says so. Only
+    the headline state comes from the engine.
+    """
+    return engine == "strata" and bool(r.get("newest"))
 def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
     """Strata's /slots mapped onto SlotSpeed, filling only what it actually reports.
 
@@ -2572,7 +2593,10 @@ async def inference_speed(container_name: str, internal_port: int | None,
             raw_slots = await _slot_states(container_name, internal_port, model_id)
     elif _settled_task.get(container_name) != open_task:
         raw_slots = await _slot_states(container_name, internal_port, model_id)
-        if not any(s.get("is_processing") for s in raw_slots):
+        # A Strata solo request occupies no slot, so is_processing is false everywhere while
+        # it generates. See _outside_slots: trusting that here marked the task settled
+        # mid-generation and froze the panel at idle for the rest of it.
+        if not _outside_slots(_engine, r) and not any(s.get("is_processing") for s in raw_slots):
             # /slots is authoritative. Record the disagreement so a release line that never
             # arrived does not keep this backend awake for the rest of the process's life.
             _settled_task[container_name] = open_task
@@ -2609,8 +2633,19 @@ async def inference_speed(container_name: str, internal_port: int | None,
 
     generating = [sl for sl in slots if sl.state == "generating"]
     prefilling = [sl for sl in slots if sl.state == "prefill"]
-    busy = bool(generating or prefilling)
-    state = "generating" if generating else ("prefill" if prefilling else "idle")
+    # Work on the solo path belongs to no slot, so the slot lists are empty while the engine is
+    # busy (see _outside_slots). The strip stays accurate - none of them holds it - but the
+    # headline state has to come from the engine or the panel reports idle mid-generation.
+    outside = not generating and not prefilling and _outside_slots(_engine, r)
+    busy = bool(generating or prefilling or outside)
+    if generating:
+        state = "generating"
+    elif prefilling:
+        state = "prefill"
+    elif outside:
+        state = "prefill" if r.get("newest") == "prefill" else "generating"
+    else:
+        state = "idle"
 
     # The machine's rate, not one slot's. Summing is the honest aggregate: slots decode in the
     # same batch, so their rates add up to what the box is actually producing.
