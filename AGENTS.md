@@ -13,7 +13,7 @@ Model Loader: FastAPI + HTMX + Alpine + Tailwind (all via CDN, no frontend build
 
 ## Architecture
 
-- `app/main.py` (~3.9k lines) holds **all ~50 routes in one file, ordered to match the nav**. `services.py` (docker SDK, OpenWebUI reconciler) and `autoconfig.py` (VRAM fit math) are the other large modules. Docs' file trees lag behind `app/` — trust the directory.
+- Routes live in `app/routers/` — one module per nav section (overview, power, models, settings, search, downloads, config, containers, prompts, benchmark, strata), each an `APIRouter` included by `app/main.py` at the section's old position. `main.py` (~650 lines) keeps only app-level plumbing: factory, readonly middleware, startup, palette, badges, benchmark run-detail charts, Router-tab endpoints. Shared response plumbing is `app/web.py` (templates + `_toast`/`_QUEUED_CHIP`/`_blocked_chip`); shared placement math is `app/fit.py`. `services.py` (docker SDK, OpenWebUI reconciler) and `autoconfig.py` (VRAM fit math) are the other large modules. Docs' file trees lag behind `app/` — trust the directory.
 - Templates: underscore prefix = HTMX partial fragment; pages extend `base.html`. Polling pages use `hx-trigger="every 2s"` partial swaps.
 - sqlite schema is inline in `db.init()` — new tables/columns go there.
 - `hw.py` sampler is a plain daemon thread over the sync docker SDK; this is deliberate, don't asyncio-ify it (see `docs/ARCHITECTURE.md`).

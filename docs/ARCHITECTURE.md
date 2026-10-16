@@ -16,7 +16,10 @@ Everything ships as one Docker image. Deps in `requirements.txt` are pinned. Pyt
 
 ```
 app/
-  main.py             FastAPI routes — one file, ~50 endpoints. Order matches nav.
+  main.py             FastAPI app factory, middleware, startup, Router-tab endpoints.
+  routers/            One APIRouter module per nav section, included by main.py.
+  web.py              Shared Jinja env + response plumbing (toast/chip builders).
+  fit.py              VRAM/RAM placement math inputs shared by search estimates and config.
   services.py         docker SDK wrapper, models-dir helpers, OpenWebUI reconciler.
   autoconfig.py       KV cache math, preset picker, VRAM fit, MoE offload strategy.
   hw.py               Background sampler thread, per-container stats cache.
