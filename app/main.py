@@ -11,37 +11,21 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 
 from . import autoconfig
 from . import telemetry
-from . import bench, db, gguf_meta, gpu_procs, hf, hw, ini, services, vram_live
+from . import db, gguf_meta, gpu_procs, hf, hw, ini, services, vram_live
 from . import strata as strata_engine
 from . import strata_models
 from . import router_api
 from .config import settings
 from .downloader import manager
+from .routers import benchmark as benchmark_router
+from .routers import settings as settings_router
 from .utils import human_bytes, shard_key
+from .web import templates
 
 app = FastAPI(title="Model Loader")
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
-templates.env.globals["hue"] = lambda s: sum(ord(c) for c in (s or "")) % 360
-templates.env.globals["strata_only"] = strata_models.strata_only
-templates.env.globals["badge_categories"] = db.BADGE_CATEGORIES
-templates.env.globals["badge_labels"] = db.BADGE_LABELS
-
-
-def _fmt_ts(v) -> str:
-    """Epoch seconds -> local "2026-09-09 01:23". Empty for anything unparseable, so a
-    missing timestamp renders as nothing rather than as 1970."""
-    from datetime import datetime
-    try:
-        return datetime.fromtimestamp(float(v)).strftime("%Y-%m-%d %H:%M")
-    except (TypeError, ValueError, OSError):
-        return ""
-
-
-templates.env.filters["ts"] = _fmt_ts
 
 
 # Paths a read-only instance may still write to: its own router settings, which live in its own
@@ -1407,23 +1391,7 @@ async def models_check_updates(request: Request) -> HTMLResponse:
 
 # ---------- Settings ----------
 
-@app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("settings.html", {"request": request, "token": db.get_setting("hf_token", ""), "flash": None})
-
-
-@app.post("/settings", response_class=HTMLResponse)
-async def settings_save(request: Request, hf_token: str = Form(""), action: str = Form("save")) -> HTMLResponse:
-    hf_token = hf_token.strip()
-    db.set_setting("hf_token", hf_token)
-    flash = {"ok": True, "msg": "Saved."}
-    if action == "test":
-        try:
-            ok, msg = await hf.validate_token(hf_token)
-            flash = {"ok": ok, "msg": f"Saved. {msg}"}
-        except Exception as e:  # noqa: BLE001
-            flash = {"ok": False, "msg": f"Saved, but test failed: {e}"}
-    return templates.TemplateResponse("settings.html", {"request": request, "token": hf_token, "flash": flash})
+app.include_router(settings_router.router)
 
 
 # ---------- Search ----------
@@ -3148,70 +3116,7 @@ def prompts_body(pid: int) -> HTMLResponse:
 
 # ---------------------------------------------------------------- benchmark
 
-def _bench_ctx(request: Request, flash: str = "") -> dict:
-    """Everything the benchmark page needs. Sections are offered rather than GGUF files:
-    a benchmark runs against an alias the router can serve, which is what a section is."""
-    return {
-        "request": request,
-        "sections": ini.section_names(),
-        "sweep_args": {n: " ".join(bench.sweep_args_for_section(n)) for n in ini.section_names()},
-        "prompts": db.list_prompts(),
-        "backends": services._effective_container_names(),
-        "max_tokens_default": bench.DEFAULT_MAX_TOKENS,
-        "max_tokens_ceiling": bench.MAX_TOKENS_CEILING,
-        "job": bench.state(),
-        "runs": db.bench_runs(limit=15),
-        "flash": flash,
-    }
-
-
-@app.get("/benchmark", response_class=HTMLResponse)
-def benchmark_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("benchmark.html", _bench_ctx(request))
-
-
-@app.post("/benchmark/start", response_class=HTMLResponse)
-def benchmark_start(request: Request,
-                    backend: str = Form(...),
-                    aliases: list[str] = Form(default=[]),
-                    prompt_ids: list[int] = Form(default=[]),
-                    reps: int = Form(3),
-                    max_tokens: int = Form(bench.DEFAULT_MAX_TOKENS)) -> HTMLResponse:
-    ok, err = bench.start(backend=backend, aliases=aliases, prompt_ids=prompt_ids,
-                          reps=reps, max_tokens=max_tokens)
-    return templates.TemplateResponse("_bench_progress.html", {
-        "request": request, "job": bench.state(), "flash": "" if ok else err,
-    })
-
-
-@app.post("/benchmark/sweep", response_class=HTMLResponse)
-def benchmark_sweep(request: Request,
-                    backend: str = Form(...),
-                    aliases: list[str] = Form(default=[]),
-                    n_prompt: int = Form(512),
-                    n_gen: int = Form(128),
-                    depths: str = Form("0,4096,16384"),
-                    reps: int = Form(3)) -> HTMLResponse:
-    ok, err = bench.start_sweep(backend=backend, aliases=aliases, n_prompt=n_prompt,
-                                n_gen=n_gen, depths=depths, reps=reps)
-    return templates.TemplateResponse("_bench_progress.html", {
-        "request": request, "job": bench.state(), "flash": "" if ok else err,
-    })
-
-
-@app.get("/benchmark/progress", response_class=HTMLResponse)
-def benchmark_progress(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("_bench_progress.html", {
-        "request": request, "job": bench.state(), "flash": "",
-    })
-
-
-@app.post("/benchmark/cancel", response_class=HTMLResponse)
-def benchmark_cancel(request: Request) -> HTMLResponse:
-    bench.cancel()
-    return templates.TemplateResponse("_bench_progress.html", {
-        "request": request, "job": bench.state(), "flash": "",
-    })
+app.include_router(benchmark_router.router)
 
 
 @app.post("/badge", response_class=HTMLResponse)
@@ -3243,15 +3148,6 @@ def badge_remove(request: Request,
         "request": request, "alias": alias, "badges": db.badges_for(alias),
         "run_id": run_id, "badge_err": "",
         "collapsible": bool(collapsible), "open": True,
-    })
-
-
-@app.get("/benchmark/banner", response_class=HTMLResponse)
-def benchmark_banner(request: Request) -> HTMLResponse:
-    """Site-wide "a benchmark is running" strip. Polled from every page, so it stays cheap:
-    it reads in-memory job state and touches neither docker nor the database."""
-    return templates.TemplateResponse("_bench_banner.html", {
-        "request": request, "job": bench.state(),
     })
 
 
