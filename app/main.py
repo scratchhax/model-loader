@@ -384,7 +384,8 @@ async def _hero_context() -> dict:
         return {"speed": None, "hero_model": "", "hero_backend": "",
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
-                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0, "hero_mtp": None,
+                "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0,
+                "pp_spark": "", "pp_peak": 0.0, "pp_samples": 0, "hero_mtp": None,
                 "hero_loading": False, "hero_loading_s": 0.0,
                 "hero_foreign": _hero_foreign_only(), "hero_asleep": False,
                 "hero_others": []}
@@ -514,6 +515,9 @@ async def _hero_context() -> dict:
     # only honest options are a stated scale or a meaningless one.
     tps = services.tps_history(b.name)
     tps_peak = max(tps) if tps else 0.0
+    # Sparse by construction: one point per completed prefill, not one per poll.
+    pp = services.prefill_history(b.name)
+    pp_peak = max(pp) if pp else 0.0
     return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
             "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
@@ -524,6 +528,10 @@ async def _hero_context() -> dict:
                           else hw.sparkline(tps, tps_peak or None) if len(tps) > 2 else ""),
             "tps_peak": 0.0 if hero_loading else tps_peak,
             "tps_samples": 0 if hero_loading else len(tps),
+            "pp_spark": ("" if hero_loading
+                         else hw.sparkline(pp, pp_peak or None) if len(pp) > 2 else ""),
+            "pp_peak": 0.0 if hero_loading else pp_peak,
+            "pp_samples": 0 if hero_loading else len(pp),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
             "hero_foreign": hero_foreign,

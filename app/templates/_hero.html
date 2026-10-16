@@ -160,7 +160,11 @@
    engines and only one holds the cards at a time - so one extra column covers it. #}
 {% set hero_hit = speed.expert_hit_pct if speed and speed.expert_hit_pct is not none else none %}
     <div class="mt-4 grid {{ 'grid-cols-4' if (hero_mtp or hero_hit is not none) else 'grid-cols-3' }} gap-3">
-      {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n, tip='') %}
+      {# `spark_unit` exists because the two lines count different things: "out" is sampled on a
+         timer, "in" is one point per prompt. Calling both "samples" in the peak tooltip would
+         make the sparse line look like a dropped-out continuous one. #}
+      {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n, tip='',
+                       spark_unit='samples') %}
       <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
                   {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}"
            {% if tip %}title="{{ tip }}"{% endif %}>
@@ -174,7 +178,7 @@
           {% if spark_peak %}
           {# The scale is stated rather than implied: this line is drawn against its own window
              peak, because no fixed ceiling is meaningful across a dense 27B and a 4B-active MoE. #}
-          <span class="text-[9px] tabular-nums text-slate-600" title="the sparkline is drawn against this peak, over the last {{ spark_n }} samples">peak {{ '%.0f' % spark_peak }}</span>
+          <span class="text-[9px] tabular-nums text-slate-600" title="the sparkline is drawn against this peak, over the last {{ spark_n }} {{ spark_unit }}">peak {{ '%.0f' % spark_peak }}</span>
           {% endif %}
         </div>
         {% if spark %}
@@ -189,8 +193,16 @@
       {{ readout('%.1f' % speed.gen_tps if (speed and speed.gen_tps) else '—', 'tok/s', 'out',
                  speed and speed.state == 'generating', 'emerald',
                  tps_spark, tps_peak, tps_samples) }}
+      {# The "in" line's sparkline is SPARSE where "out" above it is continuous: one point per
+         completed prefill rather than one per poll. A prefill happens once per request and the
+         only trustworthy figure is the one the engine reports afterwards, so sampling it on the
+         poll would redraw the same finished prompt twenty times and turn it into a plateau.
+         Read it as "the last N prompts, in order", which is where a long prompt dragging the
+         rate down becomes visible. #}
       {{ readout('%.0f' % speed.prefill_tps if (speed and speed.prefill_tps) else '—', 'tok/s', 'in',
-                 speed and speed.state == 'prefill', 'sky', '', 0, 0) }}
+                 speed and speed.state == 'prefill', 'sky',
+                 pp_spark, pp_peak, pp_samples,
+                 'one point per prompt read, newest last - not a continuous line like out', 'prompts') }}
       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
                  false, 'slate', '', 0, 0) }}
 

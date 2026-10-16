@@ -2130,6 +2130,49 @@ def _record_tps(container_name: str, value: float) -> None:
         del hist[:len(hist) - _TPS_HISTORY_MAX]
 
 
+# Prefill is NOT a sustained rate the way generation is, so its history is kept separately and
+# sparsely: one reading per completed request, not one per poll.
+#
+# Generation can be sampled continuously - a slot decoding for twenty seconds gives twenty
+# honest samples of what the machine is doing right now. A prefill happens once, and the only
+# trustworthy figure for it is the one the engine reports afterwards (read tokens over
+# prompt_ms). Sampling that on a one-second poll would redraw the same completed request twenty
+# times and turn one prompt into a plateau.
+#
+# So the series here is "the rate of each prefill, in order", which is a different and more
+# useful shape: it shows long prompts dragging the rate down across a session, where a
+# zero-filled line would mostly draw zeros.
+_pp_history: dict[str, list[tuple[float, float]]] = {}
+
+
+def prefill_history(container_name: str) -> list[float]:
+    """Completed prefill rates for a backend, oldest first, one per request."""
+    return [v for _ts, v in _pp_history.get(container_name, [])]
+
+
+def _record_prefill_tps(container_name: str, value: float) -> None:
+    """Record a COMPLETED prefill rate, once.
+
+    `value` must be the engine's own finished figure (last_pp_tps), never the in-progress one:
+    a rate measured part way through a prefill is an artefact of where the poll landed.
+
+    Deduped on the value rather than on a request id, because no request id survives into this
+    dict - `open_task` is None the moment the request finishes, which is exactly when the
+    completed rate becomes available. The cost of that choice is that two consecutive requests
+    whose rates round to the same figure collapse into one point. On rates like 640.9 and
+    2756.2 that is rare, and a lost point in a sparkline is a far smaller lie than a plateau.
+    """
+    v = round(float(value or 0.0), 1)
+    if v <= 0:
+        return
+    hist = _pp_history.setdefault(container_name, [])
+    if hist and hist[-1][1] == v:
+        return
+    hist.append((time.time(), v))
+    if len(hist) > _TPS_HISTORY_MAX:
+        del hist[:len(hist) - _TPS_HISTORY_MAX]
+
+
 async def _slot_states(container_name: str, internal_port: int, model_id: str) -> list[dict]:
     """Every slot the loaded model has, in index order, or [] if they cannot be read.
 
@@ -2584,6 +2627,8 @@ async def inference_speed(container_name: str, internal_port: int | None,
     # Idle samples are recorded as zero rather than skipped: the gaps between requests are part
     # of the shape, and a line drawn only from busy moments would imply continuous work.
     _record_tps(container_name, gen_tps if state == "generating" else 0.0)
+    # The completed figure only, so one point per request. See _record_prefill_tps.
+    _record_prefill_tps(container_name, r["last_pp_tps"])
 
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
