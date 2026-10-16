@@ -4,7 +4,9 @@ Model Loader: FastAPI + HTMX + Alpine + Tailwind (all via CDN, no frontend build
 
 ## Commands
 
-- There are **no tests, no lint, no typecheck, and no CI**. Don't invent verification commands; correctness is manual ("production of one").
+- Tests: `python3 -m pytest` from the repo root (single file: `python3 -m pytest tests/test_ini.py`). Dev-only deps in `requirements-dev.txt` (`pip install -r requirements-dev.txt`); pytest is deliberately NOT in `requirements.txt` — the shipped image stays lean and the Dockerfile only copies `app/`.
+- **Every new feature ships with unit tests** (repo rule). Write them characterization-style: pin what the code does today. If a test surfaces a latent bug, report it, don't silently fix it. Tests need no docker and no network — `tests/conftest.py`'s `ini_env` fixture redirects the `settings` singleton's paths to tmp dirs; monkeypatch `app.utils.docker.from_env` for docker-touching code.
+- Still no lint, no typecheck, no CI. The pytest suite is the only automated gate; run it before every PR and paste the output in the PR description.
 - Deploy/build: run compose from the **parent compose project dir** (`~/ai-lab`), not this repo — this repo is symlinked in as `./model_loader`. `bootstrap.sh` inserts the service into an existing compose file (idempotent, backs it up first).
 - Local dev: `pip install -r requirements.txt && uvicorn app.main:app --reload --port 8090`. Defaults in `app/config.py` are container paths (`/models`, `/data`) — override `MODELS_DIR`, `MODELS_INI_PATH`, `DATA_DIR` for host runs.
 - One-shot layout migration (idempotent): `docker exec model-loader python3 -m app.migrate_layout`.
