@@ -1927,6 +1927,8 @@ class InferenceSpeed:
     # thing generating has no bar at all. None on every other engine and whenever the work
     # IS in a slot.
     solo: "SlotSpeed | None" = None
+    # When the solo figures were last live, so an idle solo row can date what it is showing.
+    solo_last_ts: float = 0.0
     # Strata only: the share of routed experts served from the GPU's cache on the last request,
     # which its `done:` line reports. There is no llama.cpp equivalent - llama has no expert
     # cache - so this is None on every other engine and the tile is simply absent.
@@ -2098,6 +2100,12 @@ _props_cache: dict[str, tuple[float, dict]] = {}
 # Last per-slot context figures seen while busy, so the strip survives going idle without a
 # /slots read. One (ctx_used, ctx_total) per slot, in index order; the length IS the slot count.
 _last_slots: dict[str, list[tuple[int, int]]] = {}
+# The last SOLO pass, so its row stays on screen when the solo path is empty. /metrics'
+# requests list carries no solo/batch marker - the engine does not say which route a finished
+# request took - so remembering it here is the only way to show the last SOLO figure rather
+# than the last figure. (ts, gen_tps, prompt_tokens, gen_tokens); the last live sample before
+# a pass finishes is its final one, so no completion hook is needed.
+_last_solo: dict[str, tuple[float, float, int, int]] = {}
 
 
 def _evict_other_models(cache: dict, key: str) -> None:
@@ -2657,28 +2665,46 @@ async def inference_speed(container_name: str, internal_port: int | None,
     else:
         state = "idle"
 
-    # The solo pass gets its own row because none of the slot rows holds it: Strata runs a
-    # lone request outside the batch slots (see _outside_slots), so without this the one
-    # thing generating has no bar at all - just four idle slot rows and a headline.
+    # The solo path gets its own row because none of the slot rows holds its request: Strata
+    # runs a lone request outside the batch slots (see _outside_slots), so without this the
+    # one thing generating has no bar at all - just four idle slot rows and a headline. The
+    # row is present whenever Strata has batch slots, showing the last solo pass dimmed when
+    # the path is empty: the strip resizing on every solo-to-batch hand-off was more
+    # distracting than a row that is idle half the time.
     solo = None
-    if outside:
-        prompt_tok = int(r.get("cur_prompt_tokens") or 0)
-        gen_tok = int(r.get("cur_gen_tokens") or 0)
-        solo = SlotSpeed(
-            index=-1,
-            state="prefill" if r.get("newest") == "prefill" else "generating",
-            gen_tps=r["cur_gen_tps"],
-            decoded=gen_tok,
-            # Context fill like the slot rows: what the conversation holds, over the budget
-            # one conversation gets. The log fallback has no prompt size mid-generation, so
-            # the bar degrades to generated-only there rather than guessing.
-            ctx_used=prompt_tok + gen_tok,
-            ctx_total=max((sl.ctx_total for sl in slots), default=0),
-            prefill_pct=r["cur_pp_pct"],
-            prefill_done=r["cur_pp_done"],
-            prefill_total=r["cur_pp_total"],
-            prompt_tokens=prompt_tok,
-        )
+    solo_last_ts = 0.0
+    if _engine == "strata" and len(slots) > 1:
+        per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
+        if outside:
+            prompt_tok = int(r.get("cur_prompt_tokens") or 0)
+            gen_tok = int(r.get("cur_gen_tokens") or 0)
+            solo_last_ts = now
+            _evict_other_models(_last_solo, ctx_key)
+            _last_solo[ctx_key] = (now, r["cur_gen_tps"], prompt_tok, gen_tok)
+            solo = SlotSpeed(
+                index=-1,
+                state="prefill" if r.get("newest") == "prefill" else "generating",
+                gen_tps=r["cur_gen_tps"],
+                decoded=gen_tok,
+                # Context fill like the slot rows: what the conversation holds, over the
+                # budget one conversation gets. The log fallback has no prompt size mid-
+                # generation, so the bar degrades to generated-only there rather than
+                # guessing.
+                ctx_used=prompt_tok + gen_tok,
+                ctx_total=per_slot_ctx,
+                prefill_pct=r["cur_pp_pct"],
+                prefill_done=r["cur_pp_done"],
+                prefill_total=r["cur_pp_total"],
+                prompt_tokens=prompt_tok,
+            )
+        else:
+            ts, tps, prompt_tok, gen_tok = _last_solo.get(ctx_key, (0.0, 0.0, 0, 0))
+            solo_last_ts = ts
+            solo = SlotSpeed(
+                index=-1, state="idle", gen_tps=tps, decoded=gen_tok,
+                ctx_used=prompt_tok + gen_tok, ctx_total=per_slot_ctx,
+                prompt_tokens=prompt_tok,
+            )
 
     # The machine's rate, not one slot's. Summing is the honest aggregate: slots decode in the
     # same batch, so their rates add up to what the box is actually producing.
@@ -2727,7 +2753,8 @@ async def inference_speed(container_name: str, internal_port: int | None,
         prefill_done=prefill_done, prefill_total=prefill_total,
         prompt_tokens=prompt_tokens,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
-        live=busy, slots=slots, solo=solo, expert_hit_pct=r.get("expert_hit_pct"),
+        live=busy, slots=slots, solo=solo, solo_last_ts=solo_last_ts,
+        expert_hit_pct=r.get("expert_hit_pct"),
     )
     _speed_cache[container_name] = (time.time(), out)
     return out
