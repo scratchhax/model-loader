@@ -4,6 +4,7 @@ import asyncio
 import configparser
 import re
 import shutil
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1282,10 +1283,16 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
 
     `soft` asks each displaced backend that supports it to UNLOAD instead of stopping: today
     that is Strata alone (a llama router at --models-max 1 has no unload endpoint, which is
-    the whole reason this switch exists). Unload gives back the same VRAM and RAM in ~0.3 s
-    and keeps the container and the OS page cache warm, so the way back costs seconds instead
-    of a 90 s cold start. The trade is that a parked-but-running server can be woken by a
-    stray request, so hard remains the default and soft is what the checkbox asks for.
+    the whole reason this switch exists). Unload gives back the same VRAM and RAM in ~0.3 s, so
+    the RELEASE is immediate and the container keeps its settings.
+
+    It does not make the way back quick. Measured 2026-10-15: a parked Strata asked to load
+    again took 104 s, against ~90 s for a cold container start. This docstring used to claim
+    "the way back costs seconds instead of a 90 s cold start", which was inferred from the page
+    cache staying warm and never measured - and the inference fails in exactly the case it was
+    written for, since the other engine reads its own 25 GB model in between and evicts that
+    cache. The trade is that a parked-but-running server can be woken by a stray request, so
+    hard remains the default and soft is what the checkbox asks for.
 
     `share` displaces nothing: it starts the engine's backends and leaves every other holder
     exactly where it is. That is only honest when the cards are actually dividable - the
@@ -1463,12 +1470,17 @@ def restart_llama_backend(name: str) -> tuple[bool, str]:
 # ---------- Strata load control ----------
 
 # Strata's server keeps its model between two states the rest of this app has no word for:
-# loaded, and parked - port open, VRAM free, model files resident in the OS page cache,
-# seconds from serving again. POST /unload moves it to parked in ~0.3 s and gives back BOTH
-# the VRAM and the pinned expert arena; POST /load brings it back, and blocks until the
-# model answers - so the caller either waits on it or polls /health, never a browser request.
-# This is the difference between a handover that costs a container restart (~90 s, 55 GB
-# re-read) and one that costs a click.
+# loaded, and parked - port open, VRAM free, model files PERHAPS still in the OS page cache.
+# POST /unload moves it to parked in ~0.3 s and gives back BOTH the VRAM and the pinned expert
+# arena; POST /load brings it back, and blocks until the model answers - so the caller either
+# waits on it or polls /health, never a browser request.
+#
+# Parked is cheap to ENTER and NOT cheap to leave. A /load after an engine swap was measured at
+# 104 s on 2026-10-15, against the ~90 s a cold container start costs - no saving at all. An
+# earlier version of this comment claimed parked was "seconds from serving again"; that was
+# reasoning from a warm page cache, never a measurement, and it does not survive the situation
+# it was written for, because the other engine reads its own 25 GB model in between and evicts
+# the cache the argument depended on.
 #
 # The Content-Type is not decoration: the server rejects anything else on these two paths
 # (415) as a CSRF guard, and checks Origin for the same reason - a plain form POST from any
@@ -2783,6 +2795,34 @@ def openwebui_state() -> dict:
         if not any(u in current_urls for u in candidate_urls):
             missing.append({"name": c.name, "vendor": strata_engine.ENGINE, "url": candidate_urls[0]})
 
+    # If Open WebUI is pointed at THIS app's router, the per-backend connections are absent on
+    # purpose and none of them is missing.
+    #
+    # Without this the page is permanently wrong, and not merely noisily: every llama router on
+    # the box reads as missing forever, the Reconcile banner never clears, and pressing it adds
+    # those connections back - undoing the single-endpoint setup the router exists to provide.
+    # Observed with exactly one connection configured, http://model-loader:8086/v1, and
+    # llama-9700x2, llama-cpu and llama-voice all listed as missing.
+    #
+    # The check is for this container's own name or compose service on the router port, so it
+    # recognises the router only when Open WebUI is actually talking to US. A different host on
+    # 8086 is somebody else's proxy and says nothing about whether these backends are reachable.
+    router_urls: list[str] = []
+    try:
+        own = client.containers.get(socket.gethostname())
+        rport = int(settings.router_port)
+        names = [own.name]
+        svc = (own.labels or {}).get("com.docker.compose.service")
+        if svc and svc != own.name:          # compose usually makes these identical
+            names.append(svc)
+        router_urls = [f"http://{n}:{rport}/v1" for n in names if n]
+    except (DockerException, NotFound, ValueError, TypeError):
+        router_urls = []
+
+    routed_via = next((u for u in router_urls if u in current_urls), "")
+    if routed_via:
+        missing = []
+
     # Detect stale entries — URLs pointing at compose-local hosts that no longer exist
     valid_hosts: set[str] = set()
     try:
@@ -2866,6 +2906,8 @@ def openwebui_state() -> dict:
         "companions": _openwebui_companions(client, ow, valid_hosts),
         "missing_backends": missing,
         "stale_urls": stale,
+        # Set when Open WebUI reaches these backends through our router instead of directly.
+        "routed_via": routed_via,
     }
 
 

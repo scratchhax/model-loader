@@ -27,14 +27,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
+import threading
 import time
+import uuid
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import db, services
+from . import db, narrate, services
 from .config import settings
 from .utils import docker_client
 
@@ -170,6 +173,33 @@ def _backends(include_stopped: bool = False) -> list[dict]:
     return out
 
 
+async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
+    """Can this backend serve a request RIGHT NOW, not merely is its container up?
+
+    The two are different and the gap is ninety seconds wide. docker reports `running` the
+    moment the process starts, and the engines then take their time: Strata reads ~55 GB of
+    experts before it will answer, and a llama router opens its port before any model is in.
+
+    The question is per-engine, the same split `services._wait_ready` makes and for the same
+    reason. On Strata it is /health, because /v1/models answers 200 with the model listed as
+    "unloaded" - a 200 there can mean "up and serving nothing", which is exactly the state a
+    cold start and a parked server both pass through. /health carries the one bool that settles
+    it. On llama it is whether /v1/models answered at all, since that router only opens the port
+    once it is ready to take requests and picks the model per request anyway.
+
+    Without this a request arriving during a Strata start was routed INTO the closed port and
+    came back 502 "All connection attempts failed", which reads as a broken engine rather than
+    one that is still coming up - and it meant no caller could ever be told to wait instead.
+    """
+    if b["engine"] != "strata":
+        return bool(b["models"])
+    try:
+        r = await client.get(f"{b['url']}/health", timeout=5.0)
+        return r.status_code == 200 and bool(r.json().get("loaded"))
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
 async def _models_of(client: httpx.AsyncClient, b: dict) -> list[str]:
     try:
         r = await client.get(f"{b['url']}/v1/models", timeout=5.0)
@@ -194,12 +224,21 @@ def _rank(b: dict) -> tuple:
 
 
 async def _live_map() -> tuple[list[dict], dict[str, dict]]:
-    """(backends with their models, {model_id: the PREFERRED backend for it})."""
+    """(backends with their models and readiness, {model_id: the PREFERRED READY backend}).
+
+    `ready` is carried rather than filtered out, because the two callers want different things:
+    /v1/models keeps advertising an engine alias that is merely mid-start, so it does not
+    disappear from a client's dropdown and come back during a swap, while resolve() refuses to
+    route to it. Dropping it here would have done both at once.
+    """
     bs = sorted(_backends(), key=_rank)
     by_model: dict[str, dict] = {}
     async with httpx.AsyncClient() as client:
         for b in bs:
             b["models"] = await _models_of(client, b)
+            b["ready"] = await _ready(client, b)
+            if not b["ready"]:
+                continue
             for m in b["models"]:
                 by_model.setdefault(m, b)      # first wins, and the list is ranked
     return bs, by_model
@@ -209,6 +248,23 @@ def default_for(engine: str) -> str:
     return db.get_setting(f"router.default.{engine}", "")
 
 
+
+
+def last_model_for(engine: str) -> str:
+    """The model this engine last served successfully, or "".
+
+    Read from the router's own request log rather than kept as a setting, because the log is
+    already the record of what happened and a parallel copy would be one more thing that can
+    disagree with it. Only 200s count: a model that failed to load is not what you were using.
+    """
+    try:
+        with db._conn() as c:
+            row = c.execute(
+                "SELECT model FROM router_request WHERE engine = ? AND status = 200 "
+                "AND model <> '' ORDER BY ts DESC LIMIT 1", (engine,)).fetchone()
+        return row["model"] if row else ""
+    except Exception:  # noqa: BLE001 - a log read must never be the reason routing fails
+        return ""
 def pinned_backend(engine: str) -> str:
     """The container an engine's traffic must go to, or "" for automatic.
 
@@ -234,11 +290,19 @@ async def resolve(asked: str) -> tuple[dict, str]:
     bs, by_model = await _live_map()
     if not bs:
         raise Unresolved("no inference backend is running")
-
     if asked in ENGINES:
-        live = [b for b in bs if b["engine"] == asked]
+        live = [b for b in bs if b["engine"] == asked and b.get("ready")]
         if not live:
-            other = ", ".join(sorted({b["engine"] for b in bs})) or "none"
+            # A container of this engine that is up but not SERVING yet gets its own answer.
+            # Lumping it in with "not the engine holding the cards" sent people to flip a switch
+            # that was already flipped, and routing to it returned 502 from a closed port, which
+            # reads as a broken engine rather than one still coming up.
+            coming = [b["name"] for b in bs if b["engine"] == asked and not b.get("ready")]
+            if coming:
+                raise Unresolved(
+                    f"{asked} is starting up ({', '.join(coming)} is running but not serving "
+                    f"yet). Nothing is wrong; it is not ready.")
+            other = ", ".join(sorted({b["engine"] for b in bs if b.get("ready")})) or "none"
             raise Unresolved(
                 f"{asked} is not the engine holding the cards right now (running: {other}). "
                 f"The engines here are exclusive; switch them in Model Loader.")
@@ -257,16 +321,23 @@ async def resolve(asked: str) -> tuple[dict, str]:
         # loaded IS the answer. llama's router picks by name, so a default has to be chosen.
         if b["engine"] == "strata":
             return b, (b["models"][0] if b["models"] else asked)
-        want = default_for("llama")
+        want, src = default_for("llama"), "default"
+        if not want:
+            # Fall back to whatever llama last actually served. "Pick the engine and get the
+            # model I was using" is the behaviour a model dropdown implies, and requiring a
+            # default to be configured first turned the first use of the alias into an error
+            # message instead of an answer.
+            want, src = last_model_for("llama"), "last-used"
         if want and want in b["models"]:
             return b, want            # honour the pin: ask THIS backend for the default
         if want and want in by_model:
             return by_model[want], want
         if want:
-            raise Unresolved(f"the default llama model {want!r} is not offered by {b['name']}")
+            raise Unresolved(f"the {src} llama model {want!r} is not offered by {b['name']}")
         if len(b["models"]) == 1:
             return b, b["models"][0]
-        raise Unresolved("no default model is set for llama — choose one in the Router tab")
+        raise Unresolved("no default model is set for llama and it has not served anything yet "
+                         "— choose a default in the Router tab")
 
     if asked in by_model:
         return by_model[asked], asked
@@ -339,15 +410,38 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": {"message": "body must be JSON"}})
 
     asked = str(body.get("model") or "").strip()
+    want = asked or ENGINES[0]
     conv, client_id = conversation_key(body), _client_of(request)
     streaming = bool(body.get("stream"))
 
     try:
-        backend, model = await resolve(asked or ENGINES[0])
+        backend, model = await resolve(want)
     except Unresolved as e:
+        # Only a streamed OpenAI-shaped request can be told to wait, because that is the only
+        # shape with somewhere to put the explanation. Everything else keeps the 503, which now
+        # at least says why no switch happened.
+        narratable = streaming and shape == "openai"
+        detail = str(e)
+
+        if narratable and await swap_in_flight_for(want):
+            # A switch is ALREADY running toward this engine, whoever started it. Describe it.
+            return narrated_response(body, path, shape, conv, client_id, want, t0)
+
+        if narratable:
+            ok, why = await may_autoswitch(want)
+            if ok:
+                started, msg = await request_switch(want)
+                if started:
+                    # The switch is running. narrated_response describes it from here and
+                    # relays the answer into the same response when the engine is up.
+                    return narrated_response(body, path, shape, conv, client_id, want, t0)
+                detail = f"{detail} Tried to switch automatically but {msg}"
+            else:
+                detail = f"{detail} Not switching automatically: {why}"
+
         _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape,
-                status=503, error=str(e), total_ms=(time.time() - t0) * 1000)
-        return JSONResponse(status_code=503, content={"error": {"message": str(e)}})
+                status=503, error=detail, total_ms=(time.time() - t0) * 1000)
+        return JSONResponse(status_code=503, content={"error": {"message": detail}})
 
     out = dict(body)
     out["model"] = model          # llama picks by name; Strata ignores it
@@ -355,26 +449,34 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
     if streaming:
         return await _forward_stream(out, backend, model, path, shape, conv, client_id, asked, t0)
 
+    token = _inflight_add(backend["engine"])
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
-                                                           connect=_CONNECT_TIMEOUT_S)) as c:
-            r = await c.post(f"{backend['url']}{path}", json=out)
-        payload = r.json() if r.content else {}
-    except httpx.HTTPError as e:
-        _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
-                backend=backend["name"], model=model, shape=shape, status=502,
-                error=f"{type(e).__name__}: {e}", total_ms=(time.time() - t0) * 1000)
-        return JSONResponse(status_code=502, content={"error": {"message": f"{backend['name']}: {e}"}})
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
+                                                               connect=_CONNECT_TIMEOUT_S)) as c:
+                r = await c.post(f"{backend['url']}{path}", json=out)
+            payload = r.json() if r.content else {}
+        except httpx.HTTPError as e:
+            _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                    backend=backend["name"], model=model, shape=shape, status=502,
+                    error=f"{type(e).__name__}: {e}", total_ms=(time.time() - t0) * 1000)
+            return JSONResponse(status_code=502,
+                                content={"error": {"message": f"{backend['name']}: {e}"}})
 
-    usage = (payload.get("usage") or {}) if isinstance(payload, dict) else {}
-    details = usage.get("prompt_tokens_details") or {}
-    _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
-            backend=backend["name"], model=model, shape=shape, status=r.status_code,
-            prompt_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
-            completion_tokens=int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
-            cached_tokens=int(details.get("cached_tokens") or 0),
-            total_ms=(time.time() - t0) * 1000)
-    return JSONResponse(status_code=r.status_code, content=payload)
+        usage = (payload.get("usage") or {}) if isinstance(payload, dict) else {}
+        details = usage.get("prompt_tokens_details") or {}
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                backend=backend["name"], model=model, shape=shape, status=r.status_code,
+                prompt_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens")
+                                      or usage.get("output_tokens") or 0),
+                cached_tokens=int(details.get("cached_tokens") or 0),
+                total_ms=(time.time() - t0) * 1000)
+        return JSONResponse(status_code=r.status_code, content=payload)
+    finally:
+        # Every exit, or a failed non-streamed request leaves a phantom in flight that vetoes
+        # every future automatic switch.
+        _inflight_drop(token)
 
 
 @app.post("/v1/chat/completions")
@@ -426,9 +528,13 @@ def _usage_from_sse(line: str, shape: str, acc: dict) -> None:
         acc["cached_tokens"] = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
 
-async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape: str,
-                          conv: str, client_id: str, asked: str, t0: float):
-    """Relay an SSE response chunk for chunk.
+async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str,
+                     conv: str, client_id: str, asked: str, t0: float,
+                     t_ready: float | None = None):
+    """Relay an SSE response chunk for chunk, and record what it cost.
+
+    A generator rather than a response, so something can be streamed AHEAD of it: a request that
+    had to wait for an engine swap narrates the swap first and then relays this, in one response.
 
     TWO THINGS THIS HAS TO GET RIGHT, both invisible while they work:
 
@@ -440,6 +546,12 @@ async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape
        closed, the httpx stream context exits, and the upstream connection drops - which is how
        Strata learns to cancel. Swallowing that would leave a 200K-token prefill burning both
        cards for a minute after somebody pressed stop.
+
+    `t_ready` is when the BACKEND became usable, which is not when the request arrived if the
+    client waited through a swap first. TTFT is measured from it, so the number keeps meaning
+    "how long until this engine said something", while total_ms still runs from t0 so the wait
+    stays visible as the gap between the two. Without the distinction a 90 s cold start reads as
+    a 90 s time-to-first-token and the charts accuse the engine of being broken.
     """
     if shape != "anthropic":
         # Ask for the usage chunk. Without it an OpenAI-shaped stream carries no token counts at
@@ -450,44 +562,386 @@ async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape
 
     acc: dict = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
     state: dict = {"ttft_ms": 0.0, "status": 0, "error": ""}
+    first_from = t0 if t_ready is None else t_ready
 
-    async def gen():
-        pending = b""
+    pending = b""
+    token = _inflight_add(backend["engine"])
+    # A streamed response commits to its status code with the first byte, so an engine that dies
+    # half way through a generation was recorded as a 200 - which is how a model that crashed
+    # twice in a row showed up in the Router tab as two healthy requests, and then got picked by
+    # last_model_for() as "the model you were using". A stream is only complete when it says so,
+    # and these are the two ways it says it.
+    saw_end = False
+    client_gone = False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
+                                                           connect=_CONNECT_TIMEOUT_S)) as c:
+            async with c.stream("POST", f"{backend['url']}{path}", json=out) as r:
+                state["status"] = r.status_code
+                async for chunk in r.aiter_bytes():
+                    if not chunk:
+                        continue
+                    if not state["ttft_ms"]:
+                        state["ttft_ms"] = (time.time() - first_from) * 1000
+                    yield chunk
+                    # Split a copy for inspection only; the bytes above already went out
+                    # untouched, so nothing here can delay or alter what the client sees.
+                    pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        text = line.decode("utf-8", "replace")
+                        _usage_from_sse(text, shape, acc)
+                        stripped = text.strip()
+                        if stripped == "data: [DONE]" or stripped == "event: message_stop":
+                            saw_end = True
+    except (GeneratorExit, asyncio.CancelledError):
+        # The CLIENT went away. Two different exceptions mean the same thing here: GeneratorExit
+        # if this generator was closed directly, asyncio.CancelledError if the ASGI server
+        # cancelled the task, which is what actually happens on a disconnect. CancelledError is
+        # a BaseException, so an earlier version catching only GeneratorExit never saw it and
+        # blamed the engine instead: a client that died of its own bug was recorded as
+        # "llama-9700x2 ended the stream before finishing" while the model completed normally.
+        #
+        # So this is recorded as whatever it had reached, not as a failure. Re-raised because
+        # swallowing it would leave the upstream connection open and the engine generating into
+        # nothing.
+        client_gone = True
+        raise
+    except httpx.HTTPError as e:
+        state["error"] = f"{type(e).__name__}: {e}"
+        state["status"] = state["status"] or 502
+        yield b"data: " + json.dumps(
+            {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
+    finally:
+        _inflight_drop(token)
+        if not saw_end and not client_gone and not state["error"] and state["status"] == 200:
+            # The upstream hung up mid-generation. llama.cpp's router logs "http client error:
+            # Failed to read connection" on its side when a model instance aborts; this is the
+            # same event seen from in front of it.
+            state["status"] = 502
+            state["error"] = (f"{backend['name']} ended the stream before finishing "
+                              f"({model} may have crashed)")
+        # Runs on normal completion AND on client disconnect, so a cancelled request is
+        # recorded rather than vanishing - those are often the ones worth seeing.
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
+                backend=backend["name"], model=model, shape=shape, stream=1,
+                status=state["status"], error=state["error"],
+                prompt_tokens=acc["prompt_tokens"],
+                completion_tokens=acc["completion_tokens"],
+                cached_tokens=acc["cached_tokens"],
+                ttft_ms=state["ttft_ms"], total_ms=(time.time() - t0) * 1000)
+
+
+async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape: str,
+                          conv: str, client_id: str, asked: str, t0: float,
+                          t_ready: float | None = None):
+    return StreamingResponse(
+        _relay_gen(out, backend, model, path, shape, conv, client_id, asked, t0, t_ready),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --------------------------------------------------------------------------- narrated waiting
+#
+# READING ONLY. Nothing in this section starts a switch. The trigger and its policy are
+# deliberately not here yet, so the worst this code can do is describe something the UI process
+# was already doing on its own. Keeping the POST that moves hardware out of this piece means it
+# can be deployed and watched before anything is allowed to evict an engine.
+
+_UI_BASE = "http://127.0.0.1:8090"
+
+# The UI process allows 420 s for a backend to answer after `docker start`, so waiting longer
+# than that here would only report on a switch that has already given up.
+_NARRATE_MAX_S = 480.0
+
+
+def narrate_channel() -> str:
+    """Which delta field status lines go in. A setting, because the right answer depends on a
+    client behaviour nobody here controls: reasoning_content renders as a collapsible block and
+    SHOULD be left out of the next turn's history, but whether a given client actually leaves it
+    out is its business, not ours. Flip to content if it turns out not to."""
+    want = db.get_setting("router.narrate.channel", narrate.CHANNEL_REASONING)
+    return want if want in (narrate.CHANNEL_REASONING, narrate.CHANNEL_CONTENT) \
+        else narrate.CHANNEL_REASONING
+
+
+async def switch_state() -> dict:
+    """What the UI process says the current switch is doing, or {} if it cannot be asked.
+
+    Over HTTP on purpose - see the endpoint's own docstring. `services._switch_state` in THIS
+    process is a different dict that nothing in this process ever writes to, so importing it
+    would report an eternal calm while containers stopped.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as c:
+            r = await c.get(f"{_UI_BASE}/engines/switch")
+            return r.json() if r.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError):
+        return {}
+
+
+_LIVE_PHASES = ("stopping", "draining", "starting", "loading")
+
+
+async def swap_in_flight_for(asked: str) -> bool:
+    """Is a switch ALREADY running, and is it bringing up the engine `asked` names?
+
+    This is the whole of the narration trigger, and it is deliberately the half that cannot
+    cause anything: it answers "is the hardware already moving", never "should it move". The
+    switch is started by a person clicking the engine control in the UI, and all this does is
+    turn the 503 that used to meet them a second later into a description of their own switch.
+
+    Both conditions matter. Without "already running", this would be auto-switching with no
+    policy. Without "for this engine", a request for Strata arriving during a switch to llama
+    would wait out the whole llama startup only to be told Strata is unavailable, which is
+    strictly worse than being told so immediately.
+
+    Only for an engine ALIAS. A specific model id resolves through a different path with its own
+    requirement that the backend be running, and a model that a stopped backend would have
+    offered is not something this can promise to deliver.
+    """
+    if asked not in ENGINES:
+        return False
+    state = await switch_state()
+    return (str(state.get("phase") or "") in _LIVE_PHASES
+            and str(state.get("engine") or "") == asked)
+
+
+
+# --------------------------------------------------------------------------- auto-switch policy
+#
+# The goal this serves, stated plainly: pick an engine in a client's model dropdown, and that
+# engine comes up with its configured default (or the model it last served) and answers. Pick
+# the other one, and it hands the cards over and does the same.
+#
+# Which means this section is the part that MOVES HARDWARE, on a box where the two engines
+# cannot share it. So it is gated four ways, and every refusal carries a sentence saying which
+# gate stopped it - a silent "no" here looks exactly like a hang.
+
+_DWELL_DEFAULT_S = 60.0
+
+# A streamed request that is abandoned without its generator closing would otherwise sit in the
+# in-flight table forever and veto every future switch. Nothing legitimate runs this long, so
+# anything older is swept: a leak degrades to a wrong answer for half an hour, not permanently.
+_INFLIGHT_MAX_AGE_S = 1800.0
+
+_INFLIGHT: dict[int, tuple[str, float]] = {}
+_INFLIGHT_SEQ = itertools.count(1)
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _inflight_add(engine: str) -> int:
+    token = next(_INFLIGHT_SEQ)
+    with _INFLIGHT_LOCK:
+        _INFLIGHT[token] = (engine, time.time())
+    return token
+
+
+def _inflight_drop(token: int) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.pop(token, None)
+
+
+def inflight_for(engine: str) -> int:
+    """How many requests this process is currently serving on `engine`.
+
+    Accurate because only the router process serves inference; the UI process never forwards.
+    Sweeps stale entries on the way through rather than on a timer, so there is no thread to
+    get wedged.
+    """
+    cutoff = time.time() - _INFLIGHT_MAX_AGE_S
+    with _INFLIGHT_LOCK:
+        for tok in [t for t, (_, started) in _INFLIGHT.items() if started < cutoff]:
+            _INFLIGHT.pop(tok, None)
+        return sum(1 for eng, _ in _INFLIGHT.values() if eng == engine)
+
+
+def autoswitch_enabled(engine: str) -> bool:
+    return db.get_setting(f"router.autoswitch.{engine}", "") == "1"
+
+
+def dwell_s() -> float:
+    try:
+        return max(0.0, float(db.get_setting("router.autoswitch.dwell", "")
+                              or _DWELL_DEFAULT_S))
+    except ValueError:
+        return _DWELL_DEFAULT_S
+
+
+def _last_switch_at() -> float:
+    try:
+        return float(db.get_setting("router.autoswitch.last_at", "") or 0.0)
+    except ValueError:
+        return 0.0
+
+
+async def may_autoswitch(target: str) -> tuple[bool, str]:
+    """Is this request allowed to hand the cards to `target`? (ok, reason it was refused).
+
+    Checked cheapest first, and the order matters: the two that read over HTTP or scan state go
+    last so an everyday "it is switched off" costs one settings read.
+
+    There is deliberately NO idle grace here. An earlier draft refused to switch if the current
+    engine had served anything in the last few minutes, which is the right rule for protecting
+    somebody else's session and the wrong rule for the person who just changed their own
+    dropdown twenty seconds after reading an answer - it refused the exact thing the feature
+    exists to do. In-flight is the honest test: nothing is being taken from anyone if nothing
+    is being served. The grace belongs back here the day a second person's work gets yanked,
+    and `conversation_key` is how it would tell "mine" from "theirs".
+    """
+    if target not in ENGINES:
+        return False, f"{target!r} is not an engine name"
+    if not autoswitch_enabled(target):
+        return False, (f"automatic switching to {target} is off. Turn it on in the Router tab, "
+                       f"or switch engines in Model Loader.")
+
+    since = time.time() - _last_switch_at()
+    dwell = dwell_s()
+    if since < dwell:
+        # Without this, two clients that disagree about which engine they want flap the box,
+        # each swap killing the model the previous one just loaded.
+        return False, (f"a switch finished {int(since)}s ago and the engines settle for "
+                       f"{int(dwell)}s. Try again shortly.")
+
+    state = await switch_state()
+    if str(state.get("phase") or "") in _LIVE_PHASES:
+        return False, f"a switch to {state.get('engine') or 'another engine'} is already running"
+
+    busy = [(e, inflight_for(e)) for e in ENGINES if e != target and inflight_for(e)]
+    if busy:
+        who = ", ".join(f"{e} ({n} in flight)" for e, n in busy)
+        return False, (f"not taking the cards from {who} mid-request. "
+                       f"Try again when it is idle.")
+    return True, ""
+
+
+async def request_switch(engine: str) -> tuple[bool, str]:
+    """Ask the UI process to hand the cards to `engine`.
+
+    A POST to the same endpoint the engine control uses, for the reason given on that endpoint:
+    `_switch_lock` and `_switch_state` are per-process and this container runs two, so the UI
+    process owns the switch and everyone else asks. Soft parks a displaced Strata instead of
+    stopping it, which returns the VRAM in ~0.3 s and leaves the container and its settings up.
+    That makes the RELEASE immediate, which is what lets the engine being asked for start
+    sooner. It does not make the return leg quick: a parked Strata asked back took 104 s when
+    measured, so a dropdown you change twice costs roughly 45 s one way and 110 s the other.
+    """
+    db.set_setting("router.autoswitch.last_at", str(time.time()))
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as c:
+            r = await c.post(f"{_UI_BASE}/engines/{engine}/activate", data={"soft": "1"})
+        if r.status_code != 200:
+            return False, f"the engine control refused: HTTP {r.status_code}"
+        return True, ""
+    except httpx.HTTPError as e:
+        return False, f"could not reach the engine control: {type(e).__name__}: {e}"
+
+def swap_progress(asked: str, deadline: float):
+    """Build the progress callable narrate_wait() drives: is `asked` routable yet?
+
+    Readiness is "resolve() succeeds", not "the switch says done". The switch reports on
+    containers; resolve answers the only question the request actually has, which is whether
+    some backend will serve it. On this box those differ: a Strata that is up and parked answers
+    /health with loaded:false and is not a usable target.
+    """
+    async def progress() -> tuple[str, str]:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
-                                                               connect=_CONNECT_TIMEOUT_S)) as c:
-                async with c.stream("POST", f"{backend['url']}{path}", json=out) as r:
-                    state["status"] = r.status_code
-                    async for chunk in r.aiter_bytes():
-                        if not chunk:
-                            continue
-                        if not state["ttft_ms"]:
-                            state["ttft_ms"] = (time.time() - t0) * 1000
-                        yield chunk
-                        # Split a copy for inspection only; the bytes above already went out
-                        # untouched, so nothing here can delay or alter what the client sees.
-                        pending += chunk
-                        while b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                            _usage_from_sse(line.decode("utf-8", "replace"), shape, acc)
-        except httpx.HTTPError as e:
-            state["error"] = f"{type(e).__name__}: {e}"
-            state["status"] = state["status"] or 502
-            yield b"data: " + json.dumps(
-                {"error": {"message": f"{backend['name']}: {e}"}}).encode() + b"\n\n"
-        finally:
-            # Runs on normal completion AND on client disconnect, so a cancelled request is
-            # recorded rather than vanishing - those are often the ones worth seeing.
-            _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
-                    backend=backend["name"], model=model, shape=shape, stream=1,
-                    status=state["status"], error=state["error"],
-                    prompt_tokens=acc["prompt_tokens"],
-                    completion_tokens=acc["completion_tokens"],
-                    cached_tokens=acc["cached_tokens"],
-                    ttft_ms=state["ttft_ms"], total_ms=(time.time() - t0) * 1000)
+            await resolve(asked)
+            return "ready", ""
+        except Unresolved as e:
+            why = str(e)
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        state = await switch_state()
+        phase = str(state.get("phase") or "")
+
+        if phase == "failed":
+            return "failed", narrate.phase_line(state)
+
+        if phase == "done":
+            # The switch finished and the engine STILL does not resolve. Waiting cannot fix
+            # this - it is a configuration answer, not a timing one, and the most common shape
+            # of it is a llama router that started perfectly with no default model chosen. So
+            # say both halves: the switch worked, the routing did not.
+            return "failed", f"{narrate.phase_line(state)} The request still cannot be " \
+                             f"routed: {why}"
+
+        if not (phase in _LIVE_PHASES or phase == "slow"):
+            # Nothing is switching and the engine is not routable, so there is nothing to wait
+            # for. Saying so beats a spinner that never ends.
+            return "failed", f"Nothing is switching and the engine is not available: {why}"
+
+        if time.time() >= deadline:
+            return "failed", f"Gave up after {int(_NARRATE_MAX_S)}s. " \
+                             f"{narrate.phase_line(state) or 'The switch is still running.'}"
+
+        return "waiting", narrate.phase_line(state)
+
+    return progress
+
+
+async def narrated_stream(out: dict, path: str, shape: str, conv: str, client_id: str,
+                          asked: str, t0: float, channel: str | None = None):
+    """One response: the swap narrated, then the real stream relayed into the same body.
+
+    This sends 200 before knowing whether the swap will work, which is the trade narration
+    makes. So the failure path records the TRUTH - 503 and the reason - rather than the 200
+    already on the wire. Recording the wire status would take the Router tab's failure count to
+    zero while things were visibly breaking in the chat.
+    """
+    cid = "chatcmpl-" + uuid.uuid4().hex[:24]
+    created = int(t0)
+    result: dict = {}
+
+    async for blob in narrate.narrate_wait(
+            swap_progress(asked, t0 + _NARRATE_MAX_S), result,
+            cid=cid, model=asked, created=created,
+            channel=channel or narrate_channel()):
+        yield blob
+
+    if result.get("state") != "ready":
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape, stream=1,
+                status=503, error=str(result.get("text") or "")[:500],
+                total_ms=(time.time() - t0) * 1000)
+        return
+
+    # Resolve again rather than trusting the probe: between "it resolved" and "we connect" the
+    # answer can change, and this is the call whose result is actually used.
+    try:
+        backend, model = await resolve(asked)
+    except Unresolved as e:
+        _record(ts=t0, conv=conv, client=client_id, asked=asked, shape=shape, stream=1,
+                status=503, error=str(e)[:500], total_ms=(time.time() - t0) * 1000)
+        yield narrate.line(cid, created, model=asked, text=f"\n{e}\n",
+                           channel=channel or narrate_channel())
+        yield narrate.closing(cid, created, asked)
+        return
+
+    sent = dict(out)
+    sent["model"] = model
+
+    # Close the status off before the model speaks. Both the narration and most of these models'
+    # own thinking land in the SAME delta field, so without an explicit terminator the two run
+    # together into one sentence - observed verbatim in a real chat as
+    # "...port not answering yet.The user just switched models", router status and private
+    # reasoning indistinguishable. A closing line plus a blank one gives the handoff a visible
+    # seam and says which backend actually took the request, which is the one fact the narration
+    # could not state until now.
+    if result.get("lines"):
+        yield narrate.line(cid, created, asked,
+                           f"\nReady, routing to {backend['name']} ({model}).\n\n",
+                           channel or narrate_channel())
+
+    async for blob in _relay_gen(sent, backend, model, path, shape, conv, client_id, asked,
+                                 t0, time.time()):
+        yield blob
+
+
+def narrated_response(out: dict, path: str, shape: str, conv: str, client_id: str,
+                      asked: str, t0: float, channel: str | None = None) -> StreamingResponse:
+    return StreamingResponse(
+        narrated_stream(out, path, shape, conv, client_id, asked, t0, channel),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # --------------------------------------------------------------------------- prefix tolerance

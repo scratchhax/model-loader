@@ -33,7 +33,17 @@
       {% endfor %}
     </div>
     {% endif %}
-    {% if not drift %}
+    {% if openwebui.routed_via %}
+    {# Says WHY there are no per-backend connections, rather than going quiet about it. Without
+       this line the absence looks like the drift check failing rather than a deliberate
+       topology, which is what it looked like for the whole time this page insisted three
+       healthy routers were missing. #}
+    <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-400">
+      Routed through the model router
+      <span class="font-mono">{{ openwebui.routed_via }}</span>.
+      Individual backends are reached through it, so they are not listed here as connections.
+    </div>
+    {% elif not drift %}
     <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-400">
       All {{ openwebui.current_urls | length }} backend(s) in sync.
     </div>

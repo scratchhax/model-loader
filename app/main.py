@@ -749,6 +749,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     ctx.update(await _hero_context())
     ctx.update(await asyncio.to_thread(_gpu_strip_context))
     ctx.update(_power_context())
+    ctx.update(_host_stats_context())
     ctx.update(_power_settings_context())
     return templates.TemplateResponse("dashboard.html", ctx)
 
@@ -825,6 +826,70 @@ def power_partial(request: Request) -> HTMLResponse:
     ctx = {"request": request}
     ctx.update(_power_context())
     return templates.TemplateResponse("_power.html", ctx)
+
+
+# Thresholds for the host row. Chosen against what this box actually does rather than generic
+# sysadmin numbers: the things that go wrong here are a model sized past available RAM (an OOM
+# kill, because there is no swap) and a models volume filling up mid-download (weights are
+# 18-120 GB a piece, so "a few GB free" is already too late).
+_LOAD_WARN_PCT = 80.0
+_LOAD_CRIT_PCT = 100.0
+_RAM_WARN_FREE_GB = 16.0
+_RAM_CRIT_FREE_GB = 8.0
+_DISK_WARN_FREE_GB = 150.0
+_DISK_CRIT_FREE_GB = 60.0
+
+
+def _host_stats_context() -> dict:
+    """The host row: load, memory, swap, disk, at the cadence of the other meters.
+
+    Four cheap reads (two /proc files, one statvfs, one cached cgroup probe), so this can sit
+    on the same 1 s poll as the power row without costing anything. Deliberately NOT
+    snapshot_models_dir(), which walks every GGUF to size it.
+
+    Each card carries the figure a decision is made on, not the biggest number available:
+    memory shows what is AVAILABLE rather than what is used, because the question is always
+    "will the next model fit"; disk shows free rather than used, for the same reason.
+    """
+    load = hw.host_load()
+    swap_used, swap_total = hw.host_swap_gb()
+    free_gb, total_gb = hw.host_disk_gb(settings.models_dir)
+    ram_total = hw.host_ram_gb()
+    ram_avail = hw.host_ram_available_gb()
+    arena = hw.strata_arena_gb()
+
+    return {"host": {
+        "load": load,
+        "load_warn": load["pct"] >= _LOAD_WARN_PCT and load["pct"] < _LOAD_CRIT_PCT,
+        "load_crit": load["pct"] >= _LOAD_CRIT_PCT,
+
+        "ram_total": ram_total,
+        "ram_avail": ram_avail,
+        "ram_used_pct": round(100.0 * (ram_total - ram_avail) / ram_total, 1) if ram_total else 0.0,
+        "arena": arena,
+        "ram_warn": 0 < ram_avail < _RAM_WARN_FREE_GB and ram_avail >= _RAM_CRIT_FREE_GB,
+        "ram_crit": 0 < ram_avail < _RAM_CRIT_FREE_GB,
+
+        "swap_used": swap_used,
+        "swap_total": swap_total,
+        # Swapping at all on this box is a problem rather than a cushion: the pinned expert
+        # arena cannot be paged out, so pressure lands on everything else.
+        "swap_warn": swap_total > 0 and swap_used > 0.5,
+
+        "disk_free": free_gb,
+        "disk_total": total_gb,
+        "disk_used_pct": round(100.0 * (total_gb - free_gb) / total_gb, 1) if total_gb else 0.0,
+        "disk_warn": 0 < free_gb < _DISK_WARN_FREE_GB and free_gb >= _DISK_CRIT_FREE_GB,
+        "disk_crit": 0 < free_gb < _DISK_CRIT_FREE_GB,
+        "disk_path": str(settings.models_dir),
+    }}
+
+
+@app.get("/hoststats", response_class=HTMLResponse)
+def host_stats_partial(request: Request) -> HTMLResponse:
+    ctx = {"request": request}
+    ctx.update(_host_stats_context())
+    return templates.TemplateResponse("_host_stats.html", ctx)
 
 
 def _power_settings_context(saved: bool = False) -> dict:
@@ -2924,6 +2989,25 @@ def gpu_tenant_power(name: str, action: str) -> HTMLResponse:
     return _toast(ok, msg)
 
 
+@app.get("/engines/switch")
+def engines_switch_state() -> dict:
+    """What the running (or last) engine switch is doing. {} when none has run.
+
+    JSON rather than a rendered panel, and a GET so the read-only guard is indifferent to it,
+    because the caller is not a browser: the router process polls this to narrate a swap into a
+    streaming chat response while the client waits.
+
+    It has to be an HTTP read and not an import. `services._switch_state` is a module-level dict
+    and `_switch_lock` a threading.Lock, so each process gets its OWN copy - and this container
+    runs two, `app.main` on 8090 and `app.router_api` on 8086. The router importing
+    activate_engine() directly would mean two schedulers, each holding the only lock it can see,
+    racing over the same two cards: the exact failure the read-only guard was written to stop,
+    reintroduced inside one container. So the UI process owns the switch and this is how anyone
+    else finds out about it.
+    """
+    return services.engine_switch_state()
+
+
 @app.post("/engines/{engine}/activate", response_class=HTMLResponse)
 def engines_activate(engine: str, soft: str = Form(""), share: str = Form("")) -> HTMLResponse:
     """Hand the cards to one engine: release everything else holding a GPU, then start it.
@@ -2934,9 +3018,12 @@ def engines_activate(engine: str, soft: str = Form(""), share: str = Form("")) -
     container is the only thing that makes it give the cards back.
 
     `soft` (the checkbox on the Engine row) asks backends that support it to unload instead:
-    Strata gives the same VRAM and RAM back in ~0.3 s and stays warm, so the return trip is
-    seconds. Hard remains the default because a parked server can still be woken by a stray
-    request, and "who owns the cards" deserves an answer that cannot change its mind.
+    Strata gives the same VRAM and RAM back in ~0.3 s and keeps its container and settings. It
+    does NOT make the return trip quick - measured at 104 s on 2026-10-15, no better than a
+    cold start, because the other engine reads its own model in between and evicts the page
+    cache the old claim here assumed would still be warm. Hard remains the default because a
+    parked server can still be woken by a stray request, and "who owns the cards" deserves an
+    answer that cannot change its mind.
 
     `share` (the Share button, offered only when a running engine demonstrably holds a
     strict subset of the cards) starts this engine and displaces nothing - the cards are
@@ -3700,6 +3787,8 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
         "per_engine": per_engine,
         "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
         "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
+        "autoswitch": {e: router_api.autoswitch_enabled(e) for e in router_api.ENGINES},
+        "autoswitch_dwell": int(router_api.dwell_s()),
         # Stopped ones included ON PURPOSE: the backend worth pinning is usually the one that
         # is not running, because the engines take turns.
         "backends_by_engine": {
@@ -3775,3 +3864,22 @@ def router_set_recording(on: str = Form("1")) -> HTMLResponse:
     db.set_setting("router.record", "1" if on == "1" else "0")
     return HTMLResponse(_QUEUED_CHIP.format(
         label="Saved", title="recording on" if on == "1" else "recording off — routing continues"))
+
+
+@app.post("/router/autoswitch", response_class=HTMLResponse)
+def router_set_autoswitch(engine: str = Form(...), on: str = Form("")) -> HTMLResponse:
+    """Let a request for `engine` hand it the cards, instead of being refused.
+
+    Per engine and off by default, because this is the one control here that moves hardware on
+    its own: turning it on means a client picking a name in a model dropdown can stop the engine
+    somebody else is using. The guards live in router_api.may_autoswitch() - it refuses while
+    anything is in flight on the other engine, and for a settle period after the last switch -
+    but the decision to allow it at all is this switch, and it is yours.
+    """
+    if engine not in router_api.ENGINES:
+        return _toast(False, f"unknown engine {engine}")
+    db.set_setting(f"router.autoswitch.{engine}", "1" if on == "1" else "")
+    return HTMLResponse(_QUEUED_CHIP.format(
+        label="Saved",
+        title=(f"requests for {engine} may switch the engines"
+               if on == "1" else f"requests for {engine} will be refused instead of switching")))
