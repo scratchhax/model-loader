@@ -49,6 +49,12 @@
     })();
   </script>
   <style>
+    /* The nav scrolls rather than the page (see the comment on <nav>), but a visible scrollbar
+       inside a 56px header is worse than the overflow it replaces: it eats the links' row and
+       appears and disappears as the window resizes. Hidden in both engines; the nav stays
+       scrollable by wheel, trackpad, touch and keyboard regardless. */
+    .nav-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+    .nav-scroll::-webkit-scrollbar { display: none; }
     :root {
       --ml-radius: 12px;
     }
@@ -129,21 +135,27 @@
   <header class="sticky top-0 z-30 border-b border-slate-200/70 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 backdrop-blur">
     {% from "_icons.html" import icon %}
     <div class="mx-auto max-w-6xl px-6 h-14 flex items-center justify-between gap-6">
-      <a href="/" class="flex items-center gap-2 font-semibold tracking-tight">
+      <a href="/" class="shrink-0 flex items-center gap-2 font-semibold tracking-tight">
         <span class="inline-flex w-6 h-6 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-card">
           {{ icon('layers-3', 14) }}
         </span>
         <span>Model Loader</span>
       </a>
-      <nav class="flex-1 flex items-center gap-0.5 text-sm">
+      {# min-w-0 is load-bearing, not tidiness. A flex item defaults to min-width:auto, so this
+         nav refused to shrink below the width of its links: with twelve of them they stopped
+         fitting in max-w-6xl, pushed the controls on the right out of the container, and took
+         the whole document to 1531px in a 1425px viewport - a horizontal scrollbar on every
+         page, from the header alone. min-w-0 lets it shrink; overflow-x-auto gives the links
+         somewhere to go when it does, so the nav scrolls instead of the page. #}
+      <nav class="flex-1 min-w-0 overflow-x-auto nav-scroll flex items-center gap-0.5 text-sm">
         {% set active = active_nav | default('') %}
         {% macro navlink(href, key, label, ic, enabled=True) %}
           {% if enabled %}
-            <a href="{{ href }}" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+            <a href="{{ href }}" class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
               {% if active == key %}bg-slate-100 dark:bg-slate-800 font-medium text-slate-900 dark:text-slate-100
               {% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800{% endif %}">{{ icon(ic, 14) }}{{ label }}</a>
           {% else %}
-            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-slate-400 dark:text-slate-600 cursor-not-allowed" title="coming soon">{{ icon(ic, 14) }}{{ label }}</span>
+            <span class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-slate-400 dark:text-slate-600 cursor-not-allowed" title="coming soon">{{ icon(ic, 14) }}{{ label }}</span>
           {% endif %}
         {% endmacro %}
         {{ navlink('/', 'dashboard', 'Overview', 'gauge') }}
@@ -158,7 +170,7 @@
         {{ navlink('/benchmark', 'benchmark', 'Benchmark', 'gauge') }}
         {{ navlink('/settings', 'settings', 'Settings', 'settings') }}
       </nav>
-      <div class="flex items-center gap-1">
+      <div class="shrink-0 flex items-center gap-1">
         <button onclick="window.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true}))"
                 aria-label="Open command palette (⌘K)"
                 class="hidden md:inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 px-2 py-1">
