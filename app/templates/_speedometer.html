@@ -45,7 +45,7 @@
     {% if speed.ctx_total %}
     <span class="text-[10px] font-mono text-slate-500 dark:text-slate-400"
           title="{{ '{:,}'.format(speed.ctx_used) }} of {{ '{:,}'.format(speed.ctx_total) }} tokens of context in use{% if speed.ctx_cached %}; {{ '{:,}'.format(speed.ctx_cached) }} of them were reused from cache rather than re-read{% endif %}">
-      ctx {{ (speed.ctx_used / 1024) | round(1) }}k / {{ (speed.ctx_total / 1024) | round(0) | int }}k
+      ctx {{ (speed.ctx_used / 1000) | round(1) }}k / {{ (speed.ctx_total / 1000) | round(0) | int }}k
     </span>
     {% endif %}
   </div>
