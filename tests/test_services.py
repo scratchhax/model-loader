@@ -173,6 +173,24 @@ class TestSoloContextInUse:
         assert out.ctx_total == 4096 * 4
         assert sp._ctx_history["c"][-1][1] == 1050.0
 
+    def test_solo_generation_excludes_idle_slot_context(self, monkeypatch):
+        # Live shape measured on the box: two idle slots parked with 139,632 and
+        # 30,415 tokens while a solo request of 83,278+148 generates. The headline
+        # must follow the solo conversation, not the parked KV.
+        raw = [{"id": 0, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 139632},
+               {"id": 1, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0},
+               {"id": 2, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 30415},
+               {"id": 3, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0}]
+        sp, out = self._speed(monkeypatch, {"cur_prompt_tokens": 83278,
+                                            "cur_gen_tokens": 148}, raw)
+        assert out.state == "generating"
+        assert out.solo is not None and out.solo.ctx_used == 83426
+        assert out.ctx_used == 83426
+
     def test_idle_solo_row_is_history_not_pool_context(self, monkeypatch):
         import time as _time
         raw = [{"id": i, "n_ctx": 4096, "is_processing": False,
