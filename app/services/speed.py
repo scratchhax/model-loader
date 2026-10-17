@@ -893,7 +893,15 @@ async def inference_speed(container_name: str, internal_port: int | None,
     ctx_used = sum(sl.ctx_used for sl in slots)
     ctx_cached = sum(sl.ctx_cached for sl in slots)
     per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
-    ctx_total = per_slot_ctx * len(slots)
+    if _engine == "strata":
+        # Strata's slots share ONE pool: /slots reports each slot's n_ctx as the whole engine
+        # context (measured live: context 262144, batch_slots 4, every slot n_ctx 262144),
+        # not the per-slot share llama-server derives from --ctx-size / parallel. Multiplying
+        # by the slot count inflated the context bar's denominator fourfold - "of 1048k
+        # window" against a 262k window.
+        ctx_total = per_slot_ctx
+    else:
+        ctx_total = per_slot_ctx * len(slots)
     if solo is not None and solo.state in ("prefill", "generating"):
         # The headline follows the LIVE conversation, which is what the tile's own tooltip
         # promises ("the live conversation closest to its ceiling") and what ns.fill does.
