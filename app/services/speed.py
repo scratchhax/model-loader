@@ -97,6 +97,14 @@ class InferenceSpeed:
     # request completes, with no solo/batch attribution. Callers must not read a 0 from
     # Strata as "missed the cache": it means "unknown".
     cache_known: bool = True
+    # Strata only: its host-RAM conversation cache, straight from /metrics. Idle conversations'
+    # KV is PARKED there (8 GiB budget, 8 slots on this box) and restored on the next turn,
+    # which is why an agent session resumes in under a second instead of re-reading its whole
+    # history. Evictions count conversations dropped to make room - each one costs a full
+    # re-read on the next turn - so a climbing eviction count is the early warning for a
+    # context or concurrency change that outgrew the budget. None on other engines, and on a
+    # Strata too old to expose the endpoint.
+    conv_cache: dict | None = None
 
 
 def slot_density(n: int) -> str:
@@ -475,7 +483,7 @@ def _rates_from_log_strata(name: str) -> dict:
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
            "cur_pp_done": 0, "cur_pp_total": 0, "cur_prompt_tokens": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
-           "open_task": None, "open_slot": 0, "expert_hit_pct": None}
+           "open_task": None, "open_slot": 0, "expert_hit_pct": None, "conv_cache": None}
 
     # /metrics first: the same numbers as data instead of as prose. The log scrape below
     # stays as the fallback for a Strata too old to have the endpoint.
@@ -517,6 +525,17 @@ def _rates_from_log_strata(name: str) -> dict:
             out["last_pp_tps"] = round(read / (last["prompt_ms"] / 1000.0), 1)
         hr = last.get("hit_rate")
         out["expert_hit_pct"] = round(hr * 100.0, 1) if isinstance(hr, (int, float)) else None
+        cc = m.get("conversation_cache") or {}
+        if cc.get("enabled"):
+            # Parked conversations and the host RAM they occupy are the live state; the
+            # counters are since-boot and belong in the tooltip, not the row.
+            out["conv_cache"] = {
+                "parked": int(cc.get("parked") or 0), "slots": int(cc.get("slots") or 0),
+                "bytes": int(cc.get("bytes") or 0), "parks": int(cc.get("parks") or 0),
+                "restores": int(cc.get("restores") or 0),
+                "evictions": int(cc.get("evictions") or 0),
+                "requests": int(cc.get("requests") or 0),
+                "requests_reused": int(cc.get("requests_reused") or 0)}
         n = totals.get("requests")
         # `open_task` must be None when nothing is running and must CHANGE the moment a request
         # STARTS. totals.requests is a COMPLETED counter, so while a request was in flight it
@@ -942,6 +961,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         live=busy, slots=slots, solo=solo, solo_last_ts=solo_last_ts,
         expert_hit_pct=r.get("expert_hit_pct"),
         cache_known=_engine != "strata",
+        conv_cache=r.get("conv_cache"),
     )
     _speed_cache[container_name] = (time.time(), out)
     return out

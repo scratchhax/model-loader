@@ -9,7 +9,8 @@ def rates(**over):
     d = dict(cur_gen_tps=0.0, cur_gen_tokens=0, cur_pp_tps=0.0, cur_pp_pct=0,
              cur_pp_done=0, cur_pp_total=0, cur_prompt_tokens=0,
              last_gen_tps=0.0, last_gen_tokens=0, last_pp_tps=0.0, newest="",
-             open_task=None, open_slot=None, expert_hit_pct=None)
+             open_task=None, open_slot=None, expert_hit_pct=None,
+             conv_cache=None)
     return {**d, **over}
 
 
@@ -350,3 +351,49 @@ class TestReadIniAliases:
         p.write_text("[alpha]\nngl = 999\n\n[beta]\n")
         assert s.read_ini_aliases(p) == ["alpha", "beta"]
         assert s.read_ini_aliases(tmp_path / "gone.ini") == []
+
+
+class TestConversationCache:
+    """Strata's host-RAM conversation cache must reach the hero tile intact.
+
+    /metrics reports it as a section; the rates reader normalizes it and
+    inference_speed passes it through untouched. Absent or disabled means None,
+    which means no tile - never a zero that reads as an empty cache.
+    """
+    CC = {"parked": 2, "slots": 8, "bytes": 8194164960, "parks": 339,
+          "restores": 99, "evictions": 100, "requests": 500,
+          "requests_reused": 477}
+
+    def _metrics(self, cc):
+        return {"live": {"state": "idle"}, "requests": [],
+                "totals": {"requests": 500}, "conversation_cache": cc}
+
+    def test_enabled_section_is_normalized(self, monkeypatch):
+        from app.services import speed as sp
+        cc = {"enabled": True, **self.CC}
+        monkeypatch.setattr(sp, "strata_metrics", lambda n: self._metrics(cc))
+        assert sp._rates_from_log_strata("strata")["conv_cache"] == self.CC
+
+    def test_absent_or_disabled_is_none(self, monkeypatch):
+        from app.services import speed as sp
+        monkeypatch.setattr(sp, "strata_metrics",
+                            lambda n: self._metrics({"enabled": False}))
+        assert sp._rates_from_log_strata("strata")["conv_cache"] is None
+        monkeypatch.setattr(sp, "strata_metrics",
+                            lambda n: {"live": {}, "requests": [], "totals": {}})
+        assert sp._rates_from_log_strata("strata")["conv_cache"] is None
+
+    def test_flows_through_to_the_speed_object(self, monkeypatch):
+        helper = TestSoloContextInUse()
+        raw = [{"id": i, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0} for i in range(4)]
+        sp, out = helper._speed(monkeypatch, {"conv_cache": dict(TestConversationCache.CC)},
+                                raw)
+        assert out.conv_cache == TestConversationCache.CC
+
+    def test_llama_speed_carries_none(self, monkeypatch):
+        helper = TestSoloContextInUse()
+        raw = [{"id": 0, "n_ctx": 8192, "is_processing": False,
+                "n_prompt_tokens": 0}]
+        sp, out = helper._speed(monkeypatch, {}, raw, engine="llama")
+        assert out.conv_cache is None

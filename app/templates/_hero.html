@@ -449,6 +449,24 @@
       </div>
     </div>
     {% endif %}
+    {# ---- conversation cache -----------------------------------------------------------
+       Strata parks idle conversations' KV into host RAM and restores it on the next turn,
+       which is why an agent session resumes in under a second instead of re-reading its
+       history. The row is absent on every other engine - llama has no such cache - and on
+       a Strata too old to report it. It sits under the slot strip because it is the other
+       half of the same question: the strip shows what is ON the cards, this shows what is
+       parked beside them. #}
+    {% if speed and speed.conv_cache %}
+    {% set cc = speed.conv_cache %}
+    <div class="mt-2 flex items-baseline justify-between text-[10px] uppercase tracking-wide text-slate-500"
+         title="Strata's conversation cache: idle conversations' KV is parked in host RAM and restored on the next turn - this is why an agent turn comes back in under a second instead of re-reading its history. {{ cc.parked }} of {{ cc.slots }} parked slots hold {{ (cc.bytes / 1073741824) | round(1) }} GiB right now. Since boot: {{ cc.parks }} parks, {{ cc.restores }} restores, {{ cc.evictions }} evictions{% if cc.requests %}; {{ (100.0 * cc.requests_reused / cc.requests) | round(0) | int }}% of the last {{ '{:,}'.format(cc.requests) }} requests resumed from cache{% endif %}. Each eviction is a conversation thrown out to make room, and it costs a full re-read on its next turn - a climbing eviction count is the early warning that a context or concurrency change outgrew the budget. Host RAM, not the cards: this KV is VRAM that was already released.">
+      <span>conversation cache</span>
+      <span class="normal-case tracking-normal text-slate-600 tabular-nums">
+        {{ cc.parked }} of {{ cc.slots }} parked · {{ (cc.bytes / 1073741824) | round(1) }} GiB
+        {%- if cc.requests %} · {{ (100.0 * cc.requests_reused / cc.requests) | round(0) | int }}% resumed{% endif %}
+      </span>
+    </div>
+    {% endif %}
   </div>
 </div>
 
