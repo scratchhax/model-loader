@@ -218,7 +218,7 @@
        {% if speed and speed.solo and speed.solo.state != 'idle' and speed.solo.ctx_pct > ns.fill %}{% set ns.fill = speed.solo.ctx_pct %}{% endif %}
        {% set ctx_live = speed and speed.state != 'idle' %}
        {% set ctx_tint = 'rose' if ns.fill >= 90 else ('amber' if ns.fill >= 75 else ('emerald' if ctx_live else 'slate')) %}
-       {{ readout((speed.ctx_used / 1024) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
+       {{ readout((speed.ctx_used / 1000) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
                   ctx_live, ctx_tint, cx_spark, cx_peak, cx_samples,
                   'how full the window has been over the last few minutes; the peak is in tokens. Green while a generation is live, amber at 75% and rose at 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.') }}
 
@@ -258,7 +258,7 @@
         {% set mtp_label = mtp_label ~ ' · %.1f GB' % hero_mtp.cost.gb %}
         {% set mtp_acc_txt = mtp_acc_txt ~ ' The head costs %.1f GB of VRAM' % hero_mtp.cost.gb %}
         {% if hero_mtp.cost.ctx_tokens %}
-          {% set mtp_acc_txt = mtp_acc_txt ~ ", which at the KV rate of this model is about %dk of context you could have had instead" % (hero_mtp.cost.ctx_tokens // 1024) %}
+          {% set mtp_acc_txt = mtp_acc_txt ~ ", which at the KV rate of this model is about %dk of context you could have had instead" % (hero_mtp.cost.ctx_tokens // 1000) %}
         {% endif %}
         {% set mtp_acc_txt = mtp_acc_txt ~ ". Most of that is not the weights of the head: it runs its own context, so it allocates a second compute buffer the same size as the one the target uses." %}
       {% endif %}
@@ -331,7 +331,7 @@
         </div>
       </div>
       <div class="mt-1.5 flex justify-between text-[10px] tabular-nums text-slate-500">
-        <span>{{ (speed.ctx_used / 1024) | round(1) }}k of {{ (speed.ctx_total / 1024) | round(0) | int }}k window</span>
+        <span>{{ (speed.ctx_used / 1000) | round(1) }}k of {{ (speed.ctx_total / 1000) | round(0) | int }}k window</span>
         {# Against the PROMPT the busy slot arrived with, not against ctx_used. ctx_used is the
            whole KV pool - it grows as the model generates and it includes other slots holding
            other conversations - so dividing by it made a fully cached chat appear to shed cache
@@ -403,7 +403,7 @@
         {% if per_slot_ctx %}
         <span class="normal-case tracking-normal text-slate-600"
               title="--ctx-size is the whole KV pool; each slot gets that divided by parallel, rounded up to a multiple of 128">
-          {{ speed.slots | length }} × {{ (per_slot_ctx / 1024) | round(0) | int }}k each
+          {{ speed.slots | length }} × {{ (per_slot_ctx / 1000) | round(0) | int }}k each
         </span>
         {% endif %}
       </div>

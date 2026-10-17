@@ -96,3 +96,16 @@ def test_live_generation_at_low_fill_is_emerald(env):
     out = render(env, speed(IDLE4, solo))
     assert "border-emerald-500/40" in out and "text-emerald-300" in out
     assert "currently 30%" in out
+
+
+def test_token_k_figures_are_decimal_not_1024(env):
+    # Slot rows print raw token counts; the k readouts must read as the same
+    # number. 111,780 tokens is 111.8k in decimal - the /1024 bytes convention
+    # made the readout sit ~2% below the count it describes.
+    solo = slot(-1, "idle", tps=65.3, ctx_used=111780)
+    solo.decoded = 0
+    sp = speed([slot(0, "idle", ctx_used=111780)], solo=solo)
+    out = render(env, sp)
+    assert "111,780" in out          # raw count in the row/tooltip
+    assert ">111.8<" in out          # readout, decimal k
+    assert "111.8k of 262k window" in out  # context bar, decimal k
