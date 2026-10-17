@@ -37,7 +37,7 @@ def speed(slots, solo=None, solo_ts=0.0):
               prefill_pct=0, prompt_tokens=0, prefill_done=0, prefill_total=0,
               ctx_used=sum(s.ctx_used for s in slots), ctx_total=262144 * len(slots),
               ctx_cached=0, live=False, slots=slots, solo=solo, solo_last_ts=solo_ts,
-              expert_hit_pct=None)
+              expert_hit_pct=None, cache_known=True)
 
 
 BASE = dict(hero_model="m", hero_backend="strata", hero_shape=None, hero_quant="",
@@ -109,3 +109,23 @@ def test_token_k_figures_are_decimal_not_1024(env):
     assert "111,780" in out          # raw count in the row/tooltip
     assert ">111.8<" in out          # readout, decimal k
     assert "111.8k of 262k window" in out  # context bar, decimal k
+
+
+def test_strata_never_claims_a_cache_miss(env):
+    # Strata reports no cache occupancy: prompt_tokens with zero cached must NOT
+    # render "0% from cache - the whole prompt is being re-read". That claim is
+    # only honest for engines that report their cache.
+    solo = slot(-1, "generating", tps=80.0, ctx_used=161419)
+    sp = speed(IDLE4, solo)
+    sp.prompt_tokens = 161419
+    sp.cache_known = False
+    out = render(env, sp)
+    assert "from cache" not in out
+
+
+def test_llama_zero_cache_still_shows_the_miss(env):
+    hot = slot(0, "generating", tps=30.0, ctx_used=161419)
+    sp = speed([hot, IDLE4[1], IDLE4[2], IDLE4[3]])
+    sp.prompt_tokens = 161419
+    out = render(env, sp)
+    assert "0% from cache" in out and "being re-read" in out

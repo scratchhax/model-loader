@@ -168,6 +168,7 @@ class TestSoloContextInUse:
                 "n_prompt_tokens": 0} for i in range(4)]
         sp, out = self._speed(monkeypatch, {"cur_prompt_tokens": 1000}, raw)
         assert out.state == "generating"
+        assert out.cache_known is False  # Strata cannot answer the cache question live
         assert out.solo is not None and out.solo.ctx_used == 1050
         assert out.ctx_used == 1050
         # Strata slots share one pool: the denominator is the pool, not per-slot x count.
@@ -254,6 +255,7 @@ class TestSoloContextInUse:
         monkeypatch.setattr(sp, "_props_state", fake_props)
         out = asyncio.run(sp.inference_speed("c", 8080, "m1"))
         assert out.solo is None
+        assert out.cache_known is True  # llama reports n_prompt_tokens_cache
         # llama's n_ctx IS a per-slot share: the pool total stays share x count.
         assert out.ctx_used == 0 and out.ctx_total == 16384
 
