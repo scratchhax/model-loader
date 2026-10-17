@@ -192,6 +192,36 @@ class TestSoloContextInUse:
         assert out.solo is not None and out.solo.ctx_used == 83426
         assert out.ctx_used == 83426
 
+    def test_batch_generation_excludes_parked_slot_context(self, monkeypatch):
+        # Same rule while slots generate: the headline is the working conversations.
+        # Slot 0 generating 83,278 while slot 2 parks 30,415 of someone else's chat.
+        raw = [{"id": 0, "n_ctx": 262144, "is_processing": True,
+                "n_prompt_tokens": 83278},
+               {"id": 1, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0},
+               {"id": 2, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 30415},
+               {"id": 3, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0}]
+        sp, out = self._speed(monkeypatch, {}, raw)
+        assert out.state == "generating"
+        assert out.ctx_used == 83278
+
+    def test_idle_headline_still_shows_resident_slot_sum(self, monkeypatch):
+        # Nothing working: the remembered figures are the honest "how full the
+        # window has been" answer, parked conversations and all.
+        raw = [{"id": 0, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 139632},
+               {"id": 1, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0},
+               {"id": 2, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 30415},
+               {"id": 3, "n_ctx": 262144, "is_processing": False,
+                "n_prompt_tokens": 0}]
+        sp, out = self._speed(monkeypatch, {"open_task": None, "newest": ""}, raw)
+        assert out.state == "idle"
+        assert out.ctx_used == 139632 + 30415
+
     def test_idle_solo_row_is_history_not_pool_context(self, monkeypatch):
         import time as _time
         raw = [{"id": i, "n_ctx": 4096, "is_processing": False,

@@ -888,10 +888,14 @@ async def inference_speed(container_name: str, internal_port: int | None,
         # /slots had nothing - the log's running count, with no total to go with it.
         prefill_done = r["cur_pp_done"]
 
-    # Pool-wide context: every slot's share added up, against the whole --ctx-size pool. With
-    # parallel = 1 this is just the one slot, unchanged.
-    ctx_used = sum(sl.ctx_used for sl in slots)
-    ctx_cached = sum(sl.ctx_cached for sl in slots)
+    # Pool-wide context: while conversations WORK, the headline is those conversations -
+    # the same rule the solo path follows above. Slots parked with idle KV are holding,
+    # not working, and folding them in made a batch request read its own size plus every
+    # bystander's. With nothing live the sum of all slots is the honest figure: that KV
+    # is still resident, and the tile reads "how full the window has been".
+    live_slots = generating + prefilling
+    ctx_used = sum(sl.ctx_used for sl in live_slots or slots)
+    ctx_cached = sum(sl.ctx_cached for sl in live_slots or slots)
     per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
     if _engine == "strata":
         # Strata's slots share ONE pool: /slots reports each slot's n_ctx as the whole engine
