@@ -37,7 +37,7 @@ def speed(slots, solo=None, solo_ts=0.0):
               prefill_pct=0, prompt_tokens=0, prefill_done=0, prefill_total=0,
               ctx_used=sum(s.ctx_used for s in slots), ctx_total=262144 * len(slots),
               ctx_cached=0, live=False, slots=slots, solo=solo, solo_last_ts=solo_ts,
-              expert_hit_pct=None, cache_known=True)
+              expert_hit_pct=None, cache_known=True, conv_cache=None)
 
 
 BASE = dict(hero_model="m", hero_backend="strata", hero_shape=None, hero_quant="",
@@ -129,3 +129,32 @@ def test_llama_zero_cache_still_shows_the_miss(env):
     sp.prompt_tokens = 161419
     out = render(env, sp)
     assert "0% from cache" in out and "being re-read" in out
+
+
+CC = dict(parked=2, slots=8, bytes=8194164960, parks=339, restores=99,
+          evictions=100, requests=500, requests_reused=477)
+
+
+def test_conversation_cache_row_renders_with_parked_state(env):
+    sp = speed(IDLE4)
+    sp.conv_cache = dict(CC)
+    out = render(env, sp)
+    assert "conversation cache" in out
+    assert "2 of 8 parked" in out
+    assert "7.6 GiB" in out          # 8,194,164,960 bytes, binary GiB
+    assert "95% resumed" in out      # 477 of 500 requests
+    assert "339 parks, 99 restores, 100 evictions" in out
+
+
+def test_conversation_cache_row_absent_when_engine_has_none(env):
+    # llama backends (and old Strata) get no row at all - nothing to claim.
+    assert "conversation cache" not in render(env, speed(IDLE4))
+
+
+def test_conversation_cache_row_survives_missing_request_window(env):
+    sp = speed(IDLE4)
+    cc = dict(CC)
+    cc["requests"] = 0
+    sp.conv_cache = cc
+    out = render(env, sp)
+    assert "2 of 8 parked" in out and "resumed" not in out
