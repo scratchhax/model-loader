@@ -92,6 +92,11 @@ class InferenceSpeed:
     # almost nothing crosses PCIe, and on this box PCIe measured 6.6 GB/s against a 0.55
     # pcie_frac default. A drop here is the first sign a context or cache change went too far.
     expert_hit_pct: float | None = None
+    # Does this engine report KV cache occupancy? llama does (n_prompt_tokens_cache);
+    # Strata does not - its /slots has no cache field and /metrics only answers AFTER a
+    # request completes, with no solo/batch attribution. Callers must not read a 0 from
+    # Strata as "missed the cache": it means "unknown".
+    cache_known: bool = True
 
 
 def slot_density(n: int) -> str:
@@ -936,6 +941,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
         live=busy, slots=slots, solo=solo, solo_last_ts=solo_last_ts,
         expert_hit_pct=r.get("expert_hit_pct"),
+        cache_known=_engine != "strata",
     )
     _speed_cache[container_name] = (time.time(), out)
     return out
