@@ -261,9 +261,6 @@ _last_slots: dict[str, list[tuple[int, int]]] = {}
 # than the last figure. (ts, gen_tps, prompt_tokens, gen_tokens); the last live sample before
 # a pass finishes is its final one, so no completion hook is needed.
 _last_solo: dict[str, tuple[float, float, int, int]] = {}
-# The KV reuse seen during the current request's read phase, (prompt_total, cached),
-# carried across its decode because /metrics only reports it while reading.
-_pp_cached: dict[str, tuple[int, int]] = {}
 
 
 def _evict_other_models(cache: dict, key: str) -> None:
@@ -473,8 +470,7 @@ def _rates_from_log_strata(name: str) -> dict:
     out = {"cur_gen_tps": 0.0, "cur_gen_tokens": 0, "cur_pp_tps": 0.0, "cur_pp_pct": 0,
            "cur_pp_done": 0, "cur_pp_total": 0, "cur_prompt_tokens": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
-           "open_task": None, "open_slot": 0, "expert_hit_pct": None,
-           "cur_prompt_cached": 0}
+           "open_task": None, "open_slot": 0, "expert_hit_pct": None}
 
     # /metrics first: the same numbers as data instead of as prose. The log scrape below
     # stays as the fallback for a Strata too old to have the endpoint.
@@ -505,10 +501,6 @@ def _rates_from_log_strata(name: str) -> dict:
             # this is. It is the distinction the percentage existed to make: 400 tokens and
             # 166,754 tokens are 0.3 s and 57 s of waiting on this box.
             out["cur_pp_total"] = int(pt or live.get("prompt_tokens") or 0)
-            # KV reuse for this request, the one figure the cache bar wants. Only the
-            # read phase reports it; decode drops prompt_total/prompt_read entirely.
-            if pt and pr is not None:
-                out["cur_prompt_cached"] = int(pt) - int(pr)
         out["last_gen_tps"] = float(last.get("decode_tok_s") or 0.0)
         out["last_gen_tokens"] = int(last.get("output_tokens") or 0)
         # Prompt rate over the tokens actually READ, not the whole prompt: with prefix-cache
@@ -835,26 +827,6 @@ async def inference_speed(container_name: str, internal_port: int | None,
     # row is present whenever Strata has batch slots, showing the last solo pass dimmed when
     # the path is empty: the strip resizing on every solo-to-batch hand-off was more
     # distracting than a row that is idle half the time.
-    # Strata reports KV reuse ONLY while reading the prompt; the live section drops
-    # prompt_total/prompt_read the moment decode starts. Remember the figure from the
-    # read and carry it across the decode of the SAME request - matched on the prompt
-    # size the live section keeps reporting - so the cache bar survives the generation
-    # instead of vanishing after the first poll. A read that never reported progress
-    # (sub-chunk reads leave prompt_read null) yields no figure rather than a guess.
-    carried_cached = 0
-    if _engine == "strata":
-        if state in ("prefill", "generating"):
-            pt = int(r.get("cur_prompt_total") or 0)
-            pc = int(r.get("cur_prompt_cached") or 0)
-            if pt and pc:
-                _evict_other_models(_pp_cached, ctx_key)
-                _pp_cached[ctx_key] = (pt, pc)
-            stored = _pp_cached.get(ctx_key)
-            if stored and stored[0] == (pt or int(r.get("cur_prompt_tokens") or 0)):
-                carried_cached = stored[1]
-        else:
-            _pp_cached.pop(ctx_key, None)
-
     solo = None
     solo_last_ts = 0.0
     if _engine == "strata" and len(slots) > 1:
@@ -876,7 +848,6 @@ async def inference_speed(container_name: str, internal_port: int | None,
                 # guessing.
                 ctx_used=prompt_tok + gen_tok,
                 ctx_total=per_slot_ctx,
-                ctx_cached=carried_cached,
                 prefill_pct=r["cur_pp_pct"],
                 prefill_done=r["cur_pp_done"],
                 prefill_total=r["cur_pp_total"],
@@ -949,8 +920,6 @@ async def inference_speed(container_name: str, internal_port: int | None,
         # thousands while the conversation generating was a fraction of that.
         ctx_used = solo.ctx_used
         ctx_cached = solo.ctx_cached
-    elif _engine == "strata" and live_slots:
-        ctx_cached = carried_cached
 
     # Idle samples are recorded as zero rather than skipped: the gaps between requests are part
     # of the shape, and a line drawn only from busy moments would imply continuous work.

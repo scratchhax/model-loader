@@ -8,7 +8,6 @@ from app import services as s
 def rates(**over):
     d = dict(cur_gen_tps=0.0, cur_gen_tokens=0, cur_pp_tps=0.0, cur_pp_pct=0,
              cur_pp_done=0, cur_pp_total=0, cur_prompt_tokens=0,
-             cur_prompt_total=0, cur_prompt_cached=0,
              last_gen_tps=0.0, last_gen_tokens=0, last_pp_tps=0.0, newest="",
              open_task=None, open_slot=None, expert_hit_pct=None)
     return {**d, **over}
@@ -150,7 +149,7 @@ class TestSoloContextInUse:
         from app.services import speed as sp
         for store in (sp._speed_cache, sp._rates_cache, sp._last_slots,
                       sp._last_solo, sp._settled_task,
-                      sp._tps_history, sp._ctx_history, sp._pp_cached):
+                      sp._tps_history, sp._ctx_history):
             store.clear()
         r = rates(**{"open_task": "t1", "newest": "gen", "cur_gen_tps": 40.0,
                      "cur_gen_tokens": 50, **r_over})
@@ -245,7 +244,7 @@ class TestSoloContextInUse:
         from app.services import speed as sp
         for store in (sp._speed_cache, sp._rates_cache, sp._last_slots,
                       sp._last_solo, sp._settled_task,
-                      sp._tps_history, sp._ctx_history, sp._pp_cached):
+                      sp._tps_history, sp._ctx_history):
             store.clear()
         sp._rates_cache["c"] = (_time.time(), rates())
         monkeypatch.setattr(sp, "engine_for", lambda name: "llama")
@@ -257,69 +256,6 @@ class TestSoloContextInUse:
         assert out.solo is None
         # llama's n_ctx IS a per-slot share: the pool total stays share x count.
         assert out.ctx_used == 0 and out.ctx_total == 16384
-
-
-class TestStrataCacheRatio:
-    """Strata's % from cache: reported only while reading, carried across decode."""
-    IDLE4 = [{"id": i, "n_ctx": 262144, "is_processing": False,
-              "n_prompt_tokens": 0} for i in range(4)]
-
-    def test_read_phase_publishes_reuse(self, monkeypatch):
-        from app.services import speed as sp
-        r = {"open_task": "t1", "newest": "prefill", "cur_prompt_tokens": 10000,
-             "cur_prompt_total": 10000, "cur_prompt_cached": 8000, "cur_pp_pct": 20,
-             "cur_pp_done": 2000, "cur_pp_total": 10000}
-        sp, out = TestSoloContextInUse._speed(self, monkeypatch, r, self.IDLE4)
-        assert out.state == "prefill"
-        assert out.ctx_cached == 8000
-        assert out.prompt_tokens == 10000  # the bar's denominator
-
-    def test_reuse_carries_across_the_decode_of_the_same_request(self, monkeypatch):
-        import asyncio
-        import time as _time
-        from app.services import speed as sp
-        TestSoloContextInUse._speed(
-            self, monkeypatch,
-            {"open_task": "t1", "newest": "prefill", "cur_prompt_tokens": 10000,
-             "cur_prompt_total": 10000, "cur_prompt_cached": 8000}, self.IDLE4)
-        # Decode: /metrics drops prompt_total/prompt_read but keeps prompt_tokens.
-        sp._speed_cache.clear()
-        sp._rates_cache["c"] = (_time.time(), rates(
-            **{"open_task": "t1", "newest": "gen", "cur_gen_tps": 40.0,
-               "cur_prompt_tokens": 10000}))
-        out = asyncio.run(sp.inference_speed("c", 8080, "m1"))
-        assert out.state == "generating"
-        assert out.ctx_cached == 8000
-
-    def test_different_prompt_size_gets_no_carry(self, monkeypatch):
-        import asyncio
-        import time as _time
-        from app.services import speed as sp
-        TestSoloContextInUse._speed(
-            self, monkeypatch,
-            {"open_task": "t1", "newest": "prefill", "cur_prompt_tokens": 10000,
-             "cur_prompt_total": 10000, "cur_prompt_cached": 8000}, self.IDLE4)
-        sp._speed_cache.clear()
-        sp._rates_cache["c"] = (_time.time(), rates(
-            **{"open_task": "t2", "newest": "gen", "cur_gen_tps": 40.0,
-               "cur_prompt_tokens": 68}))
-        out = asyncio.run(sp.inference_speed("c", 8080, "m1"))
-        assert out.ctx_cached == 0  # a new request: no figure rather than a stale one
-
-    def test_idle_clears_the_carry(self, monkeypatch):
-        import asyncio
-        import time as _time
-        from app.services import speed as sp
-        TestSoloContextInUse._speed(
-            self, monkeypatch,
-            {"open_task": "t1", "newest": "prefill", "cur_prompt_tokens": 10000,
-             "cur_prompt_total": 10000, "cur_prompt_cached": 8000}, self.IDLE4)
-        sp._speed_cache.clear()
-        sp._rates_cache["c"] = (_time.time(), rates(
-            **{"open_task": None, "newest": ""}))
-        out = asyncio.run(sp.inference_speed("c", 8080, "m1"))
-        assert out.state == "idle" and out.ctx_cached == 0
-        assert "c/m1" not in sp._pp_cached
 
 
 class TestPruneSlotState:
