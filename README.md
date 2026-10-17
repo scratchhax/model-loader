@@ -398,7 +398,11 @@ Browser (HTMX + Alpine + Tailwind CDN)
    ▼
 FastAPI (app/main.py) ──── Jinja2 templates (app/templates/)
    │
-   ├── app/services.py    docker SDK, models-dir helpers, OpenWebUI reconciler
+   ├── app/routers/     one APIRouter module per nav section (included by main.py)
+   ├── app/web.py       shared Jinja env + toast/chip response builders
+   ├── app/fit.py       shared VRAM/RAM placement math (search estimates, config)
+   ├── app/services/    docker SDK, models-dir helpers, engine switching, OpenWebUI
+   │                    reconciler, speed math (package; __init__ re-exports the surface)
    ├── app/autoconfig.py  KV cache math, preset picker, VRAM fit
    ├── app/hw.py          background sampler (nvidia-smi / rocm-smi via docker exec)
    ├── app/hf.py          HF Hub API (search, repo tree, avatar cache)

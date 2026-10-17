@@ -20,7 +20,10 @@ app/
   routers/            One APIRouter module per nav section, included by main.py.
   web.py              Shared Jinja env + response plumbing (toast/chip builders).
   fit.py              VRAM/RAM placement math inputs shared by search estimates and config.
-  services.py         docker SDK wrapper, models-dir helpers, OpenWebUI reconciler.
+  services/           Package: docker SDK seam, models-dir helpers, engine switching,
+                      OpenWebUI reconciler, speed math. Split along its section seams;
+                      __init__.py re-exports the whole surface, so call sites keep
+                      spelling services.foo and module state lives in one submodule.
   autoconfig.py       KV cache math, preset picker, VRAM fit, MoE offload strategy.
   hw.py               Background sampler thread, per-container stats cache.
   hf.py               HF Hub API client (search, tree, avatar cache).
