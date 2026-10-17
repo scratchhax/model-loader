@@ -170,7 +170,8 @@ class TestSoloContextInUse:
         assert out.state == "generating"
         assert out.solo is not None and out.solo.ctx_used == 1050
         assert out.ctx_used == 1050
-        assert out.ctx_total == 4096 * 4
+        # Strata slots share one pool: the denominator is the pool, not per-slot x count.
+        assert out.ctx_total == 4096
         assert sp._ctx_history["c"][-1][1] == 1050.0
 
     def test_solo_generation_excludes_idle_slot_context(self, monkeypatch):
@@ -218,11 +219,12 @@ class TestSoloContextInUse:
         monkeypatch.setattr(sp, "engine_for", lambda name: "llama")
 
         async def fake_props(name, port, model):
-            return {"n_ctx": 8192, "total_slots": 1}
+            return {"n_ctx": 8192, "total_slots": 2}
         monkeypatch.setattr(sp, "_props_state", fake_props)
         out = asyncio.run(sp.inference_speed("c", 8080, "m1"))
         assert out.solo is None
-        assert out.ctx_used == 0 and out.ctx_total == 8192
+        # llama's n_ctx IS a per-slot share: the pool total stays share x count.
+        assert out.ctx_used == 0 and out.ctx_total == 16384
 
 
 class TestPruneSlotState:
