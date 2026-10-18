@@ -10,7 +10,7 @@ from .. import strata as strata_engine
 from ..config import settings
 
 from .backends import (_effective_container_names, _extract_ports,
-                      discover_llama_containers)
+                      discover_llama_containers, engine_for)
 from .dockerbase import _docker_client
 from .gpu import gpu_holders
 
@@ -334,10 +334,10 @@ def _cpu_backends() -> list[str]:
     return out
 
 
-def vram_fit_chips(size_bytes: int) -> list[dict]:
+def vram_fit_chips(size_bytes: int, summary: dict | None = None) -> list[dict]:
     """Per-backend fit verdicts: {'name', 'vram_gb', 'verdict', 'ratio_pct'}.
 
-    verdict is one of {fits, tight, oom, impossible}.
+    verdict is one of {fits, tight, oom, streams, impossible}.
 
     `oom` and `impossible` are genuinely different answers and must not look alike. `oom`
     means "not on the GPU alone" — offload moves layers into system RAM and it runs, slower.
@@ -347,22 +347,38 @@ def vram_fit_chips(size_bytes: int) -> list[dict]:
 
     An impossible model returns a SINGLE machine-level chip rather than one per backend,
     because naming backends implies picking a different one would help.
+
+    `summary` is the repo's GGUF header (optional — gated repos and header-fetch failures
+    fall back to size-only verdicts). It exists for one question the size cannot answer:
+    is this a mixture-of-experts model on Strata? Strata's design mode is to keep attention
+    and the hot experts resident and STREAM the routed experts from host RAM, so an MoE
+    larger than VRAM is not an offload-candidate-slower — it is the normal case. Measured
+    on this box: a 78.1 GiB IQ3_S Flash-Next running on Strata at ~120 tok/s while the
+    size-only chip called it oom against 63.7 GiB of VRAM. Dense models keep the VRAM-only
+    verdicts on every engine, because for them there is nothing to stream.
     """
     from .. import hw
     gb = size_bytes / (1024 ** 3)
+    moe = bool(((summary or {}).get("model") or {}).get("expert_count"))
 
     # usable, not total: the OS reserve is already spoken for (see hw.usable_ram_gb).
     ram = hw.usable_ram_gb()
+    # Strata's own pinned arena is streaming budget, not competition: loading a different
+    # model on strata reclaims it, so for an MoE the machine's real ceiling includes it.
+    # Other engines must not count on it — pinned anonymous memory does not give itself
+    # back to a llama-server process.
+    arena = hw.strata_arena_gb() if moe else 0.0
+    ceiling = ram + arena
     pooled = max((v for v in _fit_backends().values() if v > 0), default=0.0)
-    if ram > 0 and pooled > 0 and gb > (pooled + ram):
+    if ram > 0 and pooled > 0 and gb > (pooled + ceiling):
         return [{
             "name": "this machine",
             "vram_gb": round(pooled, 1),
-            "host_ram_gb": round(ram, 1),
+            "host_ram_gb": round(ceiling, 1),
             "verdict": "impossible",
-            "ratio_pct": round(gb / (pooled + ram) * 100),
+            "ratio_pct": round(gb / (pooled + ceiling) * 100),
             "needs_gb": round(gb),
-            "ceiling_gb": round(pooled + ram),
+            "ceiling_gb": round(pooled + ceiling),
         }]
 
     out: list[dict] = []
@@ -374,14 +390,23 @@ def vram_fit_chips(size_bytes: int) -> list[dict]:
             verdict = "fits"
         elif ratio < 0.9:
             verdict = "tight"
+        elif moe and ceiling > 0 and engine_for(name) == "strata":
+            verdict = "streams"
         else:
             verdict = "oom"
-        out.append({
+        chip = {
             "name": name,
             "vram_gb": vram,
             "verdict": verdict,
             "ratio_pct": round(ratio * 100),
-        })
+        }
+        if verdict == "streams":
+            # The honest denominator for a streaming verdict is the combined pool the
+            # model actually spans; the VRAM-only ratio would read >100% and re-look
+            # like the oom this verdict exists to correct.
+            chip["host_ram_gb"] = round(ceiling, 1)
+            chip["ratio_pct"] = round(gb / (vram + ceiling) * 100)
+        out.append(chip)
 
     # CPU backends are sized against usable RAM. "Fits" and "usable" diverge sharply here:
     # generation is RAM-bandwidth-bound, so a large dense model can occupy memory perfectly
