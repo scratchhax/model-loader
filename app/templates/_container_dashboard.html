@@ -111,7 +111,14 @@
   <dd class="tabular-nums">{{ b.uptime or '—' }}</dd>
 
   <dt class="text-slate-500 dark:text-slate-400">Started</dt>
-  <dd class="tabular-nums text-slate-600 dark:text-slate-300">{{ b.started_at or '—' }}</dd>
+  <dd class="tabular-nums text-slate-600 dark:text-slate-300">{{ b.started_at or '—' }}
+    {% if b.name in ini_stale %}
+    {# llama-server reads --models-preset only at startup: sections added to the ini since
+       this start are real but unserved, and the Router page lists them "(not loaded)". #}
+    <span class="block text-xs text-amber-600 dark:text-amber-400"
+          title="models.ini was edited after this backend started. llama-server only reads it at startup, so new sections are not served until a restart.">models.ini changed since start — restart to pick up new sections</span>
+    {% endif %}
+  </dd>
 
   <dt class="text-slate-500 dark:text-slate-400">Host ports</dt>
   <dd class="font-mono">
