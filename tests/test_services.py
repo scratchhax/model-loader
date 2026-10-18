@@ -397,3 +397,80 @@ class TestConversationCache:
                 "n_prompt_tokens": 0}]
         sp, out = helper._speed(monkeypatch, {}, raw, engine="llama")
         assert out.conv_cache is None
+
+
+class TestFitChips:
+    """vram_fit_chips verdicts, especially the strata streaming case: an MoE over VRAM
+    is not oom on strata — the box ran a 78.1 GiB IQ3_S Flash-Next at ~120 tok/s while
+    the size-only chip said otherwise.
+    """
+    VRAM = 63.7
+    RAM = 120.0
+    MOE = {"model": {"expert_count": 128, "expert_used_count": 8}}
+    DENSE = {"model": {"expert_count": None}}
+
+    def _stub(self, monkeypatch, ram=None, arena=0.0):
+        from app import hw
+        from app.services import stratactl as sc
+        monkeypatch.setattr(sc, "_fit_backends",
+                            lambda: {"strata": self.VRAM, "llama-9700x2": self.VRAM})
+        monkeypatch.setattr(sc, "_cpu_backends", lambda: [])
+        monkeypatch.setattr(sc, "engine_for",
+                            lambda n: "strata" if n == "strata" else "llama")
+        monkeypatch.setattr(hw, "usable_ram_gb", lambda: self.RAM if ram is None else ram)
+        monkeypatch.setattr(hw, "strata_arena_gb", lambda: arena)
+        return sc
+
+    def _chip(self, chips, name):
+        return next(c for c in chips if c["name"] == name)
+
+    def test_moe_over_vram_streams_on_strata_and_stays_oom_on_llama(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        chips = sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.MOE)
+        assert self._chip(chips, "strata")["verdict"] == "streams"
+        assert self._chip(chips, "llama-9700x2")["verdict"] == "oom"
+
+    def test_streams_ratio_uses_the_combined_pool(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        c = self._chip(sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.MOE), "strata")
+        assert c["ratio_pct"] == round(78.1 / (self.VRAM + self.RAM) * 100)
+        assert c["host_ram_gb"] == self.RAM
+
+    def test_moe_that_fits_the_cards_is_still_fits(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        chips = sc.vram_fit_chips(int(30 * 1024 ** 3), self.MOE)
+        assert self._chip(chips, "strata")["verdict"] == "fits"
+
+    def test_dense_over_vram_is_still_oom_on_strata(self, monkeypatch):
+        # Nothing to stream: dense weights have nowhere to go but the cards.
+        sc = self._stub(monkeypatch)
+        chips = sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.DENSE)
+        assert self._chip(chips, "strata")["verdict"] == "oom"
+
+    def test_no_header_falls_back_to_size_only(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        chips = sc.vram_fit_chips(int(78.1 * 1024 ** 3))
+        assert self._chip(chips, "strata")["verdict"] == "oom"
+
+    def test_over_the_combined_pool_is_still_impossible(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        chips = sc.vram_fit_chips(int(200 * 1024 ** 3), self.MOE)
+        assert chips[0]["verdict"] == "impossible"
+
+    def test_strata_arena_counts_for_strata_only(self, monkeypatch):
+        # Strata up with a big arena makes usable_ram_gb tiny - but switching strata to
+        # another model reclaims its own arena, so an MoE may count on it. llama may not.
+        sc = self._stub(monkeypatch, ram=6.4, arena=87.2)
+        chips = sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.MOE)
+        c = self._chip(chips, "strata")
+        assert c["verdict"] == "streams"
+        assert c["host_ram_gb"] == 93.6
+        assert c["ratio_pct"] == round(78.1 / (self.VRAM + 93.6) * 100)
+        assert self._chip(chips, "llama-9700x2")["verdict"] == "oom"
+
+    def test_dense_cannot_reclaim_the_arena(self, monkeypatch):
+        # Same numbers, dense model: no streaming anywhere, and the machine-level
+        # ceiling stays VRAM + usable (arena excluded).
+        sc = self._stub(monkeypatch, ram=6.4, arena=87.2)
+        chips = sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.DENSE)
+        assert chips[0]["verdict"] == "impossible"

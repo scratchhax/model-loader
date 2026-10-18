@@ -120,7 +120,6 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
                 "total_size_h": human_bytes(total_size),
                 "total_size": total_size,
                 "quant": next((x.quant for x in files if x.quant), None),
-                "fit_chips": services.vram_fit_chips(total_size),
                 "files": [{"path": x.path, "size": x.size, "size_h": human_bytes(x.size), "quant": x.quant} for x in files],
             })
         groups.sort(key=lambda g: (0 if g["files"][0]["path"].lower().endswith(".gguf") else 1, g["shard_base"].lower()))
@@ -144,6 +143,7 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
         ]
         mmproj_gb = (min(mmproj_sizes) / (1024 ** 3)) if mmproj_sizes else 0.0
 
+        summary = None
         if probe:
             summary = await hf.gguf_header(repo_id, probe["files"][0]["path"])
             # A gated repo lists its files publicly but refuses the weights, so estimates
@@ -159,6 +159,14 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
                         continue
                     g["estimates"] = _preset_estimates(summary, g["total_size"], mmproj_gb)
                     g["native_ctx"] = (summary.get("model") or {}).get("context_length") or 0
+
+        # The chips come AFTER the header probe, because the header is what tells an MoE
+        # from a dense model — and for Strata that is the whole question: an MoE over VRAM
+        # streams its routed experts from host RAM and runs at full speed, so a size-only
+        # chip calling it oom contradicts the engine running it right now. Without a
+        # header (gated repo, fetch failure) the chips fall back to size-only, as before.
+        for g in groups:
+            g["fit_chips"] = services.vram_fit_chips(g["total_size"], summary)
     except httpx.HTTPStatusError as e:
         error = f"HF returned HTTP {e.response.status_code} for {repo_id}"
     except httpx.HTTPError as e:
