@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from datetime import datetime
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
 from .. import db, gpu_procs, hw, ini, services, vram_live
+from ..config import settings
 from .. import strata as strata_engine
 from ..downloader import manager
 from ..fit import _gpu_tenants, _solo_backend
@@ -60,6 +63,10 @@ def _perf_by_name() -> dict:
 @router.get("/containers", response_class=HTMLResponse)
 async def containers_page(request: Request) -> HTMLResponse:
     backends = await services.snapshot_llama_backends()
+    try:
+        ini_mtime = os.path.getmtime(settings.models_ini_path)
+    except OSError:
+        ini_mtime = 0.0
     return templates.TemplateResponse("containers.html", {
         "request": request, "backends": backends, "stats": _stats_by_name(), "perf": _perf_by_name(),
         "prompts": db.list_prompts(),
@@ -67,8 +74,31 @@ async def containers_page(request: Request) -> HTMLResponse:
         # Raw model ids a backend reports — what OpenWebUI's model_ids whitelist matches on.
         # Every llama backend serves the same models.ini, so the section names are the list.
         "all_model_ids": sorted(ini.section_names()),
+        "ini_stale": {b.name for b in backends
+                      if b.status == "running" and getattr(b, "engine", "llama") == "llama"
+                      and ini_stale_since(b.started_at, ini_mtime)},
         "strata_pin": _strata_pin_state(backends),
     })
+
+
+def ini_stale_since(started_at: str, ini_mtime: float) -> bool:
+    """True when a backend started before models.ini was last written.
+
+    llama-server reads --models-preset only at startup, so such a backend cannot be serving
+    sections added since - the Router page names them as "(not loaded)". Unparseable or
+    missing start times answer False: no note beats a wrong note.
+    """
+    if not started_at or started_at.startswith("0001") or ini_mtime <= 0:
+        return False
+    try:
+        core, _, frac = started_at.partition(".")
+        if frac:
+            dt = datetime.fromisoformat(f"{core}.{frac.rstrip('Z')[:6]}+00:00")
+        else:
+            dt = datetime.fromisoformat(core.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return dt.timestamp() < ini_mtime
 
 
 def _strata_pin_state(backends) -> dict | None:

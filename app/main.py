@@ -534,11 +534,16 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
             if m not in per_engine[b["engine"]]:
                 per_engine[b["engine"]].append(m)
     per_engine["llama"] = [(m, m) for m in per_engine.get("llama", [])]
+    # ini sections no running llama backend serves (added after its last start) are offered
+    # too, labelled - a dropdown that silently omits them reads as the app losing the model.
+    unloaded = set(router_api.unloaded_sections([m for m, _ in per_engine.get("llama", [])]))
+    per_engine["llama"] += [(n, n) for n in sorted(unloaded)]
     per_engine["strata"] = _strata_choices()
     return templates.TemplateResponse("router.html", {
         "request": request,
         "engines": router_api.ENGINES,
         "per_engine": per_engine,
+        "unloaded": unloaded,
         "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
         "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
         "autoswitch": {e: router_api.autoswitch_enabled(e) for e in router_api.ENGINES},

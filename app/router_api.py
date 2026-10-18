@@ -37,7 +37,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import db, narrate, services
+from . import db, ini, narrate, services
 from .utils import docker_client
 
 app = FastAPI(title="Model Router")
@@ -241,6 +241,17 @@ async def _live_map() -> tuple[list[dict], dict[str, dict]]:
             for m in b["models"]:
                 by_model.setdefault(m, b)      # first wins, and the list is ranked
     return bs, by_model
+
+
+def unloaded_sections(served: list[str]) -> list[str]:
+    """models.ini sections no running llama backend advertises, sorted.
+
+    llama-server reads --models-preset only at startup, so a section added to the ini after
+    a backend started is real but unserved until a restart - and a Router dropdown that
+    hides it entirely reads as "the app lost my model". Name the gap instead.
+    """
+    s = set(served)
+    return sorted(n for n in ini.section_names() if n not in s)
 
 
 def default_for(engine: str) -> str:

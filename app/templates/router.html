@@ -72,7 +72,8 @@
            TAG, because the choosable unit there is an installed pack rather than the one model
            it happens to be serving. #}
         {% for val, label in per_engine.get(e, []) %}
-        <option value="{{ val }}" {% if defaults.get(e) == val %}selected{% endif %}>{{ label }}</option>
+        <option value="{{ val }}" {% if defaults.get(e) == val %}selected{% endif %}
+                {% if val in unloaded %}title="In models.ini but no running llama backend serves it — that backend was started before this section existed. Restart it (Containers page) to load."{% endif %}>{{ label }}{% if val in unloaded %} (not loaded){% endif %}</option>
         {% endfor %}
       </select>
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
