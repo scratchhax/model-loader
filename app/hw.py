@@ -625,6 +625,47 @@ def vram_gb_for(name: str) -> float:
     return 0.0
 
 
+# The sampler's probe needs a RUNNING llama backend, but the card totals themselves are a
+# property of the machine, published world-readable by the amdgpu driver. Autoconfig uses
+# these to size a plan while the llama backend is stopped - the plan describes the state
+# after the engine switch, when those cards are llama's again.
+_DRM_CARDS = Path("/sys/class/drm")
+
+
+def sysfs_card_vram_gb() -> list[float]:
+    """Per-card total VRAM (GiB) read straight from sysfs, in card order.
+
+    [] when nothing is readable: no amdgpu driver, a masked /sys, or an nvidia box
+    (nvidia publishes no mem_info_vram_total, so this stays an amdgpu fact and nvidia
+    keeps relying on the live probe, which is what it has always done).
+    """
+    out: list[float] = []
+    try:
+        cards = sorted(_DRM_CARDS.glob("card[0-9]*/device/mem_info_vram_total"))
+    except OSError:
+        return []
+    for p in cards:
+        try:
+            out.append(round(int(p.read_text().strip()) / 1024 ** 3, 1))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def sysfs_gpu_vendor() -> str:
+    """GPU vendor from the DRM driver symlink: 'rocm' for amdgpu, 'cuda' for nvidia, '' else."""
+    try:
+        for link in sorted(_DRM_CARDS.glob("card[0-9]*/device/driver")):
+            name = Path(os.readlink(link)).name
+            if name == "amdgpu":
+                return "rocm"
+            if name == "nvidia":
+                return "cuda"
+    except OSError:
+        pass
+    return ""
+
+
 def _record_history(name: str, s: BackendStats) -> None:
     """Append one sample. Called from the sampler only; caller holds no lock."""
     if not s.ok:

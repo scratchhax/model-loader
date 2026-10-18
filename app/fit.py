@@ -103,11 +103,31 @@ def _container_baseline(name: str) -> list[str]:
 
 
 
+def _container_status(name: str) -> str:
+    """Docker status string ('running', 'exited', ...) or '' when unknowable."""
+    try:
+        client = services._docker_client()
+        if client is None:
+            return ""
+        return str(client.containers.get(name).status or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _backend_list() -> list[dict]:
     """Backend descriptors for autoconfig, from the env whitelist or auto-discovery.
 
     Extracted so the benchmark results page can ask for the same fit estimate the autoconfig
     panel shows, rather than growing a second, drifting copy of this.
+
+    A discovered llama container that is STOPPED used to be dropped - its sampler probe is
+    dead, so its VRAM read 0 and the panel hard-stopped with "no GPU backend available".
+    But the card totals are a property of the machine, not of the running container, and
+    the plan being sized describes the state AFTER the engine switch. So a stopped GPU
+    backend is now offered with the sysfs card facts and an `offline` flag the panel
+    discloses. A running container whose probe still reads 0 (CPU build, unreadable SMI)
+    is dropped exactly as before - there the machine facts may not describe that
+    container's devices at all.
     """
     out = []
     for bn in services._effective_container_names():
@@ -120,8 +140,14 @@ def _backend_list() -> list[dict]:
         if services.engine_for(bn) != "llama":
             continue
         vram = hw.vram_gb_for(bn)
+        offline = False
+        cards: list[float] = []
         if vram <= 0:
-            continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
+            cards = hw.sysfs_card_vram_gb()
+            if not cards or _container_status(bn) == "running":
+                continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
+            offline = True
+            vram = sum(cards)
         # detect vendor via hw sampler cache (or docker inspect image)
         vendor = "unknown"
         try:
@@ -134,12 +160,21 @@ def _backend_list() -> list[dict]:
                     vendor = "cuda"
         except Exception:  # noqa: BLE001
             pass
+        if vendor == "unknown":
+            vendor = hw.sysfs_gpu_vendor() or "unknown"
         cmd = _container_baseline(bn)
         base = autoconfig.parse_baseline(cmd) if cmd else {}
-        out.append({"name": bn, "vendor": vendor, "vram_gb": float(vram),
-                    "gpu_count": hw.gpu_count_for(bn), "card_vram_gb": _fit_card_vram(bn),
-            "host_ram_gb": _fit_host_ram(),
-                    "baseline": base})
+        entry = {"name": bn, "vendor": vendor, "vram_gb": float(vram),
+                 "gpu_count": len(cards) if offline else hw.gpu_count_for(bn),
+                 "card_vram_gb": list(cards) if offline else _fit_card_vram(bn),
+                 "host_ram_gb": _fit_host_ram(),
+                 "baseline": base}
+        if offline:
+            # The strata-held zeroing is deliberately NOT applied to an offline entry:
+            # strata holds the cards only until the engine switch, and the plan is for
+            # after it.
+            entry["offline"] = True
+        out.append(entry)
     return out
 
 

@@ -707,6 +707,10 @@ class Recommendation:
     # there is nothing to trade — offloading layers cannot buy context beyond native — so
     # the UI shows a single option instead of three chips that would all be identical.
     fits_full_gpu: bool = False
+    # True when the recommended backend is STOPPED and the fit was sized against the
+    # machine's sysfs card facts rather than the container's live probe. The panel must
+    # disclose that: the numbers describe the box, not a verified probe of that backend.
+    offline_fit: bool = False
     # The presets differ only by context: the model is fully resident at all of them, so
     # the panel shows what actually separates them and drops the layer/speed columns.
     ctx_only_presets: bool = False
@@ -1494,7 +1498,8 @@ def analyze(*,
             plans=[], recommended_backend="", recommended_ctx=0,
             error="No GPU backend available to size against. Either no llama.cpp container was "
                   "discovered, or its VRAM probe returned 0 (CPU-only build, or nvidia-smi / "
-                  "rocm-smi not usable inside the container). Check the Containers page: a backend "
+                  "rocm-smi not usable inside the container) and the machine's own card totals "
+                  "were not readable from /sys/class/drm. Check the Containers page: a backend "
                   "must appear there with a non-zero VRAM total before Autoconfig can plan. "
                   "This is not a statement about whether the model would fit.",
         )
@@ -2588,6 +2593,8 @@ def analyze(*,
         vision=bool(mmproj_rel) and bool(projector_rel),
         projector_rel=projector_rel,
         recommended_backend=(recommended.name if recommended else ""),
+        offline_fit=bool(recommended) and any(
+            b.get("offline") and b.get("name") == recommended.name for b in backends),
         recommended_ctx=rec_ctx,
         recommended_total_ctx=rec_ctx * n_sessions if rec_ctx > 0 else 0,
         n_sessions=n_sessions,
