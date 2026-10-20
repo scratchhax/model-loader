@@ -632,7 +632,7 @@ def router_set_recording(on: str = Form("1")) -> HTMLResponse:
 
 
 @app.post("/router/autoswitch", response_class=HTMLResponse)
-def router_set_autoswitch(engine: str = Form(...), on: str = Form("")) -> HTMLResponse:
+def router_set_autoswitch(request: Request, engine: str = Form(...), on: str = Form("")) -> HTMLResponse:
     """Let a request for `engine` hand it the cards, instead of being refused.
 
     Per engine and off by default, because this is the one control here that moves hardware on
@@ -644,7 +644,8 @@ def router_set_autoswitch(engine: str = Form(...), on: str = Form("")) -> HTMLRe
     if engine not in router_api.ENGINES:
         return _toast(False, f"unknown engine {engine}")
     db.set_setting(f"router.autoswitch.{engine}", "1" if on == "1" else "")
-    return HTMLResponse(_QUEUED_CHIP.format(
-        label="Saved",
-        title=(f"requests for {engine} may switch the engines"
-               if on == "1" else f"requests for {engine} will be refused instead of switching")))
+    # The switch itself, re-rendered in its new state - not a "Saved" chip, which replaced the
+    # control and left nothing to click until a reload.
+    return templates.TemplateResponse("_autoswitch_toggle.html", {
+        "request": request, "e": engine, "on": router_api.autoswitch_enabled(engine),
+        "dwell": int(router_api.dwell_s())})
