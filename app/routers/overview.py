@@ -174,7 +174,7 @@ async def _hero_context() -> dict:
         if best is None or rank > best[0]:
             best = (rank, b, sp)
     if best is None:
-        return {"speed": None, "hero_model": "", "hero_backend": "",
+        return {"speed": None, "hero_model": "", "hero_backend": "", "hero_engine": "",
                 "hero_shape": None, "hero_quant": "", "hero_size_h": "",
                 "hero_ctx_cfg": "", "hero_vram_used": None, "hero_vram_total": 0.0,
                 "tps_spark": "", "tps_peak": 0.0, "tps_samples": 0,
@@ -315,6 +315,7 @@ async def _hero_context() -> dict:
     cx = services.ctx_history(b.name)
     cx_peak = max(cx) if cx else 0.0
     return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
+            "hero_engine": services.engine_for(b.name),
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
             "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
             # Blank mid-load. tps_history is per BACKEND, so the line drawn during a swap is

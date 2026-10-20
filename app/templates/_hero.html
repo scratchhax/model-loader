@@ -32,8 +32,18 @@
    generating, which is that both are the box working rather than the box waiting. #}
 {% set glowing = live or hero_loading %}
 
+{# The engine's colour (app/engine_colors.py): a light shade over the whole card and its border, so
+   which engine holds the cards reads at a glance. Only while a model is up - an empty card is
+   nobody's. The state wash below keeps its corner on top of it. #}
+{% set tint = engine_tint(hero_engine) if (hero_model and engine_tint is defined) else None %}
 <div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 px-5 py-4 text-slate-100
-            shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)]">
+            shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)]"
+     {% if tint %}style="border-color: rgba({{ tint.rgb }}, 0.45);"{% endif %}>
+
+  {% if tint %}
+  <div class="pointer-events-none absolute inset-0"
+       style="background: linear-gradient(135deg, rgba({{ tint.rgb }}, 0.07) 0%, rgba({{ tint.rgb }}, 0.16) 100%);"></div>
+  {% endif %}
 
   {# state wash: a wide, very soft gradient so the panel reads its own status from across the desk #}
   <div class="pointer-events-none absolute inset-0 transition-opacity duration-700
@@ -53,7 +63,8 @@
         <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em]">
           <span class="ml-state {% if glowing %}ml-state-live{% endif %} {{ state_text }} transition-colors duration-700"
                 style="--ml-glow: {{ state_glow }}; --ml-glow-dim: {{ state_glow_dim }};">{{ 'loading' if hero_loading else 'now serving' }}</span>
-          {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-500">{{ hero_backend }}</span>{% endif %}
+          {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-500"
+              {% if tint %}style="color: rgba({{ tint.rgb }}, 0.85);"{% endif %}>{{ hero_backend }}</span>{% endif %}
         </div>
 
         {% if hero_model %}
