@@ -80,13 +80,22 @@ def latest_tag(client: httpx.Client, repo: str) -> str:
     return max(vers, key=_vkey) if vers else ""
 
 
-def latest_release(client: httpx.Client, repo: str) -> dict:
-    """GitHub's latest release: {tag, published, url}."""
-    r = client.get(f"https://api.github.com/repos/{repo}/releases/latest")
+def latest_build(client: httpx.Client, repo: str) -> dict:
+    """llama.cpp's newest bNNNNN build: {tag, published, url}.
+
+    NOT /releases/latest. llama.cpp marks every bNNNNN build a pre-release, so GitHub's "latest
+    release" skips all of them and answered v0.7.0, a milestone tag days older than the build the
+    :server image actually tracks (measured 2026-10-20: latest = v0.7.0 of 10-15, newest build
+    b11756 of 10-20). The release list is newest first, builds included.
+    """
+    r = client.get(f"https://api.github.com/repos/{repo}/releases", params={"per_page": 30})
     r.raise_for_status()
-    d = r.json()
-    return {"tag": str(d.get("tag_name") or ""), "published": str(d.get("published_at") or ""),
-            "url": str(d.get("html_url") or "")}
+    for d in r.json():
+        tag = str(d.get("tag_name") or "")
+        if _BUILD_RE.match(tag):
+            return {"tag": tag, "published": str(d.get("published_at") or ""),
+                    "url": str(d.get("html_url") or "")}
+    return {"tag": "", "published": "", "url": f"https://github.com/{repo}/releases"}
 
 
 def registry_digest(client: httpx.Client, image: str, tag: str) -> str:
@@ -197,7 +206,7 @@ def check(docker, http: httpx.Client | None = None) -> dict:
                     is_new = newer(row["latest"], row["current"])
                     row["status"] = ("update" if is_new else "current") if is_new is not None else "unknown"
                 else:
-                    rel = latest_release(http, e["repo"])
+                    rel = latest_build(http, e["repo"])
                     row["latest"], row["url"] = rel["tag"], rel["url"]
                     images = llama_images(docker)
                     stale = []

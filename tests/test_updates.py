@@ -101,8 +101,12 @@ class TestCheck:
         return _http({
             ("GET", GH + "Niko1221/Strata/tags"): httpx.Response(200, json=[{"name": "v0.1.45"}, {"name": "v0.1.44.1"}]),
             ("GET", GH + "mw00/project-maya/tags"): httpx.Response(200, json=[{"name": "v1.1.18"}]),
-            ("GET", GH + "ggml-org/llama.cpp/releases/latest"): httpx.Response(200, json={
-                "tag_name": "b11250", "published_at": "2026-10-20T00:00:00Z", "html_url": "https://x/r"}),
+            # newest first, builds marked pre-release, a milestone tag among them
+            ("GET", GH + "ggml-org/llama.cpp/releases"): httpx.Response(200, json=[
+                {"tag_name": "b11250", "published_at": "2026-10-20T00:00:00Z", "html_url": "https://x/r",
+                 "prerelease": True},
+                {"tag_name": "v0.7.0", "published_at": "2026-10-15T00:00:00Z", "prerelease": False},
+                {"tag_name": "b11249", "published_at": "2026-10-19T00:00:00Z", "prerelease": True}]),
             ("GET", "https://ghcr.io/token"): httpx.Response(200, json={"token": "t"}),
             ("HEAD", "https://ghcr.io/v2/"): manifest,
         })
@@ -136,6 +140,12 @@ class TestCheck:
             raise httpx.ConnectError("offline")
         st = updates.check(self._docker(), httpx.Client(transport=httpx.MockTransport(boom)))
         assert all(r["error"] and r["status"] == "unknown" for r in st["engines"])
+
+    def test_latest_build_not_the_milestone_release(self):
+        # /releases/latest answers v0.7.0 because every bNNNNN build is a pre-release.
+        c = _http({("GET", GH + "ggml-org/llama.cpp/releases"): httpx.Response(200, json=[
+            {"tag_name": "v0.7.0", "prerelease": False}, {"tag_name": "b11756", "prerelease": True}])})
+        assert updates.latest_build(c, "ggml-org/llama.cpp")["tag"] == "b11756"
 
     def test_builds_behind(self, monkeypatch):
         monkeypatch.setattr(updates, "_running_report", lambda engine, container: "")
