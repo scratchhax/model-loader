@@ -1,0 +1,52 @@
+{# Engine updates: what runs here against what upstream has. Read-only on purpose - every engine's
+   upgrade has its own checks and rollback (the runbook column), and this only says when to look.
+   While a check runs, the card re-asks every 2 s; otherwise it is static until reloaded. #}
+<div id="engine-updates"
+     {% if checking %}hx-get="/updates" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}
+     class="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
+  {% if rows %}
+  <div class="space-y-2.5">
+    {% for r in rows %}
+    <div>
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-sm font-medium">{{ r.label }}</span>
+        {% if r.error %}
+          <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400" title="{{ r.error }}">could not check</span>
+        {% elif r.status == 'update' %}
+          <span class="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">update available</span>
+        {% elif r.status == 'current' %}
+          <span class="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">up to date</span>
+        {% else %}
+          <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">unknown</span>
+        {% endif %}
+      </div>
+      <div class="mt-0.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+        {{ r.current or '?' }}{% if r.latest and r.latest != r.current %} → {{ r.latest }}{% endif %}
+        {% if r.behind %}<span class="font-sans"> ({{ r.behind }} builds behind)</span>{% endif %}
+      </div>
+      {% for d in r.detail %}
+      <div class="text-[11px] text-slate-500 dark:text-slate-400">
+        <span class="font-mono">:{{ d.tag }}</span>
+        {% if d.newer %}<span class="text-amber-700 dark:text-amber-300">newer image on ghcr</span>{% else %}current image{% endif %}
+        <span title="{{ d.containers | join(', ') }}">· {{ d.containers | length }} container{{ 's' if d.containers | length != 1 else '' }}</span>
+      </div>
+      {% endfor %}
+      {% if r.status == 'update' and not r.error %}
+      <div class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+        <a href="{{ r.url }}" target="_blank" rel="noopener" class="text-sky-600 hover:underline dark:text-sky-400">what changed</a>
+        · <span class="font-mono" title="How to upgrade it, with the rollback">{{ r.runbook }}</span>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% elif not checking %}
+  <p class="text-[11px] text-slate-500 dark:text-slate-400">Not checked yet.</p>
+  {% endif %}
+  <div class="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+    <span>{% if checking %}checking…{% elif checked %}checked {{ checked }}{% endif %}</span>
+    <button hx-post="/updates/check" hx-target="#engine-updates" hx-swap="outerHTML"
+            {% if checking %}disabled{% endif %}
+            class="rounded-md border border-slate-300 px-2 py-0.5 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700">Check now</button>
+  </div>
+</div>
