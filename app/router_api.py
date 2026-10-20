@@ -412,12 +412,188 @@ def _client_of(request: Request) -> str:
     return (request.client.host if request.client else "") or "unknown"
 
 
+# ------------------------------------------------------------------- history hygiene
+#
+# A status the router emits is not a memory the model has.
+#
+# When a request arrives while its engine is down, narrate_wait() describes the switch in
+# progress. It travels in the reasoning_content delta because that renders as a collapsible block
+# rather than cluttering the answer. Open WebUI reasonably agrees that this belongs to the
+# assistant's turn, stores it, and replays it on every later turn. That is fine for a chat log and
+# fatal for a model: the replayed assistant message arrives with content as a LIST holding a
+# reasoning block, and a template written to Mistral's spec rejects anything but text there -
+#
+#     Jinja Exception: Only text chunks are supported in assistant message contents.
+#
+# The template is not being unreasonable. It predated a router filing its own status messages under
+# the model's thoughts. Lenient templates ignore the unknown block and nobody notices, which is
+# why this surfaced on a model that happens to be strict rather than as a general outage. The
+# damage lives in the stored transcript, so the conversation stays broken for every later turn,
+# including turns routed to a different engine - which is how it comes to look like the new model
+# is the thing that is broken.
+#
+# What gets removed is the router's own lines and nothing else, by shape, because narrate.py
+# already records what it said. Deleting a reasoning model's actual thinking would be the easy
+# version and the wrong one: it arrives through the same channel and is worth more than the crash.
+#
+# What survives is re-emitted as a TEXT block. That is the part that makes both halves work - the
+# template's objection is to the chunk type, not to the words, so a reasoning model's thinking
+# reaches the prompt intact while the assistant turn stays something a strict template can render.
+# A turn left with no text at all keeps a single space rather than becoming empty, because the same
+# templates reject an assistant message carrying neither content nor tool calls.
+
+_NARRATION_BLOCKS = frozenset({"reasoning", "reasoning_content", "thinking"})
+
+
+def _block_text(block: dict) -> str:
+    """The text inside a content block, in whichever of the shapes clients use."""
+    # "thinking" is where Anthropic-shaped blocks keep their text; missing it would leave a
+    # block that reads as empty here and therefore survives, still non-text, still fatal.
+    for key in ("text", "thinking", "content"):
+        val = block.get(key)
+        if isinstance(val, str):
+            return val
+        if isinstance(val, list):
+            parts = [_block_text(b) for b in val if isinstance(b, dict)]
+            if any(parts):
+                return "\n".join(p for p in parts if p)
+    return ""
+
+
+# THE OTHER HALF OF THE SAME BUG, and the one that took four attempts to see.
+#
+# strip_narration_blocks() defends `content`. This is about the field sitting BESIDE it.
+#
+# What llama.cpp does with an assistant turn's `reasoning_content` is not "ignore it unless
+# asked": the chat parser folds it into the turn as a reasoning chunk BEFORE the chat template
+# runs, so a template written for plain strings is handed a chunk list it never expected.
+# Templates then split into two camps. A reasoning model's renders the chunk. Devstral's raises
+#     "Only text chunks are supported in assistant message contents."
+# from inside its embedded template, and the resulting 500 carries no hint that the field to
+# blame is one the client put beside `content` rather than in it - which is why a fix aimed at
+# `content` provably changed nothing and the crash walked back exactly as it was.
+#
+# `--reasoning-preserve` is llama.cpp's own opt-in for carrying thinking across turns, so a
+# model's `reasoning-preserve` setting is the honest thing to consult rather than a per-model
+# exception list: a model that asked for its thinking back keeps it, everyone else has it taken
+# off the request. For those the field was already headed for the bin - the only difference is
+# whether the template lives long enough to notice.
+_REASONING_FIELD = "reasoning_content"
+_ON_VALUES = frozenset({"1", "on", "true", "yes"})
+
+
+def wants_reasoning_replay(model: str) -> bool:
+    """Does `model` ask to be handed its own previous thinking? (`reasoning-preserve = on`.)"""
+    try:
+        sec = ini.get_section(model) or {}
+    except Exception:  # noqa: BLE001 - a config read must never take a chat turn down
+        return False
+    return str(sec.get("reasoning-preserve") or "").strip().lower() in _ON_VALUES
+
+
+def drop_replayed_reasoning(body: dict, model: str) -> int:
+    """Take `reasoning_content` off assistant turns unless `model` asked for it back.
+
+    In place. Returns how many turns were changed, which is the only part worth logging: the
+    field's CONTENT is somebody's chain of thought and has no business in a log line.
+    """
+    if wants_reasoning_replay(model):
+        return 0
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return 0
+    dropped = 0
+    for msg in msgs:
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and _REASONING_FIELD in msg:
+            del msg[_REASONING_FIELD]
+            dropped += 1
+    return dropped
+
+
+def strip_narration_blocks(body: dict) -> int:
+    """Remove lines this router emitted, from assistant turns, in place. Returns the number of
+    messages changed.
+
+    Line-level rather than block-level on purpose. A reasoning block is where Open WebUI parks
+    both this router's status text and a reasoning model's actual thinking, and the two can share
+    a block: deleting the block would take the model's reasoning with it, which is the one thing
+    worth more than the crash. So each line is judged on its own, and a block is dropped only when
+    nothing of it survives.
+    """
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return 0
+    said = narrate.said()
+
+    touched = 0
+    for msg in msgs:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        kept: list = []
+        changed = False
+        for block in content:
+            if not isinstance(block, dict) or \
+                    str(block.get("type", "")).lower() not in _NARRATION_BLOCKS:
+                kept.append(block)
+                continue
+            text = _block_text(block)
+            lines = text.splitlines()
+            changed = True
+            # Every reasoning chunk becomes a text chunk, not just the ones carrying narration.
+            # The template's objection is to the chunk type, so leaving one untouched leaves the
+            # whole conversation unrenderable - which is the per-model chase this exists to end.
+            # Tool blocks are deliberately NOT touched: they are load-bearing for a round trip,
+            # and a client that puts them in assistant content is a different problem than this.
+            rest = "\n".join(ln for ln in lines if narrate.shape_of(ln) not in said).strip()
+            if rest:
+                # Downgraded to text, not deleted. The template objects to the chunk type; the
+                # words are fine, and they are the model's own.
+                kept.append({"type": "text", "text": rest})
+        # Belt and braces: an assistant turn leaves this function as a plain string, whatever
+        # arrived. A list of text chunks renders fine in python jinja; whether every minja build
+        # agrees is not something worth discovering by being the test case.
+        content = kept if kept else [" "]
+        msg["content"] = "\n".join(_block_text(b) for b in content if isinstance(b, dict)) or " "
+        touched += 1
+    return touched
+
+
+_SHAPES_KEY = "router.narration.shapes"
+
+
+def load_narration_shapes() -> None:
+    """Re-seed from the previous process. Narration from a dead process is still sitting in
+    people's transcripts, and a restart must not make those chats strict-template-hostile again."""
+    try:
+        narrate.remember(json.loads(db.get_setting(_SHAPES_KEY, "[]")))
+    except (ValueError, TypeError):
+        pass
+
+
+def save_narration_shapes() -> None:
+    try:
+        db.set_setting(_SHAPES_KEY, json.dumps(sorted(narrate.said())))
+    except Exception:  # noqa: BLE001 - a lost memory is not worth failing a request over
+        pass
+
+
+load_narration_shapes()
+
+
 async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
     t0 = time.time()
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"error": {"message": "body must be JSON"}})
+
+    # Narration the router injected on an earlier turn must not be handed back to a model as its
+    # own recalled thinking. See strip_narration_blocks().
+    strip_narration_blocks(body)
 
     asked = str(body.get("model") or "").strip()
     want = asked or ENGINES[0]
@@ -455,6 +631,11 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
 
     out = dict(body)
     out["model"] = model          # llama picks by name; Strata ignores it
+
+    # Only now can this be decided, because only now is the model known: an engine alias does
+    # not have settings, the model behind it does.
+    if drop_replayed_reasoning(out, model):
+        print(f"router: dropped replayed reasoning from assistant turns for {model}", flush=True)
 
     if streaming:
         return await _forward_stream(out, backend, model, path, shape, conv, client_id, asked, t0)
@@ -928,6 +1109,8 @@ async def narrated_stream(out: dict, path: str, shape: str, conv: str, client_id
 
     sent = dict(out)
     sent["model"] = model
+    # Same reason as in _forward(), which this path skipped by resolving for itself.
+    drop_replayed_reasoning(sent, model)
 
     # Close the status off before the model speaks. Both the narration and most of these models'
     # own thinking land in the SAME delta field, so without an explicit terminator the two run
@@ -948,8 +1131,16 @@ async def narrated_stream(out: dict, path: str, shape: str, conv: str, client_id
 
 def narrated_response(out: dict, path: str, shape: str, conv: str, client_id: str,
                       asked: str, t0: float, channel: str | None = None) -> StreamingResponse:
+    async def remembering():
+        """Persist what was just narrated. The stream is the only place the lines exist."""
+        before = len(narrate.said())
+        async for chunk in narrated_stream(out, path, shape, conv, client_id, asked, t0, channel):
+            yield chunk
+        if len(narrate.said()) != before:
+            save_narration_shapes()
+
     return StreamingResponse(
-        narrated_stream(out, path, shape, conv, client_id, asked, t0, channel),
+        remembering(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

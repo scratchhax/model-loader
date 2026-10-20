@@ -153,6 +153,17 @@ _RE_TASK = re.compile(r"task\s+(\d+)\s*\|")
 # release line, which is all that is needed to decide whether anything is running:
 #   ... I slot launch_slot_: id  2 | task 11269 | processing task, is_child = 0
 #   ... I slot      release: id  2 | task 11269 | stop processing: n_tokens = 83416, truncated = 0
+# Tasks this process has seen launched and not yet released, per container:
+#   {container: {slot_id: (task_id, first_seen)}}
+# Occupancy has to outlive the log window it was read from - see the long note in
+# _rates_from_log for the arithmetic that makes a single read unable to answer "is anything
+# running". Bounded two ways so a release line that never arrives cannot wedge a backend into
+# permanent "busy": a launch is only ever replaced by a newer task id on the same slot, and
+# anything older than _OPEN_TASK_MAX_AGE_S is dropped. That ceiling matches the router's own
+# in-flight sweep, and nothing legitimate generates for half an hour.
+_OPEN_TASK_MAX_AGE_S = 1800.0
+_open_tasks: dict[str, dict[int, tuple[int, float]]] = {}
+
 _RE_LAUNCH = re.compile(r"launch_slot_:\s*id\s+(\d+)\s*\|\s*task\s+(\d+)")
 _RE_RELEASE = re.compile(r"release:\s*id\s+(\d+)\s*\|\s*task\s+(\d+)")
 
@@ -682,35 +693,60 @@ def _rates_from_log(name: str) -> dict:
     # A wide tail, then the router's own chatter removed. It has to be both. While a slot
     # generates it logs a timing line only every ~3 s, so a long reply buries the
     # prompt-processing lines from the start of that same request; and in router mode llama.cpp
-    # logs EVERY proxied request, including this app's own 500 ms /slots poll, at about two lines
-    # a second, forever. At tail=300 that spam was 92% of the window (276 of 300 lines, measured
-    # on llama-9700x2), leaving two generation timing lines and no prompt-processing lines at
-    # all, so every rate here came back zero while the model was plainly working. The proxy lines
-    # carry nothing this function wants, so they go before the scan rather than inside it.
+    # logs EVERY proxied request, so the window fills with this app's own polling. Measured on
+    # llama-9700x2 while Devstral was generating: 94.8% proxy lines, 63.5 of them per second,
+    # arriving exactly 50 ms apart. tail=1200 therefore covers about ELEVEN SECONDS of wall
+    # clock, and a 88k-token prefill was measured at 104 s and 118 s on that same model.
+    #
+    # That arithmetic is the whole reason this card used to say "idle" mid-generation, and the
+    # reason widening the tail is not the fix. The launch line is the newest thing in the log the
+    # moment a request starts, so this read always sees it - and then it scrolls out while the
+    # request is still running, the pairing below finds nothing unpaired, and occupancy flips
+    # back to none. A long request is therefore reported busy for ~11 s and idle for the rest of
+    # its life, which is precisely backwards: the slower the model, the sooner the lie.
+    #
+    # So occupancy is carried across reads in _open_tasks instead. Seeing the launch once is
+    # enough; the release line retires it. The tail stays narrow because it only has to be wide
+    # enough to catch each line as it is written, and the cost of reading it is not free: 4.5 ms
+    # at tail=1200 against 144 ms at 60000, on a path that runs every 1.5 s per backend.
     ok, text = container_logs(name, tail=1200, current_run_only=True)
     if not ok:
         return out
     lines = [ln for ln in text.splitlines() if "proxy_reques" not in ln]
 
-    # Oldest first, pairing launches with releases per slot. Whatever is still unpaired at the end
-    # is in flight. Sound within one window: a release is always newer than its own launch, so a
-    # launch that is in the window can only be unpaired because the task really is still running.
-    # Release lines with no launch in the window are from before it and are simply ignored.
-    open_tasks: dict[int, int] = {}
+    # Oldest first, pairing launches with releases per slot. Whatever is still unpaired at the
+    # end is in flight - but "unpaired" now means unpaired across every read since the launch,
+    # not merely unpaired within this window, for the windowing reason above. A release line with
+    # no launch in the window is from before it and retires the remembered launch, which is the
+    # whole point: the launch was seen on an earlier read, and this is the line that closes it.
+    pending = _open_tasks.setdefault(name, {})
+    now = time.time()
     for line in lines:
         m = _RE_LAUNCH.search(line)
         if m:
-            open_tasks[int(m.group(1))] = int(m.group(2))
+            slot_id, tid = int(m.group(1)), int(m.group(2))
+            prev = pending.get(slot_id)
+            # Only a NEW task id refreshes the clock. Re-reading the same launch line while it
+            # happens to still be in the window must not keep extending its deadline, or a
+            # release that never arrives (a crashed child, a container restart mid-request)
+            # would leave this backend reading busy forever. Task ids rise monotonically within
+            # a run, so a different id on the same slot is genuinely a new task - and that also
+            # clears whatever a restart left behind, since ids restart from 1.
+            if prev is None or prev[0] != tid:
+                pending[slot_id] = (tid, now)
             continue
         m = _RE_RELEASE.search(line)
         if m:
             slot_id, tid = int(m.group(1)), int(m.group(2))
-            if open_tasks.get(slot_id) == tid:
-                del open_tasks[slot_id]
-    if open_tasks:
+            if pending.get(slot_id, (None,))[0] == tid:
+                del pending[slot_id]
+    for slot_id in [s for s, (_, seen) in pending.items()
+                    if now - seen > _OPEN_TASK_MAX_AGE_S]:
+        del pending[slot_id]
+    if pending:
         # Several slots can run at once; the newest task is the one the panel follows.
-        slot_id = max(open_tasks, key=lambda s: open_tasks[s])
-        out["open_slot"], out["open_task"] = slot_id, open_tasks[slot_id]
+        slot_id = max(pending, key=lambda s: pending[s][0])
+        out["open_slot"], out["open_task"] = slot_id, pending[slot_id][0]
 
     task_id = out["open_task"]
     for line in reversed(lines):
