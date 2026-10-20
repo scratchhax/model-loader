@@ -351,7 +351,16 @@
 {% endif %}
 {% else %}
 <div class="rounded-xl border border-slate-800 bg-slate-950/95 px-4 py-6 text-center text-[11px] text-slate-500">
-  No GPU telemetry yet. The sampler probes inside the backend container, so this fills in once a
-  llama backend is running.
+  {# A switch in progress is said even with no readings: this is the one panel that shows it, and
+     the cards are typically empty exactly while one engine hands them to another. #}
+  {% if engine_switch and engine_switch.phase and engine_switch.phase not in ('done', '') %}
+  <div class="mb-1.5 {% if engine_switch.phase == 'failed' %}text-red-400{% else %}text-amber-400{% endif %}">
+    {%- if engine_switch.phase == 'loading' %}Switching to {{ engine_switch.engine }}: loading the model
+    {%- else %}Switching to {{ engine_switch.engine }}: {{ engine_switch.phase }}{% endif %}
+    {%- if engine_switch.msg %} · {{ engine_switch.msg }}{% endif %}
+  </div>
+  {% endif %}
+  No GPU readings yet. They come from the cards themselves (the amdgpu driver's sysfs) and fill in
+  within a second of the sampler's next pass.
 </div>
 {% endif %}
