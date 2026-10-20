@@ -317,3 +317,19 @@ class TestMayaSpeed:
         raw = [{"id": 0, "n_ctx": 262144, "is_processing": True, "n_prompt_tokens": 33137}]
         sl = speed._slots_strata(raw, self._r(prompt=5, gen=999))[0]
         assert (sl.ctx_used, sl.prompt_tokens) == (33137, 33137)
+
+
+# ------------------------------------------------------------------ the Router tab
+
+from tests.test_routes_smoke import web  # noqa: E402,F401 - the fixture: real app, empty box
+
+
+class TestRouterPageWithMaya:
+    def test_renders_with_maya_running(self, web, monkeypatch):
+        # The first live run with Maya up 500'd this page: its model list reached the template
+        # as bare strings where (value, label) pairs were expected.
+        m = _b("maya", "maya", ["glm-5.3-flash"])
+        monkeypatch.setattr(ra, "_live_map", _lm([m], {"glm-5.3-flash": m}))
+        r = web.get("/router")
+        assert r.status_code == 200
+        assert 'value="maya"' in r.text and "glm-5.3-flash" in r.text
