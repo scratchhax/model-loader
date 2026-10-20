@@ -67,6 +67,54 @@ CHANNEL_CONTENT = "content"
 
 _FIELD = {CHANNEL_REASONING: "reasoning_content", CHANNEL_CONTENT: "content"}
 
+# ------------------------------------------------------- what this router has already said
+#
+# Narration is the only thing this module puts into a transcript, and once it is in one it comes
+# back forever: Open WebUI stores the assistant turn and replays it on every later request,
+# including requests routed to a model whose chat template rejects non-text chunks in assistant
+# content. So the router records the SHAPE of every line it emits - the same digit-masked form the
+# dedup below uses - and the request path recognises its own words arriving back and removes
+# exactly those.
+#
+# Shape matching rather than templates, because the loading phase passes through whatever the
+# switch happens to be saying and no fixed pattern would catch it. Shape matching needs no
+# vocabulary: it is exact by construction, since the line being recognised is the line that was
+# sent. Digits are masked so "up 42s" replayed as "up 42s" matches, and a re-phrased retry of the
+# same phase matches too.
+#
+# In memory here; the caller persists it. This module is imported by tests that should not be
+# writing to disk.
+
+_SAID: dict[str, None] = {}
+_SAID_MAX = 400
+
+
+def shape_of(text: str) -> str:
+    """The identity of a line: whitespace-trimmed, digits masked."""
+    return _DIGITS.sub("#", text.strip()) if text else ""
+
+
+def note(text: str) -> None:
+    """Record one emitted line so its shape is recognised on the way back in."""
+    shape = shape_of(text)
+    if not shape:
+        return
+    _SAID[shape] = None
+    while len(_SAID) > _SAID_MAX:
+        _SAID.pop(next(iter(_SAID)))      # oldest first; this dict is insertion-ordered
+
+
+def said() -> frozenset[str]:
+    return frozenset(_SAID)
+
+
+def remember(shapes) -> None:
+    """Seed from a previous run. Shapes the router has already said in an earlier process are
+    still in people's transcripts, so forgetting them would re-break those conversations."""
+    for shape in shapes:
+        if shape:
+            _SAID[shape] = None
+
 
 def _sse(payload: dict) -> bytes:
     return b"data: " + json.dumps(payload, separators=(",", ":")).encode() + b"\n\n"
@@ -190,6 +238,7 @@ async def narrate_wait(
                 # In-band, because the status code is long gone. Phrased as the end of the
                 # narration rather than as a protocol error: the client is mid-stream, and a
                 # bare {"error": ...} frame there is not something every client reads.
+                note(text)
                 yield line(cid, created, model, f"\n{text}\n", channel)
                 yield closing(cid, created, model)
             return
@@ -205,6 +254,7 @@ async def narrate_wait(
         stale = bool(text) and (clock() - last_line) >= progress_every_s
 
         if new_phase or stale:
+            note(text)
             yield line(cid, created, model, ("\n" if any_shown else "") + text, channel)
             shown_shape, any_shown = shape, True
             last_line = last_emit = clock()
