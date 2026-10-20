@@ -570,7 +570,7 @@ def load_narration_shapes() -> None:
     people's transcripts, and a restart must not make those chats strict-template-hostile again."""
     try:
         narrate.remember(json.loads(db.get_setting(_SHAPES_KEY, "[]")))
-    except (ValueError, TypeError):
+    except Exception:  # noqa: BLE001 - bad JSON, or no db yet: this runs at import, before tables
         pass
 
 
