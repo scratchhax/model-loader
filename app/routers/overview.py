@@ -548,4 +548,12 @@ async def hero_partial(request: Request) -> HTMLResponse:
 async def gpu_strip_partial(request: Request) -> HTMLResponse:
     ctx = {"request": request}
     ctx.update(await asyncio.to_thread(_gpu_strip_context))
+    # A PARKED engine's container is running but holds no cards (Strata after /unload). The
+    # engine row read "running" as "holding the cards", so a parked Strata said "active" beside
+    # the engine that actually held them, and its button was DISABLED - the one way back to it
+    # from the strip was greyed out. The backend probe already knows: a single-model server whose
+    # one model reads unloaded. Cached (1.5 s), so this adds no probe of its own.
+    backends = await _hero_backends_cached()
+    ctx["parked_engines"] = {services.engine_for(b.name) for b in backends
+                             if getattr(b, "unloaded_model", None)}
     return templates.TemplateResponse("_gpu_strip.html", ctx)

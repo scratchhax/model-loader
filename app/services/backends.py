@@ -41,6 +41,12 @@ class LlamaBackend:
     # mere idleness: under --models-preset with --models-max 1, "nothing loaded" is the normal
     # resting state, so nothing-loaded must never read as a failure. None = no reported failure.
     load_failed: str | None = None
+    # How long ago this app first saw that failure (persisted, so a restart does not make an old
+    # failure look new). llama.cpp keeps a model's failed flag until the NEXT attempt to load
+    # that model, which on a backend that was never meant to serve it is never: llama-voice
+    # carried a gemma-4-31B failure from a misrouted request for days under a red "load failed"
+    # chip while serving wheatley-voice perfectly. See load_failed_current.
+    load_failed_age: float = 0.0
     # The model the router is bringing up right now, and how long it has been at it. Both None /
     # 0.0 whenever nothing is loading, which is almost always. loading_since is wall-clock
     # seconds measured by US, not by the router: /v1/models reports the state but not when it
@@ -82,6 +88,19 @@ class LlamaBackend:
     # and answers /v1/models - but none of that machinery describes it, so the code that
     # would otherwise size it or write its arguments has to be able to ask.
     engine: str = "llama"
+
+    @property
+    def load_failed_current(self) -> bool:
+        """Is the load failure something to act on now, or history?
+
+        Current for FAILURE_FRESH_S after it happened, history after that - still shown on the
+        Containers page, dimmed, with its age, never as a red alarm.
+
+        Not "current while the backend holds nothing", which was the first version: an idle
+        router at --models-max 1 holds nothing most of the time, so a five-day-old failure on
+        idle llama-voice stayed red exactly as before.
+        """
+        return bool(self.load_failed) and self.load_failed_age < FAILURE_FRESH_S
 
 
 def _parse_started_at(iso: str) -> tuple[str, str]:
@@ -472,6 +491,84 @@ _LOADED_LOCK = threading.Lock()
 _LOADING_SINCE: dict[tuple[str, str], float] = {}
 
 
+FAILURE_FRESH_S = 1800.0
+_FAILED_KEY = "backends.failed_since"
+
+
+_failed_seen: dict[str, float] | None = None     # loaded from the db once, then kept here
+
+
+_EXIT_LINE = "exited with status"
+
+
+def _failure_time_from_log(backend: str, failure: str) -> float | None:
+    """When the failure actually happened, from llama.cpp's own log line, or None.
+
+    A failure is first SEEN whenever this app first probes after it - a deploy, a restart - which
+    can be days late: llama-voice's gemma-4-31B failure happened 2026-10-15 18:34 and was first
+    "seen" five days later. The router logs `instance name=<model> exited with status N` with a
+    docker timestamp, so the first sighting is dated from that where it exists. Read once per
+    new failure, never on the steady-state path.
+    """
+    from datetime import datetime
+    model = failure.split(" (exit", 1)[0]
+    needle = f"instance name={model} {_EXIT_LINE}"
+    try:
+        client = _docker_client()
+        raw = client.containers.get(backend).logs(timestamps=True, tail=20000) if client else b""
+    except Exception:  # noqa: BLE001 - no log is "date it from now", not an error
+        return None
+    for line in reversed(raw.decode("utf-8", "replace").splitlines()):
+        if needle in line:
+            stamp = line.split(" ", 1)[0]
+            try:
+                # 2026-10-15T18:34:26.984590009Z - fromisoformat takes microseconds, not nanos
+                return datetime.fromisoformat(stamp[:26] + "+00:00").timestamp()
+            except ValueError:
+                return None
+    return None
+
+
+def _note_failure(backend: str, failure: str | None) -> float:
+    """Seconds since this backend's current load failure was first seen; 0.0 when none.
+
+    Persisted in the settings db rather than only in memory: llama.cpp holds a failed flag for
+    days, and an in-memory clock would restart at every deploy and call a week-old failure new.
+    Read from the db ONCE and written only on change, because this runs on every probe (1.5 s,
+    on the event loop) and a blocked loop is what made every backend look unreachable before.
+    """
+    global _failed_seen
+    from .. import db
+    import json as _json
+    with _LOADED_LOCK:
+        if _failed_seen is None:
+            try:
+                got = _json.loads(db.get_setting(_FAILED_KEY, "") or "{}")
+                _failed_seen = {str(k): float(v) for k, v in got.items()} if isinstance(got, dict) else {}
+            except Exception:  # noqa: BLE001 - bad JSON or no db yet: start a fresh record
+                _failed_seen = {}
+        seen = _failed_seen
+        key_prefix = backend + "	"
+        want = key_prefix + failure if failure else ""
+        changed = False
+        for k in [k for k in seen if k.startswith(key_prefix) and k != want]:
+            del seen[k]
+            changed = True
+        age = 0.0
+        if failure:
+            if want not in seen:
+                seen[want] = _failure_time_from_log(backend, failure) or time.time()
+                changed = True
+            age = max(0.0, time.time() - seen[want])
+        snapshot = _json.dumps(seen) if changed else None
+    if snapshot is not None:
+        try:
+            db.set_setting(_FAILED_KEY, snapshot)
+        except Exception:  # noqa: BLE001 - a lost record costs a mis-aged chip, not a page
+            pass
+    return age
+
+
 def _note_loading(backend: str, model: str | None) -> float:
     """Seconds this backend has been loading `model`. 0.0 when it is not loading."""
     with _LOADED_LOCK:
@@ -607,6 +704,8 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             out[i].loaded_model = loaded
             out[i].probe_error = err
             out[i].load_failed = failed
+            # In a thread: a NEW failure reads the backend's log once to date it.
+            out[i].load_failed_age = await asyncio.to_thread(_note_failure, out[i].name, failed)
             out[i].loading_model = loading
             out[i].loading_since = _note_loading(out[i].name, loading)
             out[i].sleeping_model = sleeping

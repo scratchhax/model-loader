@@ -82,7 +82,9 @@
           <span class="h-1.5 w-1.5 shrink-0 rounded-full
             {% if b.status == 'running' %}bg-emerald-500{% elif b.status == 'restarting' %}bg-amber-500{% else %}bg-slate-300 dark:bg-slate-600{% endif %}"></span>
           <span class="truncate font-mono text-sm">{{ b.name }}</span>
-          {% if b.load_failed %}
+          {# Only a CURRENT failure; history (the backend has served something since) is on
+             the Containers page, dimmed. See LlamaBackend.load_failed_current. #}
+          {% if b.load_failed_current %}
           <span class="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950 dark:text-red-300">load failed</span>
           {% endif %}
         </div>
