@@ -337,3 +337,29 @@ class TestRouterPageWithMaya:
         assert "always means that model" in r.text
         defaults = r.text.split('hx-post="/router/default"')[1:]
         assert defaults and not any('value="maya"' in f.split("</form>")[0] for f in defaults)
+
+
+class TestAutoswitchToggle:
+    """The control was an amber chip that read as a status badge, and clicking it replaced it
+    with a 'Saved' chip - nothing left to click. It is a labelled switch now, and stays one."""
+
+    def test_page_shows_a_switch_per_engine(self, web):
+        r = web.get("/router")
+        assert r.status_code == 200
+        assert r.text.count('role="switch"') == len(ra.ENGINES)
+        assert "Auto-switch" in r.text
+
+    def test_post_returns_the_switch_in_its_new_state(self, web):
+        r = web.post("/router/autoswitch", data={"engine": "maya", "on": "1"})
+        assert r.status_code == 200
+        assert 'role="switch"' in r.text and 'aria-checked="true"' in r.text
+        assert 'name="on" value=""' in r.text          # the next click turns it off
+        assert ra.autoswitch_enabled("maya")
+
+        r = web.post("/router/autoswitch", data={"engine": "maya", "on": ""})
+        assert 'aria-checked="false"' in r.text and 'name="on" value="1"' in r.text
+        assert not ra.autoswitch_enabled("maya")
+
+    def test_unknown_engine_refused(self, web):
+        r = web.post("/router/autoswitch", data={"engine": "nope", "on": "1"})
+        assert 'role="switch"' not in r.text

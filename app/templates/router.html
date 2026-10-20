@@ -90,16 +90,7 @@
     {# The one control on this page that moves hardware by itself, so it is labelled as what it
        does rather than as a feature name, and it sits last - after you have said which server
        and which model, because switching to an engine with neither set just fails later. #}
-    <form hx-post="/router/autoswitch" hx-swap="outerHTML" class="flex items-center gap-1.5">
-      <input type="hidden" name="engine" value="{{ e }}">
-      <input type="hidden" name="on" value="{{ '' if autoswitch.get(e) else '1' }}">
-      <button title="{% if autoswitch.get(e) %}Requests for {{ e }} may stop the other engine and start this one. Refused while the other engine has a request in flight, and for {{ autoswitch_dwell }}s after a switch.{% else %}Requests for {{ e }} are refused when it is not holding the cards.{% endif %}"
-              class="rounded-md border px-2 py-1 text-xs
-                     {% if autoswitch.get(e) %}border-amber-400 bg-amber-50 text-amber-800 dark:border-amber-500/60 dark:bg-amber-500/10 dark:text-amber-300
-                     {% else %}border-slate-300 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700{% endif %}">
-        {% if autoswitch.get(e) %}takes the cards{% else %}will not take the cards{% endif %}
-      </button>
-    </form>
+    {% with on = autoswitch.get(e), dwell = autoswitch_dwell %}{% include "_autoswitch_toggle.html" %}{% endwith %}
     </div>
   </div>
   {% endfor %}
