@@ -276,3 +276,44 @@ class TestStrataUnloadTimeout:
         _patch_sync(monkeypatch, h)
         ok, msg = stratactl._strata_control("strata", "/unload", timeout=1.0)
         assert ok is False and stratactl._TIMED_OUT in msg
+
+
+# ------------------------------------------------------------------ the overview's meters
+
+class TestMayaSpeed:
+    """Maya publishes Strata's /metrics, so it rides Strata's reader; its /slots is smaller."""
+
+    def _r(self, newest="generating", prompt=17, gen=73, tps=33.0):
+        return {"newest": newest, "cur_gen_tps": tps, "cur_gen_tokens": gen,
+                "cur_prompt_tokens": prompt, "cur_pp_pct": 0, "cur_pp_done": 0, "cur_pp_total": 0}
+
+    def test_engine_is_read_through_metrics(self):
+        from app.services import speed
+        assert "maya" in speed._METRICS_ENGINES and "strata" in speed._METRICS_ENGINES
+
+    def test_busy_slot_takes_its_size_from_metrics(self):
+        # Measured shape, Maya 1.1.16, mid-generation.
+        from app.services import speed
+        raw = [{"id": 0, "n_ctx": 32768, "is_processing": True}]
+        sl = speed._slots_strata(raw, self._r())[0]
+        assert (sl.state, sl.gen_tps, sl.decoded) == ("generating", 33.0, 73)
+        assert (sl.ctx_used, sl.ctx_total, sl.prompt_tokens) == (90, 32768, 17)
+
+    def test_reading_counts_the_prompt_only(self):
+        from app.services import speed
+        raw = [{"id": 0, "n_ctx": 32768, "is_processing": True}]
+        sl = speed._slots_strata(raw, self._r(newest="prefill", prompt=4000, gen=0))[0]
+        assert (sl.state, sl.ctx_used) == ("prefill", 4000)
+
+    def test_idle_slot_claims_nothing(self):
+        from app.services import speed
+        raw = [{"id": 0, "n_ctx": 32768, "is_processing": False}]
+        sl = speed._slots_strata(raw, self._r(newest=""))[0]
+        assert (sl.state, sl.ctx_used, sl.prompt_tokens) == ("idle", 0, 0)
+
+    def test_strata_shape_unchanged(self):
+        # Strata sends n_prompt_tokens; that stays the figure, even when it disagrees with live.
+        from app.services import speed
+        raw = [{"id": 0, "n_ctx": 262144, "is_processing": True, "n_prompt_tokens": 33137}]
+        sl = speed._slots_strata(raw, self._r(prompt=5, gen=999))[0]
+        assert (sl.ctx_used, sl.prompt_tokens) == (33137, 33137)
