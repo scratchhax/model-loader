@@ -59,6 +59,8 @@ from .backends import (  # noqa: F401
     browser_endpoints,
     discover_llama_containers,
     engine_for,
+    auth_headers,
+    api_key_of,
     engine_map,
     last_loaded_ids,
     snapshot_llama_backends,

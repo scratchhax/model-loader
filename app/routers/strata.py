@@ -26,7 +26,9 @@ router = APIRouter()
 
 STRATA_CONTAINER = os.environ.get("STRATA_CONTAINER", "strata")
 STRATA_ENV_FILE = os.environ.get("STRATA_ENV_PATH", "/strata/strata.env")
-STRATA_DATA = os.environ.get("STRATA_DATA_DIR", "/strata/data")
+# None: wherever the running deployment's /data is (strata.live_data_dir), so the 0.2 volume
+# (./strata/data2) is found without configuration. STRATA_DATA_DIR pins it.
+STRATA_DATA = os.environ.get("STRATA_DATA_DIR") or None
 
 
 def _strata_state() -> dict:

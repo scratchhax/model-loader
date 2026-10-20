@@ -8,7 +8,7 @@ from docker.errors import APIError, DockerException, NotFound
 
 
 from .dockerbase import _docker_client
-from .backends import (_effective_container_names, _extract_ports, _restart_errors,
+from .backends import (_effective_container_names, _extract_ports, _restart_errors, auth_headers,
                      _restart_errors_lock, engine_for)
 from .gpu import gpu_engines, gpu_holders
 from .stratactl import strata_load, strata_unload
@@ -128,7 +128,7 @@ def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
-                r = c.get(url)
+                r = c.get(url, headers=auth_headers(name))
                 if r.status_code == 200:
                     if strata:
                         if bool(r.json().get("loaded")):

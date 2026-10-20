@@ -172,8 +172,12 @@ def _backends(include_stopped: bool = False) -> list[dict]:
             _, port = services._extract_ports(c.attrs)
             if port is None and running:
                 continue              # a running backend with no reachable port is unusable
+            # The backend's own API key, from its environment (Strata 0.2 requires one on every
+            # endpoint but /health). Carried on the backend so every request below sends it.
+            key = services.api_key_of(c.attrs)
             out.append({"name": c.name, "engine": engine, "running": running,
-                        "url": f"http://{c.name}:{port}" if port else "", "models": []})
+                        "url": f"http://{c.name}:{port}" if port else "", "models": [],
+                        "headers": {"Authorization": f"Bearer {key}"} if key else {}})
     except Exception:  # noqa: BLE001 - a docker hiccup is "nothing found", never a 500
         return []
     return out
@@ -202,7 +206,7 @@ async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
     if b["engine"] not in SINGLE_MODEL:
         return bool(b["models"])
     try:
-        r = await client.get(f"{b['url']}/health", timeout=5.0)
+        r = await client.get(f"{b['url']}/health", timeout=5.0, headers=b.get("headers") or {})
         if r.status_code != 200:
             return False
         h = r.json()
@@ -215,7 +219,7 @@ async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
 
 async def _models_of(client: httpx.AsyncClient, b: dict) -> list[str]:
     try:
-        r = await client.get(f"{b['url']}/v1/models", timeout=5.0)
+        r = await client.get(f"{b['url']}/v1/models", timeout=5.0, headers=b.get("headers") or {})
         if r.status_code == 200:
             return [m.get("id", "") for m in (r.json().get("data") or []) if m.get("id")]
     except httpx.HTTPError:
@@ -668,7 +672,8 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
                                                                connect=_CONNECT_TIMEOUT_S)) as c:
-                r = await c.post(f"{backend['url']}{path}", json=out)
+                r = await c.post(f"{backend['url']}{path}", json=out,
+                                 headers=backend.get("headers") or {})
             payload = r.json() if r.content else {}
         except httpx.HTTPError as e:
             _record(ts=t0, conv=conv, client=client_id, asked=asked, engine=backend["engine"],
@@ -790,7 +795,8 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(_READ_TIMEOUT_S,
                                                            connect=_CONNECT_TIMEOUT_S)) as c:
-            async with c.stream("POST", f"{backend['url']}{path}", json=out) as r:
+            async with c.stream("POST", f"{backend['url']}{path}", json=out,
+                                headers=backend.get("headers") or {}) as r:
                 state["status"] = r.status_code
                 async for chunk in r.aiter_bytes():
                     if not chunk:
@@ -1232,7 +1238,7 @@ async def props() -> JSONResponse:
         return JSONResponse(status_code=503, content={"error": {"message": why}})
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.get(f"{backend['url']}/props")
+            r = await c.get(f"{backend['url']}/props", headers=backend.get("headers") or {})
         return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
     except httpx.HTTPError as e:
         return JSONResponse(status_code=502, content={"error": {"message": f"{backend['name']}: {e}"}})

@@ -134,7 +134,9 @@ def _running_report(engine: str, container: str) -> str:
     try:
         with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
             if engine == "strata":
-                v = (c.get(f"http://{container}:8080/metrics").json().get("engine") or {}).get("version")
+                from .services import auth_headers
+                v = (c.get(f"http://{container}:8080/metrics", headers=auth_headers(container))
+                     .json().get("engine") or {}).get("version")
             else:
                 v = c.get(f"http://{container}:8080/health").json().get("version")
         return str(v or "")
@@ -175,9 +177,49 @@ def _llama_build(c) -> str:
         return ""
     try:
         with httpx.Client(timeout=httpx.Timeout(3.0)) as h:
-            return str(h.get(f"http://{c.name}:{port}/props").json().get("build_info") or "")
+            from .services import auth_headers
+            return str(h.get(f"http://{c.name}:{port}/props", headers=auth_headers(c.name))
+                       .json().get("build_info") or "")
     except (httpx.HTTPError, ValueError, AttributeError):
         return ""
+
+
+# ------------------------------------------------------------------------------- published images
+
+# A tag of an upstream image: "<version>-<flavor>", e.g. 0.2.1-rocm-gfx120x.
+_IMAGE_TAG_RE = re.compile(r"^(\d+(?:\.\d+)+)-(.+)$")
+
+
+def running_image(docker, container: str) -> tuple[str, str, str]:
+    """(repository, version, flavor) of the image a container was created from, when that image
+    is an upstream `<version>-<flavor>` tag on ghcr.io; ("", "", "") otherwise (a local build)."""
+    try:
+        ref = str((docker.containers.get(container).attrs.get("Config") or {}).get("Image") or "")
+    except Exception:  # noqa: BLE001
+        return "", "", ""
+    if not ref.startswith("ghcr.io/") or ":" not in ref:
+        return "", "", ""
+    repo, tag = ref.rsplit(":", 1)
+    m = _IMAGE_TAG_RE.match(tag)
+    return (repo, m.group(1), m.group(2)) if m else ("", "", "")
+
+
+def latest_image_version(client: httpx.Client, repo: str, flavor: str) -> str:
+    """The highest `<version>-<flavor>` tag published for an image on ghcr.io, "" if none.
+
+    Not the GitHub release list: Strata's release tags run ahead of its images (0.2.1.1 - 0.2.1.3
+    were Terminal and Windows hotfixes with no new image), and an update you cannot pull is not
+    one this box can take.
+    """
+    name = repo[len("ghcr.io/"):]
+    tok = client.get("https://ghcr.io/token", params={"scope": f"repository:{name}:pull"})
+    tok.raise_for_status()
+    r = client.get(f"https://ghcr.io/v2/{name}/tags/list", params={"n": 1000},
+                   headers={"Authorization": f"Bearer {tok.json().get('token', '')}"})
+    r.raise_for_status()
+    vers = [m.group(1) for t in (r.json().get("tags") or [])
+            if (m := _IMAGE_TAG_RE.match(str(t))) and m.group(2) == flavor]
+    return max(vers, key=_vkey) if vers else ""
 
 
 # ------------------------------------------------------------------------------- the check
@@ -195,7 +237,19 @@ def check(docker, http: httpx.Client | None = None) -> dict:
                    "runbook": e["runbook"], "current": "", "latest": "", "status": "unknown",
                    "url": "", "error": "", "detail": []}
             try:
-                if e["kind"] == "tags":
+                image_repo, image_ver, flavor = (running_image(docker, e["container"])
+                                                 if e["kind"] == "tags" else ("", "", ""))
+                if image_repo:
+                    # Upstream's own image (Strata 0.2): the version is the image's, compared with
+                    # the images published for the same flavor. The engine inside reports its own,
+                    # different numbering (0.1.46 inside 0.2.1), which is why /metrics is not used.
+                    row["current"] = image_ver
+                    row["latest"] = latest_image_version(http, image_repo, flavor)
+                    row["url"] = (f"https://github.com/{e['repo']}/releases/tag/v{row['latest']}"
+                                  if row["latest"] else f"https://github.com/{e['repo']}/releases")
+                    is_new = newer(row["latest"], row["current"])
+                    row["status"] = ("update" if is_new else "current") if is_new is not None else "unknown"
+                elif e["kind"] == "tags":
                     row["current"] = (_running_report(e["engine"], e["container"])
                                       or local_version(docker, e["image"], e["live_tag"]))
                     row["latest"] = latest_tag(http, e["repo"])

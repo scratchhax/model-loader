@@ -9,7 +9,7 @@ import httpx
 from docker.errors import DockerException, NotFound
 
 
-from .backends import _extract_ports, _probe_loaded_model, engine_for
+from .backends import _extract_ports, _probe_loaded_model, auth_headers, engine_for
 from .dockerbase import _docker_client
 from .hotpath import _http
 from .logs import container_logs
@@ -399,7 +399,8 @@ async def _slot_states(container_name: str, internal_port: int, model_id: str) -
     url = f"http://{container_name}:{internal_port}/slots"
     try:
         r = await _http().get(url, params={"model": model_id},
-                              timeout=httpx.Timeout(1.5, read=2.0))
+                              timeout=httpx.Timeout(1.5, read=2.0),
+                              headers=auth_headers(container_name))
         if r.status_code != 200:
             return []
         slots = r.json()
@@ -434,7 +435,8 @@ async def _props_state(container_name: str, internal_port: int, model_id: str) -
     try:
         r = await _http().get(f"http://{container_name}:{internal_port}/props",
                               params={"model": model_id},
-                              timeout=httpx.Timeout(1.5, read=2.0))
+                              timeout=httpx.Timeout(1.5, read=2.0),
+                              headers=auth_headers(container_name))
         if r.status_code == 200:
             d = r.json()
             gen = d.get("default_generation_settings") or {}
@@ -1064,7 +1066,7 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
     t0 = _time.time()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=180.0)) as ac:
-            r = await ac.post(url, json=payload)
+            r = await ac.post(url, json=payload, headers=auth_headers(container_name))
             r.raise_for_status()
             data = r.json()
     except httpx.HTTPError as e:

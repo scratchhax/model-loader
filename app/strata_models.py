@@ -130,9 +130,13 @@ def _docker_exec_json(container: str, code: str, timeout: int = 20) -> dict | No
         c = cli.containers.get(container)
         if c.status != "running":
             return None
-        rc, out = c.exec_run(
-            timed_shell("/opt/strata/.venv/bin/python -c " + shlex.quote(code), timeout),
-            demux=False)
+        # 0.2 (upstream's image) has its Python and setup.py under /opt/strata/terminal; 0.1.x
+        # (ours) had a venv in /opt/strata. setup.py is imported by name, so cd to its folder.
+        q = shlex.quote(code)
+        cmd = (f"if [ -x /opt/strata/terminal/python/bin/python3 ]; then cd /opt/strata/terminal && "
+               f"exec /opt/strata/terminal/python/bin/python3 -c {q}; "
+               f"else exec /opt/strata/.venv/bin/python -c {q}; fi")
+        rc, out = c.exec_run(timed_shell(cmd, timeout), demux=False)
     except Exception:  # noqa: BLE001 - a stopped or missing engine is "no catalog", not an error
         return None
     if rc != 0 or not out:
@@ -362,11 +366,10 @@ DATA_DIR = "/strata/data"
 # not checked rather than guessed at.
 _PATH_VIEWS = (
     ("/gguf-root/", "/models/"),      # the models root, ./models in both compose services
-    ("/data/", "/strata/data/"),      # the engine's volume, ./strata/data
 )
 
 
-def _missing_sources(cfg: dict) -> list[str]:
+def _missing_sources(cfg: dict, root=None) -> list[str]:
     """Paths an install needs that are NOT there any more.
 
     This exists because an install can rot without anything touching it. `/gguf` used to be a
@@ -386,7 +389,10 @@ def _missing_sources(cfg: dict) -> list[str]:
         if raw.startswith("/opt/strata"):
             continue                              # inside the engine image; always present
         local = None
-        for pref, here in _PATH_VIEWS:
+        # the engine's /data is wherever the deployment's volume is (./strata/data on 0.1,
+        # ./strata/data2 on 0.2), passed in by the caller
+        views = _PATH_VIEWS + ((("/data/", str(root).rstrip("/") + "/"),) if root else ())
+        for pref, here in views:
             if raw.startswith(pref):
                 local = here + raw[len(pref):]
                 break
@@ -407,16 +413,17 @@ def installed(data_dir: str | None = None) -> dict[str, dict]:
     authority on "installed" and the pack is reported beside it for size.
     """
     from pathlib import Path
-    root = Path(data_dir or DATA_DIR)
+    from . import strata as strata_engine
+    root = Path(data_dir) if data_dir else strata_engine.live_data_dir()
     out: dict[str, dict] = {}
-    cfg_dir = root / "config"
+    cfg_dir = strata_engine.configs_dir(root)
     try:
         entries = sorted(cfg_dir.glob("strata-*.json"))
     except OSError:
         return out
     for c in entries:
         tag = c.stem[len("strata-"):]
-        pack = root / "packs" / tag
+        pack = strata_engine.packs_dir(root) / tag
         size = 0
         if pack.is_dir():
             try:
@@ -428,7 +435,7 @@ def installed(data_dir: str | None = None) -> dict[str, dict]:
         except (OSError, ValueError):
             cfg = {}
         out[tag] = {"config": str(c), "pack": str(pack) if pack.is_dir() else None, "bytes": size,
-                    "missing": _missing_sources(cfg)}
+                    "missing": _missing_sources(cfg, root)}
     return out
 
 
@@ -809,7 +816,100 @@ TUNABLES = {
 
 def _config_path(install_tag: str, data_dir: str | None = None) -> "Path":
     from pathlib import Path
-    return Path(data_dir or DATA_DIR) / "config" / f"strata-{install_tag}.json"
+    from . import strata as strata_engine
+    root = Path(data_dir) if data_dir else strata_engine.live_data_dir()
+    return strata_engine.configs_dir(root) / f"strata-{install_tag}.json"
+
+
+# ---------------------------------------------------------------- 0.2: the settings live in the pin file
+#
+# 0.2's setup rewrites the run config's args on every start (it runs inside `strata launch`), so
+# a flag written there lasts until the next restart. The documented surface is the launcher's:
+# PARALLEL, and STRATA_SET for engine flags (`strata launch --set prefill=auto:32768`). Both are
+# read from the pin file by entrypoint-0.2.sh on every start - the same file, and the same
+# single-writer discipline, as the GPU pin and the model selection.
+
+_ENV_OF = {"batch": "PARALLEL"}            # tunables with a launcher variable of their own
+
+
+def _layout_02(data_dir: str | None) -> bool:
+    from pathlib import Path
+    from . import strata as strata_engine
+    root = Path(data_dir) if data_dir else strata_engine.live_data_dir()
+    return strata_engine.layout(root) == "0.2"
+
+
+def _env_lines(env_path: str) -> list[str]:
+    try:
+        return open(env_path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+
+
+def _env_key(line: str) -> str:
+    t = line.strip()
+    if t.startswith("#") or "=" not in t:
+        return ""
+    return t.partition("=")[0].replace("export", "").strip()
+
+
+def env_settings(env_path: str) -> dict[str, str]:
+    """{tunable: value} as the pin file sets it: PARALLEL, and the flags in STRATA_SET."""
+    out: dict[str, str] = {}
+    for line in _env_lines(env_path):
+        key = _env_key(line)
+        if not key:
+            continue
+        val = line.strip().partition("=")[2].strip().strip('"').strip("'")
+        if key == "STRATA_SET":
+            for tok in val.split():
+                k, _, v = tok.partition("=")
+                if k and v:
+                    out[k] = v
+        else:
+            for name, env in _ENV_OF.items():
+                if key == env and val:
+                    out[name] = val
+    return out
+
+
+def write_env_setting(env_path: str, flag: str, value: str) -> tuple[bool, str]:
+    """Set one tunable in the pin file, keeping every other line (comments included) as it is."""
+    from pathlib import Path
+    from . import strata as strata_engine
+    lines = _env_lines(env_path)
+    if not lines:
+        return False, f"cannot read {env_path}"
+    out: list[str] = []
+    done = False
+    if flag in _ENV_OF:
+        key = _ENV_OF[flag]
+        for line in lines:
+            if _env_key(line) == key:
+                if not done:
+                    out.append(f"{key}={value}")
+                    done = True
+                continue
+            out.append(line)
+        if not done:
+            out.append(f"{key}={value}")
+    else:
+        for line in lines:
+            if _env_key(line) == "STRATA_SET":
+                cur = line.strip().partition("=")[2].strip().strip('"').strip("'").split()
+                toks = [x for x in cur if x.partition("=")[0] != flag] + [f"{flag}={value}"]
+                if not done:
+                    out.append('STRATA_SET="' + " ".join(toks) + '"')
+                    done = True
+                continue
+            out.append(line)
+        if not done:
+            out.append(f'STRATA_SET="{flag}={value}"')
+    try:
+        strata_engine._atomic_replace(Path(env_path), "\n".join(out) + "\n")
+    except OSError as e:
+        return False, f"cannot write {env_path}: {e}"
+    return True, f"{TUNABLES[flag]['label']} set to {value}; applies on the next restart"
 
 
 def tuning_state(install_tag: str, metrics: dict | None = None,
@@ -823,6 +923,8 @@ def tuning_state(install_tag: str, metrics: dict | None = None,
     except (OSError, ValueError):
         cfg = {}
     args = cfg.get("args") or []
+    from . import strata as strata_engine
+    pinned = env_settings(str(strata_engine.ENV_PATH)) if _layout_02(data_dir) else {}
     for flag, spec in TUNABLES.items():
         val = ""
         key = spec.get("metric")
@@ -830,6 +932,8 @@ def tuning_state(install_tag: str, metrics: dict | None = None,
             live = (metrics.get("engine") or {}).get(key)
             if live is not None:
                 val = str(live)
+        if not val:
+            val = pinned.get(flag, "")
         if not val:
             tok = f"--{flag}"
             val = args[args.index(tok) + 1] if tok in args and args.index(tok) + 1 < len(args) else ""
@@ -851,6 +955,9 @@ def set_tunable(install_tag: str, flag: str, value: str, container: str = "strat
         return False, f"not a tunable: {flag}"
     if value not in {v for v, _ in TUNABLES[flag]["choices"]}:
         return False, f"not an allowed value for {flag}: {value!r}"
+    if _layout_02(data_dir):
+        from . import strata as strata_engine
+        return write_env_setting(str(strata_engine.ENV_PATH), flag, value)
 
     p = _config_path(install_tag, data_dir)
     try:
