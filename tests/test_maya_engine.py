@@ -394,8 +394,9 @@ class _ArchiveClient:
 
 class TestInstalledModels:
     @pytest.fixture(autouse=True)
-    def _fresh(self, monkeypatch):
+    def _fresh(self, monkeypatch, tmp_path):
         monkeypatch.setattr(maya_engine, "_cache", {})
+        monkeypatch.setattr(maya_engine, "CONF_DIR", tmp_path / "no-mount")   # archive path
 
     def test_reads_model_configs_and_skips_the_rest(self):
         payload = _tar({

@@ -25,6 +25,7 @@ from .routers import prompts as prompts_router
 from .routers import search as search_router
 from .routers import settings as settings_router
 from .routers import strata as strata_router
+from .routers import maya as maya_router
 from .routers.strata import STRATA_DATA, STRATA_ENV_FILE
 from .web import templates, _blocked_chip, _QUEUED_CHIP, _toast
 
@@ -195,6 +196,11 @@ app.include_router(config_router.router)
 # ---------- Containers ----------
 
 app.include_router(containers_router.router)
+
+
+# ---------- Maya ----------
+
+app.include_router(maya_router.router)
 
 
 # ---------- Prompt library ----------
