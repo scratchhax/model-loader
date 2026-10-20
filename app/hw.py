@@ -337,6 +337,97 @@ def _read_amd_power(container) -> dict[str, tuple[float, float]]:
     return out
 
 
+# The amdgpu driver publishes per-card telemetry in sysfs, world-readable from any container - this one
+# included, with no /dev/kfd and no ROCm. It is the first source now, because the rocm-smi route needs
+# a running GPU container that SHIPS rocm-smi, and since Strata moved to upstream's 0.2 image
+# (2026-10-20) none does while Strata holds the cards: that image has no ROCm tools, gpu-monitor has
+# none, and Maya's and llama's images that do are stopped exactly then. The strip went blank -
+# "No GPU telemetry yet" - for the whole time Strata was the engine, swap included.
+_SYSFS_DRM = "/sys/class/drm"
+
+# PCI device id -> name. The driver exposes no marketing name for these cards (product_name is
+# absent), and rocm-smi's own table called them "AMD Radeon Graphics".
+_AMD_DEVICE_NAMES = {0x7551: "AMD Radeon AI PRO R9700"}
+
+
+def _sysfs_num(path, scale: float = 1.0) -> float:
+    try:
+        with open(path, encoding="ascii") as f:
+            return float(f.read().strip()) / scale
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _read_amd_sysfs(root: str = _SYSFS_DRM) -> GpuStats | None:
+    """Per-card AMD stats from /sys/class/drm/card*/device, or None when there are no AMD cards.
+
+    ORDERED BY PCI ADDRESS, not by drm card number, because that is the order HIP and the engines
+    number the cards in, and every per-card figure on the page is matched to theirs. The drm numbers
+    do not follow it here: card0 is 0000:08:00.0 (behind the chipset, the slow link) and card2 is
+    0000:03:00.0 (on the CPU's lanes); the engines call them card 1 and card 0, and Strata's own
+    PCIe probe (19.1 vs 6.6 GB/s) and Maya's (0.19 vs 1.07 ms an expert) agree on which is which.
+    Displays and the iGPU (no mem_info_vram_total) are skipped.
+    """
+    import glob
+    import os
+    devs: dict[str, str] = {}
+    for card in glob.glob(os.path.join(root, "card[0-9]*")):
+        if "-" in os.path.basename(card):
+            continue                                    # a connector (card0-DP-5), not a device
+        dev = os.path.join(card, "device")
+        try:
+            with open(os.path.join(dev, "vendor"), encoding="ascii") as f:
+                if f.read().strip() != "0x1002":
+                    continue
+        except OSError:
+            continue
+        if not os.path.exists(os.path.join(dev, "mem_info_vram_total")):
+            continue
+        devs[os.path.basename(os.path.realpath(dev))] = dev
+    if not devs:
+        return None
+    cards: list[GpuCard] = []
+    for i, pci in enumerate(sorted(devs)):
+        dev = devs[pci]
+        hw = next(iter(sorted(glob.glob(os.path.join(dev, "hwmon", "hwmon*")))), "")
+        power = _sysfs_num(os.path.join(hw, "power1_average"), 1e6) if hw else 0.0
+        if not power and hw:
+            power = _sysfs_num(os.path.join(hw, "power1_input"), 1e6)
+        try:
+            with open(os.path.join(dev, "device"), encoding="ascii") as f:
+                dev_id = int(f.read().strip(), 16)
+        except (OSError, ValueError):
+            dev_id = 0
+        cards.append(GpuCard(
+            index=i,
+            name=_AMD_DEVICE_NAMES.get(dev_id, f"AMD Radeon (0x{dev_id:04x})" if dev_id else "AMD Radeon"),
+            util_pct=_sysfs_num(os.path.join(dev, "gpu_busy_percent")),
+            vram_used_gb=round(_sysfs_num(os.path.join(dev, "mem_info_vram_used"), 1024 ** 3), 2),
+            vram_total_gb=round(_sysfs_num(os.path.join(dev, "mem_info_vram_total"), 1024 ** 3), 2),
+            temp_c=_sysfs_num(os.path.join(hw, "temp1_input"), 1000) if hw else 0.0,
+            power_w=round(power, 1),
+            power_cap_w=round(_sysfs_num(os.path.join(hw, "power1_cap"), 1e6), 1) if hw else 0.0,
+            # pwm1 is 0-255; rocm-smi's "Fan speed (%)" is the same figure as a percentage
+            fan_pct=round(_sysfs_num(os.path.join(hw, "pwm1")) * 100.0 / 255.0, 1) if hw else 0.0,
+            fan_rpm=_sysfs_num(os.path.join(hw, "fan1_input")) if hw else 0.0,
+        ))
+    names = [c.name for c in cards]
+    display = (f"{len(names)} × {names[0]}" if len(set(names)) == 1 and len(names) > 1
+               else (names[0] if len(names) == 1 else " + ".join(names)))
+    return GpuStats(
+        vendor="amd",
+        name=display,
+        util_pct=round(sum(c.util_pct for c in cards) / len(cards), 1),
+        vram_used_gb=round(sum(c.vram_used_gb for c in cards), 1),
+        vram_total_gb=round(sum(c.vram_total_gb for c in cards), 1),
+        temp_c=max(c.temp_c for c in cards),
+        power_w=round(sum(c.power_w for c in cards), 1),
+        power_cap_w=round(sum(c.power_cap_w for c in cards), 1),
+        gpu_count=len(cards),
+        cards=cards,
+    )
+
+
 def _read_amd(container, container_name: str) -> GpuStats | None:
     """Per-card AMD stats, aggregated the same way as NVIDIA.
 
@@ -573,7 +664,8 @@ def _collect(name: str) -> BackendStats:
     if vendor == "nvidia":
         gpu = _read_nvidia(c)
     elif vendor == "amd":
-        gpu = _read_amd(c, name)
+        # sysfs first: no docker exec (~90 ms), and no need for the container to ship rocm-smi
+        gpu = _read_amd_sysfs() or _read_amd(c, name)
     elif vendor == "vulkan":
         gpu = _read_vulkan(c, name)
     else:
