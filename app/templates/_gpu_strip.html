@@ -236,22 +236,29 @@
     <div class="flex flex-wrap items-center gap-2">
       <span class="text-[10px] uppercase tracking-wide text-slate-500">Engine</span>
       {% for e in engines %}
+      {# holding = running AND not parked. A parked engine is offered like a stopped one, since
+         taking over is exactly what loading it again does. #}
+      {% set holding = e.running and e.engine not in (parked_engines or []) %}
+      {% set parked = e.running and not holding %}
       <form class="contents"
-            {% if not e.running %}
+            {% if not holding %}
             hx-post="/engines/{{ e.engine }}/activate"
             {% if strata_live %}hx-include="#engine-soft"{% endif %}
             hx-target="#engine-switch-toast" hx-swap="innerHTML"
             hx-confirm="Hand the cards to {{ e.engine }}? Every other container holding a GPU is released - unloaded and kept warm where that is offered, stopped otherwise - then the driver is waited on and {{ e.names|join(', ') }} starts."
             {% endif %}>
       <button class="inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-mono
-                     {% if e.running %}border-fuchsia-700 bg-fuchsia-950/40 text-fuchsia-300
+                     {% if holding %}border-fuchsia-700 bg-fuchsia-950/40 text-fuchsia-300
                      {% else %}border-slate-800 bg-slate-900/60 text-slate-300 hover:bg-slate-800{% endif %}"
-              {% if not e.running %}
+              {% if parked %}
+              title="Parked: the container is up but holds no VRAM. Taking over releases the engine holding the cards, then loads {{ e.names|join(', ') }} again."
+              {% elif not holding %}
               title="Releases every other GPU container (unload where supported, stop otherwise), waits for the VRAM to actually come back, then starts {{ e.names|join(', ') }}."
               {% else %}disabled title="Already holding the cards."{% endif %}>
-        <span class="h-2 w-2 shrink-0 rounded-sm {% if e.running %}bg-fuchsia-600{% else %}bg-slate-700{% endif %}"></span>
+        <span class="h-2 w-2 shrink-0 rounded-sm {% if holding %}bg-fuchsia-600{% elif parked %}bg-fuchsia-900{% else %}bg-slate-700{% endif %}"></span>
         {{ e.engine }}
-        {%- if e.running %} <span class="text-[10px] text-fuchsia-400/70">active</span>
+        {%- if holding %} <span class="text-[10px] text-fuchsia-400/70">active</span>
+        {%- elif parked %} <span class="text-[10px] text-slate-500">parked · take over</span>
         {%- else %} <span class="text-[10px] text-slate-500">take over</span>{% endif %}
       </button>
       </form>
