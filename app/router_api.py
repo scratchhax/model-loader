@@ -42,8 +42,15 @@ from .utils import docker_client
 
 app = FastAPI(title="Model Router")
 
-# The engines this router knows how to address, in the order /v1/models lists them.
-ENGINES = ("strata", "llama")
+# The engines this router knows how to address, in the order /v1/models lists them. Maya goes
+# last so ENGINES[0] - the default for a request that names no model, and the first /props
+# answer - stays what it was before it arrived.
+ENGINES = ("strata", "llama", "maya")
+
+# Engines that serve exactly one model and ignore the name they are asked for. For these the
+# loaded model IS the answer to the alias; only llama's router picks by name. Maya runs one
+# model per container (GLM-5.3-Flash or DeepSeek-V4.1-Flash), the same shape as Strata.
+SINGLE_MODEL = frozenset({"strata", "maya"})
 
 # Long on purpose. A 200K-token prompt takes 60-90 s to read on this box before a single token
 # comes back, and a default-length client timeout would turn the engine's slowest legitimate
@@ -184,18 +191,25 @@ async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
     "unloaded" - a 200 there can mean "up and serving nothing", which is exactly the state a
     cold start and a parked server both pass through. /health carries the one bool that settles
     it. On llama it is whether /v1/models answered at all, since that router only opens the port
-    once it is ready to take requests and picks the model per request anyway.
+    once it is ready to take requests and picks the model per request anyway. On Maya it is
+    /health saying "ok": its port only opens once the model is in, and the other two statuses it
+    can report ("updating", "reloading") are both "up but not taking requests".
 
     Without this a request arriving during a Strata start was routed INTO the closed port and
     came back 502 "All connection attempts failed", which reads as a broken engine rather than
     one that is still coming up - and it meant no caller could ever be told to wait instead.
     """
-    if b["engine"] != "strata":
+    if b["engine"] not in SINGLE_MODEL:
         return bool(b["models"])
     try:
         r = await client.get(f"{b['url']}/health", timeout=5.0)
-        return r.status_code == 200 and bool(r.json().get("loaded"))
-    except (httpx.HTTPError, ValueError):
+        if r.status_code != 200:
+            return False
+        h = r.json()
+        if b["engine"] == "maya":
+            return str(h.get("status") or "") == "ok"
+        return bool(h.get("loaded"))
+    except (httpx.HTTPError, ValueError, AttributeError):
         return False
 
 
@@ -327,9 +341,10 @@ async def resolve(asked: str) -> tuple[dict, str]:
                                  f"(available: {', '.join(b['name'] for b in live)})")
             live = match
         b = live[0]
-        # Strata serves exactly one model and ignores the name it is given, so whatever it has
-        # loaded IS the answer. llama's router picks by name, so a default has to be chosen.
-        if b["engine"] == "strata":
+        # Strata and Maya serve exactly one model and ignore the name they are given, so
+        # whatever is loaded IS the answer. llama's router picks by name, so a default has to
+        # be chosen.
+        if b["engine"] in SINGLE_MODEL:
             return b, (b["models"][0] if b["models"] else asked)
         want, src = default_for("llama"), "default"
         if not want:
@@ -388,12 +403,20 @@ async def list_models() -> dict:
     Both, not either: the aliases are what a saved config should point at, and the real ids are
     what you use when you mean one specific model. Offering only aliases would make this router
     cost you the ability to say "the voice model".
+
+    An alias is listed while its engine has a CONTAINER, running or not. Listing only running
+    ones made the dropdown the opposite of a switch: the engines take turns on the cards, so the
+    one you would pick to switch TO is exactly the one that is stopped, and it was missing. Strata
+    hid this by soft-parking (its container keeps running); Maya has no park, so a stopped Maya
+    would never have appeared. Picking a stopped engine's alias is answered by resolve(): it
+    switches when that engine's auto-switch is on, and says why it did not when it is off.
     """
     bs, _ = await _live_map()
+    present = {b["engine"] for b in _backends(include_stopped=True)}
     now = int(time.time())
     data = []
     for e in ENGINES:
-        if any(b["engine"] == e for b in bs):
+        if e in present:
             data.append({"id": e, "object": "model", "created": now, "owned_by": "model-router"})
     seen: set[str] = set()
     for b in bs:
@@ -841,9 +864,10 @@ async def _forward_stream(out: dict, backend: dict, model: str, path: str, shape
 
 _UI_BASE = "http://127.0.0.1:8090"
 
-# The UI process allows 420 s for a backend to answer after `docker start`, so waiting longer
-# than that here would only report on a switch that has already given up.
-_NARRATE_MAX_S = 480.0
+# The UI process allows each engine its own time to answer after `docker start` (the longest is
+# Maya's 900 s, see services.engines.READY_TIMEOUT_S), so waiting longer than that here would
+# only report on a switch that has already given up, and less would abandon one still loading.
+_NARRATE_MAX_S = 960.0
 
 
 def narrate_channel() -> str:
@@ -1197,13 +1221,15 @@ async def props() -> JSONResponse:
     A client that wants the general picture should talk to this router as an OpenAI endpoint,
     where no such question is asked.
     """
-    try:
-        backend, _ = await resolve(ENGINES[0])
-    except Unresolved:
+    backend, why = None, "no inference backend is running"
+    for e in ENGINES:
         try:
-            backend, _ = await resolve(ENGINES[1])
-        except Unresolved as e:
-            return JSONResponse(status_code=503, content={"error": {"message": str(e)}})
+            backend, _ = await resolve(e)
+            break
+        except Unresolved as err:
+            why = str(err)
+    if backend is None:
+        return JSONResponse(status_code=503, content={"error": {"message": why}})
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{backend['url']}/props")

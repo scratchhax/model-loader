@@ -80,7 +80,15 @@ def _vram_held_gb(exclude: set[str]) -> float:
         return 0.0
 
 
-def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
+# How long each engine gets to answer after `docker start`. Maya's is the long one: measured
+# 2026-10-20, a start from a cold page cache took ~5 min (GLM-5.3-Flash Maya-S warms 43 + 46 GB
+# of expert tiers before its port opens, one card at 0.17 GB/s), so 420 s would report a healthy
+# start as slow with a minute to spare at best. router_api._NARRATE_MAX_S is sized past this.
+READY_TIMEOUT_S = {"maya": 900.0}
+_READY_TIMEOUT_DEFAULT_S = 420.0
+
+
+def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
     """Poll one backend until it is actually serving. (ready, note).
 
     `docker start` returning is not "serving", and the gap is not small: Strata reads ~55 GB of
@@ -96,7 +104,9 @@ def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
     as "unloaded" - a 200 there can mean "up and serving nothing", which is precisely the state a
     POST /load passes through on its way to loaded. /health carries the one bool that settles it
     ({"loaded": true}), and during a cold start the port is closed until the model is in, so the
-    same poll covers cold start and warm /load alike.
+    same poll covers cold start and warm /load alike. On Maya it is /health with status "ok":
+    there is no load/unload pair, the port opens only once the model is in, and the statuses it
+    reports otherwise ("updating", "reloading") mean up but not taking requests.
     """
     client = _docker_client()
     if client is None:
@@ -108,20 +118,33 @@ def _wait_ready(name: str, timeout: float = 420.0) -> tuple[bool, str]:
     _, port = _extract_ports(attrs)
     if port is None:
         return True, f"{name} exposes no API port — not waiting"
-    strata = engine_for(name) == "strata"
-    url = f"http://{name}:{port}/{'health' if strata else 'v1/models'}"
+    engine = engine_for(name)
+    if timeout is None:
+        timeout = READY_TIMEOUT_S.get(engine, _READY_TIMEOUT_DEFAULT_S)
+    strata = engine == "strata"
+    health = engine in ("strata", "maya")
+    url = f"http://{name}:{port}/{'health' if health else 'v1/models'}"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
                 r = c.get(url)
-                if r.status_code == 200 and (not strata or bool(r.json().get("loaded"))):
-                    return True, ""
-        except (httpx.HTTPError, ValueError):
+                if r.status_code == 200:
+                    if strata:
+                        if bool(r.json().get("loaded")):
+                            return True, ""
+                    elif engine == "maya":
+                        if str(r.json().get("status") or "") == "ok":
+                            return True, ""
+                    else:
+                        return True, ""
+        except (httpx.HTTPError, ValueError, AttributeError):
             pass
         _switch_state.update(phase="loading",
                              msg=f"{name} up {int(time.time() - _switch_state.get('t0', time.time()))}s, "
-                                 + ("model not loaded yet" if strata else "port not answering yet"))
+                                 + ("model not loaded yet" if strata
+                                    else "loading the model" if engine == "maya"
+                                    else "port not answering yet"))
         time.sleep(2.0)
     return False, f"{name} started but {url} did not answer within {int(timeout)}s"
 

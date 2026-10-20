@@ -114,6 +114,8 @@ def _strata_control(name: str, path: str, timeout: float) -> tuple[bool, str]:
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as c:
             r = c.post(url, headers={"Content-Type": "application/json"}, content=b"{}")
+    except httpx.TimeoutException:
+        return False, f"{url}: {_TIMED_OUT} after {timeout:.0f}s"
     except httpx.HTTPError as e:
         return False, f"{url}: {e}"
     if r.status_code == 200:
@@ -132,15 +134,61 @@ def _strata_control(name: str, path: str, timeout: float) -> tuple[bool, str]:
     return False, f"HTTP {r.status_code} from {url}"
 
 
+_TIMED_OUT = "timed out"
+
+# How long /unload may take to ANSWER. It used to be 10 s on the belief that an unload takes
+# ~0.3 s. It does not always: on 2026-10-20 a park of the UD-IQ4_XS pack at 262K context ran
+# past 10 s and still succeeded - /health said loaded:false and both cards were back to 60 MB -
+# while the Park button reported "Failed: .../unload: timed out", and the engine switch, which
+# calls this same function, would have aborted a perfectly good switch on it.
+_UNLOAD_TIMEOUT_S = 60.0
+# After a timeout, how long to watch /health for the park to land before calling it a failure.
+_UNLOAD_CONFIRM_S = 60.0
+
+
+def strata_loaded(name: str) -> bool | None:
+    """/health's loaded bool for one Strata backend; None when it does not answer."""
+    client = _docker_client()
+    if client is None:
+        return None
+    try:
+        attrs = client.containers.get(name).attrs or {}
+        _, port = _extract_ports(attrs)
+        if port is None:
+            return None
+        with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
+            r = c.get(f"http://{name}:{port}/health")
+        if r.status_code != 200:
+            return None
+        return bool((r.json() or {}).get("loaded"))
+    except (NotFound, DockerException, httpx.HTTPError, ValueError, AttributeError):
+        return None
+
+
 def strata_unload(name: str) -> tuple[bool, str]:
     """Park a running Strata: VRAM and pinned RAM back now, container and page cache warm.
 
-    Synchronous on purpose - it takes ~0.3 s, and its two refusals (a request in flight, a
-    stuck engine) are only useful if the caller hears them right now.
+    Synchronous on purpose, because its two refusals (a request in flight, a stuck engine) are
+    only useful if the caller hears them right now.
+
+    A TIMEOUT is not one of those refusals and is not reported as one. The server releases the
+    model before it answers, and how long that takes grows with the pack and the context arena,
+    so "no answer yet" says nothing about whether the park happened. /health does: loaded:false
+    means it landed, however late the answer to the POST. Only a model still loaded after the
+    confirm window is a failure.
     """
     with _strata_errors_lock:
         _strata_errors.pop(name, None)
-    return _strata_control(name, "/unload", timeout=10.0)
+    ok, msg = _strata_control(name, "/unload", timeout=_UNLOAD_TIMEOUT_S)
+    if ok or _TIMED_OUT not in msg:
+        return ok, msg
+    deadline = time.time() + _UNLOAD_CONFIRM_S
+    while True:
+        if strata_loaded(name) is False:
+            return True, "parked (Strata answered slowly, /health confirms it is unloaded)"
+        if time.time() >= deadline:
+            return False, f"{msg}, and /health still reports the model loaded"
+        time.sleep(1.0)
 
 
 def strata_load(name: str) -> tuple[bool, str]:
