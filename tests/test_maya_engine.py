@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 
 import httpx
 import pytest
@@ -330,13 +331,102 @@ class TestRouterPageWithMaya:
         # as bare strings where (value, label) pairs were expected.
         m = _b("maya", "maya", ["glm-5.3-flash"])
         monkeypatch.setattr(ra, "_live_map", _lm([m], {"glm-5.3-flash": m}))
+        monkeypatch.setattr(maya_engine, "choices", lambda client, container="maya": [])
         r = web.get("/router")
-        assert r.status_code == 200
-        assert 'value="maya"' in r.text
-        # No default picker for a one-model engine: it would be a control that does nothing.
-        assert "always means that model" in r.text
-        defaults = r.text.split('hx-post="/router/default"')[1:]
-        assert defaults and not any('value="maya"' in f.split("</form>")[0] for f in defaults)
+        assert r.status_code == 200 and 'value="maya"' in r.text
+
+    def test_dropdown_lists_installed_models_and_selects_the_one(self, web, monkeypatch):
+        # A model dropdown on every engine's row, for consistency - even with one model.
+        # Stopped Maya: the list comes from its installed configs, not from a running server.
+        monkeypatch.setattr(maya_engine, "choices", lambda client, container="maya":
+                            [("glm-5.3-flash", "glm-5.3-flash  (Maya-S-v2-IQ2_XXS)")])
+        r = web.get("/router")
+        form = next(f.split("</form>")[0] for f in r.text.split('hx-post="/router/default"')[1:]
+                    if 'value="maya"' in f.split("</form>")[0])
+        assert '<option value="glm-5.3-flash" selected' in form
+        assert "glm-5.3-flash  (Maya-S-v2-IQ2_XXS)" in form
+        assert "installed models" in r.text
+
+    def test_a_saved_default_wins_over_the_preselect(self, web, monkeypatch):
+        db.set_setting("router.default.maya", "deepseek-v4.1-flash")
+        monkeypatch.setattr(maya_engine, "choices", lambda client, container="maya":
+                            [("deepseek-v4.1-flash", "d"), ("glm-5.3-flash", "g")])
+        r = web.get("/router")
+        assert '<option value="deepseek-v4.1-flash" selected' in r.text
+        assert '<option value="glm-5.3-flash" selected' not in r.text
+
+
+# ------------------------------------------------------------------ installed models
+
+import io as _io          # noqa: E402
+import tarfile as _tarfile  # noqa: E402
+
+from app import maya as maya_engine  # noqa: E402
+
+
+def _tar(files: dict[str, bytes]) -> bytes:
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w") as t:
+        for name, data in files.items():
+            info = _tarfile.TarInfo(f"conf/{name}")
+            info.size = len(data)
+            t.addfile(info, _io.BytesIO(data))
+    return buf.getvalue()
+
+
+class _ArchiveClient:
+    def __init__(self, payload=None, raises=None):
+        outer = self
+        self.calls = 0
+
+        class C:
+            def get_archive(self, path):
+                outer.calls += 1
+                if raises:
+                    raise raises
+                return iter([payload]), {}
+
+        class Containers:
+            def get(self, name):
+                return C()
+        self.containers = Containers()
+
+
+class TestInstalledModels:
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        monkeypatch.setattr(maya_engine, "_cache", {})
+
+    def test_reads_model_configs_and_skips_the_rest(self):
+        payload = _tar({
+            "maya-maya-s-v2-iq2_xxs-hip.json": json.dumps({
+                "model_name": "glm-5.3-flash",
+                "installer": {"quant": "Maya-S-v2-IQ2_XXS"}}).encode(),
+            # the dashboard's settings beside a config: not a model
+            "maya-maya-s-v2-iq2_xxs-hip.json.shared-settings.json": b'{"model_name": "x"}',
+            "run-maya-maya-s-v2-iq2_xxs-hip.sh": b"#!/bin/sh",
+            "maya-broken.json": b"{not json",
+        })
+        assert maya_engine.choices(_ArchiveClient(payload)) == [
+            ("glm-5.3-flash", "glm-5.3-flash  (Maya-S-v2-IQ2_XXS)")]
+
+    def test_deepseek_config_uses_its_quant_field(self):
+        payload = _tar({"maya-ds4-hip.json": json.dumps({
+            "model_name": "deepseek-v4.1-flash",
+            "installer": {"family": "deepseek", "ds4_quant": "maya-s"}}).encode()})
+        assert maya_engine.installed(_ArchiveClient(payload))[0]["quant"] == "maya-s"
+
+    def test_unreadable_volume_is_empty_not_an_error(self):
+        from docker.errors import NotFound
+        assert maya_engine.choices(_ArchiveClient(raises=NotFound("no maya"))) == []
+        assert maya_engine.choices(_ArchiveClient(payload=b"not a tar")) == []
+
+    def test_cached(self):
+        payload = _tar({"maya-a.json": b'{"model_name": "m"}'})
+        cli = _ArchiveClient(payload)
+        maya_engine.installed(cli)
+        maya_engine.installed(cli)
+        assert cli.calls == 1
 
 
 class TestAutoswitchToggle:

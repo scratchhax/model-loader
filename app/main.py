@@ -7,6 +7,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import db, hw, ini, services
+from . import maya as maya_engine
 from . import strata as strata_engine
 from . import strata_models
 from . import router_api
@@ -545,12 +546,23 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
     unloaded = set(router_api.unloaded_sections([m for m, _ in per_engine.get("llama", [])]))
     per_engine["llama"] += [(n, n) for n in sorted(unloaded)]
     per_engine["strata"] = _strata_choices()
+    # Maya's list is its INSTALLED models, read from its config volume, so it is there while the
+    # container is stopped - which, the engines taking turns, is most of the time you look.
+    # Falls back to whatever a running Maya advertises if the configs cannot be read.
+    maya_choices = maya_engine.choices(services._docker_client())
+    if maya_choices:
+        per_engine["maya"] = maya_choices
+    defaults = {e: router_api.default_for(e) for e in router_api.ENGINES}
+    if not defaults.get("maya") and len(per_engine.get("maya", [])) == 1:
+        # Nothing chosen and one model installed: that model IS what `maya` serves, so the
+        # dropdown says so instead of "(none)".
+        defaults["maya"] = per_engine["maya"][0][0]
     return templates.TemplateResponse("router.html", {
         "request": request,
         "engines": router_api.ENGINES,
         "per_engine": per_engine,
         "unloaded": unloaded,
-        "defaults": {e: router_api.default_for(e) for e in router_api.ENGINES},
+        "defaults": defaults,
         "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
         "autoswitch": {e: router_api.autoswitch_enabled(e) for e in router_api.ENGINES},
         "autoswitch_dwell": int(router_api.dwell_s()),
