@@ -9,7 +9,7 @@ from docker.errors import DockerException, NotFound
 from .. import strata as strata_engine
 from ..config import settings
 
-from .backends import (_effective_container_names, _extract_ports,
+from .backends import (_effective_container_names, _extract_ports, auth_headers,
                       discover_llama_containers, engine_for)
 from .dockerbase import _docker_client
 from .gpu import gpu_holders
@@ -63,7 +63,7 @@ def strata_metrics(name: str) -> dict | None:
             _, port = _extract_ports(attrs)
             if port is not None:
                 with httpx.Client(timeout=httpx.Timeout(2.0)) as c:
-                    r = c.get(f"http://{name}:{port}/metrics")
+                    r = c.get(f"http://{name}:{port}/metrics", headers=auth_headers(name))
                 if r.status_code == 200:
                     val = r.json()
         except (NotFound, DockerException, httpx.HTTPError, ValueError):
@@ -83,7 +83,7 @@ def strata_model_ids(name: str) -> list[str]:
         if port is None:
             return []
         with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
-            r = c.get(f"http://{name}:{port}/v1/models")
+            r = c.get(f"http://{name}:{port}/v1/models", headers=auth_headers(name))
         if r.status_code != 200:
             return []
         return [str(m.get("id")) for m in (r.json() or {}).get("data") or [] if m.get("id")]
@@ -113,7 +113,8 @@ def _strata_control(name: str, path: str, timeout: float) -> tuple[bool, str]:
     url = f"http://{name}:{port}{path}"
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as c:
-            r = c.post(url, headers={"Content-Type": "application/json"}, content=b"{}")
+            r = c.post(url, headers={"Content-Type": "application/json", **auth_headers(name)},
+                       content=b"{}")
     except httpx.TimeoutException:
         return False, f"{url}: {_TIMED_OUT} after {timeout:.0f}s"
     except httpx.HTTPError as e:

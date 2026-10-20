@@ -170,9 +170,16 @@ def _resolve_endpoint(container: str) -> tuple[str, str]:
     return f"http://{container}:{port}", ""
 
 
+def _auth(base_url: str) -> dict:
+    """The backend's API key header, by container name (the host of http://<container>:<port>)."""
+    from urllib.parse import urlparse
+    from . import services
+    return services.auth_headers(urlparse(base_url).hostname or "")
+
+
 def loaded_aliases(base_url: str) -> set[str]:
     try:
-        r = httpx.get(f"{base_url}/v1/models", timeout=10.0)
+        r = httpx.get(f"{base_url}/v1/models", timeout=10.0, headers=_auth(base_url))
         r.raise_for_status()
         return {str(m.get("id") or "") for m in (r.json().get("data") or [])
                 if (m.get("status") or {}).get("value") == "loaded"}
@@ -211,7 +218,8 @@ def measure(base_url: str, alias: str, prompt: str, max_tokens: int) -> dict:
     timings: dict = {}
     try:
         with httpx.Client(timeout=httpx.Timeout(_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S)) as cl:
-            with cl.stream("POST", f"{base_url}/v1/chat/completions", json=payload) as r:
+            with cl.stream("POST", f"{base_url}/v1/chat/completions", json=payload,
+                           headers=_auth(base_url)) as r:
                 if r.status_code != 200:
                     r.read()
                     return {"err": f"HTTP {r.status_code}: {r.text[:200]}"}

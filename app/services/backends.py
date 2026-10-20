@@ -289,7 +289,8 @@ async def _probe_loaded_model(
         return None, None, None, None, None, None
     url = f"http://{container_name}:{internal_port}/v1/models"
     try:
-        r = await _http().get(url, timeout=httpx.Timeout(2.0, read=3.0))
+        r = await _http().get(url, timeout=httpx.Timeout(2.0, read=3.0),
+                              headers=auth_headers(container_name))
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}", None, None, None, None
         data = r.json()
@@ -418,8 +419,41 @@ def discover_llama_containers() -> list[dict]:
         # as a `-m` llama server, which is exactly what `router = False` already means here.
         is_router = engine == "llama" and ("--models-preset" in joined or "--models-dir" in joined)
         out.append({"name": c.name, "image": img, "vendor": vendor,
-                    "router": is_router, "engine": engine})
+                    "router": is_router, "engine": engine, "api_key": api_key_of(c.attrs)})
     return out
+
+
+# The environment variables a backend reads its API key from. Strata 0.2 requires one on every
+# endpoint but /health (`strata launch --access lan`); upstream's image takes it as API_KEY, and
+# STRATA_API_KEY is the server's own name for it. llama.cpp and Maya set neither, so for them
+# auth_headers() is {} and their requests are exactly what they were.
+_KEY_ENV = ("API_KEY", "STRATA_API_KEY")
+
+
+def api_key_of(attrs: dict | None) -> str:
+    """A container's API key, from its own environment (compose env_file lands there). "" if none."""
+    try:
+        env = ((attrs or {}).get("Config") or {}).get("Env") or []
+    except AttributeError:
+        return ""
+    vals = {}
+    for e in env:
+        if isinstance(e, str) and "=" in e:
+            k, _, v = e.partition("=")
+            vals[k] = v.strip()
+    return next((vals[k] for k in _KEY_ENV if vals.get(k)), "")
+
+
+def auth_headers(name: str) -> dict[str, str]:
+    """{"Authorization": "Bearer <key>"} for a backend that has a key, {} for one that does not.
+
+    Every request this app makes to a backend goes through here - the probes, the slot and
+    metrics reads, park and load, the benchmark - so a backend that starts requiring a key needs
+    nothing but the key in its own environment. Read from the engine map's cache (10 s), so it
+    costs no docker call of its own.
+    """
+    key = _key_map().get(name, "")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 # The engine map, cached. An engine cannot change without a container being recreated, so this
@@ -438,16 +472,37 @@ _engine_cache: tuple[float, dict[str, str]] | None = None
 _engine_lock = threading.Lock()
 
 
+_key_cache: dict[str, str] = {}
+
+
+def _refresh_maps() -> dict[str, str]:
+    """One docker enumeration fills both caches: engine per backend, and API key per backend."""
+    global _engine_cache, _key_cache
+    found = discover_llama_containers()
+    fresh = {d["name"]: str(d.get("engine") or "llama") for d in found}
+    keys = {d["name"]: d.get("api_key") or "" for d in found}
+    with _engine_lock:
+        _engine_cache = (time.time(), fresh)
+        _key_cache = keys
+    return fresh
+
+
 def engine_map() -> dict[str, str]:
     """{container name: engine} for every discovered backend, cached for _ENGINE_TTL."""
-    global _engine_cache
     with _engine_lock:
         if _engine_cache and (time.time() - _engine_cache[0]) < _ENGINE_TTL:
             return _engine_cache[1]
-    fresh = {d["name"]: str(d.get("engine") or "llama") for d in discover_llama_containers()}
+    return _refresh_maps()
+
+
+def _key_map() -> dict[str, str]:
+    """{container name: API key} for every discovered backend, on the engine map's cache."""
     with _engine_lock:
-        _engine_cache = (time.time(), fresh)
-    return fresh
+        if _engine_cache and (time.time() - _engine_cache[0]) < _ENGINE_TTL:
+            return _key_cache
+    _refresh_maps()
+    with _engine_lock:
+        return _key_cache
 
 
 def engine_for(name: str) -> str:

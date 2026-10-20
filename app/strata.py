@@ -213,13 +213,91 @@ def _env_of(attrs: dict | None) -> dict[str, str]:
 
 def config_tag(attrs: dict | None) -> str:
     """The config name tag the entry point derives: FAMILY=unsloth, MODEL=UD-IQ4_XS ->
-    "unsloth-ud-iq4_xs" (qwen has an empty family tag, like the entry point's case)."""
+    "unsloth-ud-iq4_xs" (qwen has an empty family tag, like the entry point's case).
+
+    From the container's environment, else from the pin file. Under 0.2 FAMILY / MODEL are not
+    in the container environment at all - entrypoint-0.2.sh sources the pin file at start - so
+    the file is where the selection lives.
+    """
     env = _env_of(attrs)
     model = (env.get("MODEL") or "").lower()
+    family = (env.get("FAMILY") or "").lower()
+    if not model:
+        from . import strata_models
+        sel = strata_models.read_selection(str(ENV_PATH))
+        model, family = (sel.get("MODEL") or "").lower(), (sel.get("FAMILY") or "").lower()
     if not model:
         return ""
-    family = (env.get("FAMILY") or "qwen").lower()
+    family = family or "qwen"
     return model if family == "qwen" else f"{family}-{model}"
+
+
+# ---------------------------------------------------------------------------
+# Where the engine's files are, and in which layout.
+#
+# 0.1.x (our own image): /data/config/strata-<tag>.json, /data/packs/<tag>, /data/models.
+# 0.2 (upstream's image, from 2026-10-20): /data/install/strata-<tag>.json (setup writes it on
+# every start and keeps keys it does not own, #629), /data/Strata-data/{models,packs,mtp},
+# /data/state (presets, the key). The two cannot be told apart by version string cheaply, but
+# they can by what is on disk, which is also what every reader below actually depends on.
+# ---------------------------------------------------------------------------
+
+def data_dir(attrs: dict | None, own_attrs: dict | None = None) -> Path | None:
+    """The engine's /data volume as THIS app can reach it. None if unknown.
+
+    The strata container's mount for /data gives the HOST path; this app's own mounts translate
+    it (/home/jason/ai-lab/strata is /strata here, so data2 is /strata/data2). With no matching
+    mount - running on the host - the host path is used as-is.
+    """
+    data = _env_of(attrs).get("STRATA_DATA") or "/data"
+    host = ""
+    for m in (attrs or {}).get("Mounts") or []:
+        if (m or {}).get("Destination") == data:
+            host = m.get("Source") or ""
+            break
+    if not host:
+        return None
+    best, mapped = "", host
+    for m in (own_attrs or {}).get("Mounts") or []:
+        src = (m or {}).get("Source") or ""
+        dst = (m or {}).get("Destination") or ""
+        if src and dst and (host == src or host.startswith(src.rstrip("/") + "/")) and len(src) > len(best):
+            best, mapped = src, dst.rstrip("/") + host[len(src):]
+    return Path(mapped)
+
+
+def layout(root: Path) -> str:
+    """ "0.2" for upstream's image layout, "0.1" for ours."""
+    return "0.2" if (root / "install").is_dir() or (root / "Strata-data").is_dir() else "0.1"
+
+
+def configs_dir(root: Path) -> Path:
+    return root / ("install" if layout(root) == "0.2" else "config")
+
+
+def packs_dir(root: Path) -> Path:
+    return root / "Strata-data" / "packs" if layout(root) == "0.2" else root / "packs"
+
+
+_live_dir: tuple[float, Path] | None = None
+
+
+def live_data_dir(container: str = "strata") -> Path:
+    """data_dir() of the running deployment, cached 30 s; /strata/data when it cannot be told."""
+    global _live_dir
+    if _live_dir and time.time() - _live_dir[0] < 30.0:
+        return _live_dir[1]
+    found = None
+    try:
+        from . import services
+        client = services._docker_client()
+        if client is not None:
+            found = data_dir(client.containers.get(container).attrs or {}, services.strata_own_attrs(client))
+    except Exception:  # noqa: BLE001 - an unreachable docker is "the default", never an error page
+        found = None
+    root = found or Path("/strata/data")
+    _live_dir = (time.time(), root)
+    return root
 
 
 def run_config_path(attrs: dict | None, own_attrs: dict | None = None) -> Path | None:
@@ -231,26 +309,13 @@ def run_config_path(attrs: dict | None, own_attrs: dict | None = None) -> Path |
     parent inside strata - the same directory, seen twice). With no matching mount - running
     on the host, say - the host path is used as-is, which is right there too.
     """
-    env = _env_of(attrs)
     tag = config_tag(attrs)
     if not tag:
         return None
-    data = env.get("STRATA_DATA") or "/data"
-    host = ""
-    for m in (attrs or {}).get("Mounts") or []:
-        if (m or {}).get("Destination") == data:
-            host = m.get("Source") or ""
-            break
-    if not host:
+    root = data_dir(attrs, own_attrs)
+    if root is None:
         return None
-    path = host
-    best, mapped = "", host
-    for m in (own_attrs or {}).get("Mounts") or []:
-        s = (m or {}).get("Source") or ""
-        d = (m or {}).get("Destination") or ""
-        if s and d and (host == s or host.startswith(s.rstrip("/") + "/")) and len(s) > len(best):
-            best, mapped = s, d.rstrip("/") + host[len(s):]
-    return Path(mapped) / "config" / f"strata-{tag}.json"
+    return configs_dir(root) / f"strata-{tag}.json"
 
 
 def _backup(path: Path) -> None:
