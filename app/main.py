@@ -533,7 +533,13 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
         for m in b["models"]:
             if m not in per_engine[b["engine"]]:
                 per_engine[b["engine"]].append(m)
-    per_engine["llama"] = [(m, m) for m in per_engine.get("llama", [])]
+    # (value, label) pairs, which is what the template unpacks. Every engine but Strata offers
+    # its model ids as both; Strata's are built from installed packs below. Converting llama
+    # alone left any other engine's list as bare strings, and the Router tab 500'd ("too many
+    # values to unpack") the first time Maya was running.
+    per_engine.setdefault("llama", [])     # always present: the unloaded sections join it below
+    for e in list(per_engine):
+        per_engine[e] = [(m, m) for m in per_engine[e]]
     # ini sections no running llama backend serves (added after its last start) are offered
     # too, labelled - a dropdown that silently omits them reads as the app losing the model.
     unloaded = set(router_api.unloaded_sections([m for m, _ in per_engine.get("llama", [])]))

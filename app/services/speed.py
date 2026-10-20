@@ -640,8 +640,16 @@ def _outside_slots(engine: str, r: dict) -> bool:
     the headline state comes from the engine.
     """
     return engine == "strata" and bool(r.get("newest"))
+# Engines that publish Strata's /metrics document (live / requests / totals). Maya is a fork of
+# Strata's server and kept the format field for field - measured on Maya 1.1.16: live.state
+# "reading"/"generating", live.tok_s, live.generated, live.prompt_tokens, requests newest-first
+# with decode_tok_s / output_tokens / prompt_ms / hit_rate, totals.requests. So both are read the
+# one way, and the log scrapers stay for engines that only speak in log lines.
+_METRICS_ENGINES = frozenset({"strata", "maya"})
+
+
 def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
-    """Strata's /slots mapped onto SlotSpeed, filling only what it actually reports.
+    """Strata's (and Maya's) /slots mapped onto SlotSpeed, filling only what it actually reports.
 
     Its shape is its own and much smaller than llama's:
 
@@ -651,6 +659,11 @@ def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
     per-slot prefill readouts have no input here. They are left at 0 DELIBERATELY - an absent
     measurement rendered as 0% cached is a claim, and a wrong one. The rates come from the log
     instead, which for a one-slot server describes that slot exactly.
+
+    Maya's slot is smaller still - {"id", "n_ctx", "is_processing"}, no n_prompt_tokens at all.
+    It runs one sequence at a time, so a busy slot IS the live request, and its size comes from
+    /metrics instead: the prompt plus what has been generated so far. Only when the key is
+    ABSENT; Strata always sends it and is read exactly as before.
     """
     out: list[SlotSpeed] = []
     for i, sl in enumerate(raw):
@@ -658,16 +671,21 @@ def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
         state = "idle"
         if busy:
             state = "prefill" if r.get("newest") == "prefill" else "generating"
+        if "n_prompt_tokens" in sl:
+            used = prompt = _int_c(sl.get("n_prompt_tokens") or 0)
+        else:
+            prompt = int(r.get("cur_prompt_tokens") or 0) if busy else 0
+            used = prompt + (int(r.get("cur_gen_tokens") or 0) if state == "generating" else 0)
         out.append(SlotSpeed(
             index=int(sl.get("id") or i), state=state,
             gen_tps=r["cur_gen_tps"] if state == "generating" else 0.0,
             decoded=r["cur_gen_tokens"] if state == "generating" else 0,
-            ctx_used=_int_c(sl.get("n_prompt_tokens") or 0),
+            ctx_used=used,
             ctx_total=_int_c(sl.get("n_ctx") or 0),
             prefill_pct=r["cur_pp_pct"] if state == "prefill" else 0,
             prefill_total=r.get("cur_pp_total", 0) if state == "prefill" else 0,
             prefill_done=r["cur_pp_done"] if state == "prefill" else 0,
-            prompt_tokens=_int_c(sl.get("n_prompt_tokens") or 0) if state != "idle" else 0,
+            prompt_tokens=prompt if state != "idle" else 0,
         ))
     return out
 
@@ -805,7 +823,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     else:
         # Per ENGINE, because the log is the engine's own vocabulary. Dispatching here rather
         # than teaching one parser both means neither grows patterns it can match by accident.
-        _reader = (_rates_from_log_strata if _engine == "strata" else _rates_from_log)
+        _reader = (_rates_from_log_strata if _engine in _METRICS_ENGINES else _rates_from_log)
         r = await asyncio.to_thread(_reader, container_name)
         _rates_cache[container_name] = (time.time(), r)
 
@@ -842,7 +860,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
 
     if raw_slots:
         _prune_slot_state(container_name, {int(s.get("id") or 0) for s in raw_slots})
-        if _engine == "strata":
+        if _engine in _METRICS_ENGINES:
             slots = _slots_strata(raw_slots, r)
         else:
             slots = [_slot_speed(container_name, s, r, now) for s in raw_slots]
@@ -996,7 +1014,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         ctx_used=ctx_used, ctx_total=ctx_total, ctx_cached=ctx_cached,
         live=busy, slots=slots, solo=solo, solo_last_ts=solo_last_ts,
         expert_hit_pct=r.get("expert_hit_pct"),
-        cache_known=_engine != "strata",
+        cache_known=_engine not in _METRICS_ENGINES,
         conv_cache=r.get("conv_cache"),
     )
     _speed_cache[container_name] = (time.time(), out)
