@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set active_nav = 'maya' %}
+{% block title %}Maya · Model Loader{% endblock %}
+{% block content %}
+
+<div class="flex items-baseline justify-between gap-3">
+  <h1 class="text-xl font-semibold tracking-tight">Maya</h1>
+  {% if health %}
+  <a href="http://{{ request.url.hostname }}:{{ dashboard_port }}/" target="_blank" rel="noopener"
+     class="text-sm text-slate-500 dark:text-slate-400 hover:underline">Maya's own dashboard {{ icon('external-link', 13) }}</a>
+  {% endif %}
+</div>
+
+<p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
+  <a href="https://github.com/mw00/project-maya" target="_blank" rel="noopener" class="hover:underline">Project Maya</a>
+  runs GLM-5.3-Flash and DeepSeek-V4.1-Flash, the models Strata cannot. It serves one model per
+  container, split across both cards, with the experts VRAM cannot hold in a pinned RAM tier. It has
+  no park: it is either serving or stopped, and the engine switch starts it.
+</p>
+
+<!-- status --------------------------------------------------------------- -->
+<div class="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-slate-200 dark:border-slate-700 px-4 py-3 text-sm">
+  <div class="flex items-center gap-2">
+    {% if health %}
+      <span class="rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 px-2 py-0.5 text-[10px]">serving</span>
+    {% elif status == 'running' %}
+      <span class="rounded-full bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300 px-2 py-0.5 text-[10px]">starting</span>
+    {% elif status %}
+      <span class="rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 px-2 py-0.5 text-[10px]">stopped</span>
+    {% else %}
+      <span class="rounded-full bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300 px-2 py-0.5 text-[10px]">no maya container</span>
+    {% endif %}
+    {% if health %}<span class="font-mono">{{ health.model }}</span>{% endif %}
+  </div>
+  {% if health %}
+    <div class="text-slate-500 dark:text-slate-400">version <span class="font-mono text-slate-700 dark:text-slate-200">{{ health.version or '?' }}</span></div>
+    <div class="text-slate-500 dark:text-slate-400">context <span class="font-mono text-slate-700 dark:text-slate-200">{{ ((health.max_context or 0) / 1024)|round|int }}K</span></div>
+  {% endif %}
+  {% if metrics_engine.vram_gb %}
+    <div class="text-slate-500 dark:text-slate-400">experts <span class="font-mono text-slate-700 dark:text-slate-200">{{ metrics_engine.vram_gb }} GB</span> VRAM
+      + <span class="font-mono text-slate-700 dark:text-slate-200">{{ metrics_engine.ram_gb }} GB</span> RAM</div>
+  {% endif %}
+  {% if not health and status %}
+    <div class="text-slate-500 dark:text-slate-400">Start it from the overview's engine switch, or pick <span class="font-mono">maya</span> in a client with auto-switch on.</div>
+  {% endif %}
+</div>
+
+<!-- installed ------------------------------------------------------------ -->
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Installed</h2>
+{% if installed %}
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  <table class="w-full text-sm">
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    {% for m in installed %}
+      <tr class="{% if m.file == run_config %}bg-slate-50 dark:bg-slate-800/50{% endif %}">
+        <td class="px-3 py-2">
+          <div class="font-mono text-xs">{{ m.model }}</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ m.quant or 'unknown quant' }} · <span class="font-mono">{{ m.file }}</span></div>
+        </td>
+        <td class="px-3 py-2 text-slate-500 dark:text-slate-400">{% if m.context %}{{ ((m.context|int) / 1024)|round|int }}K context{% endif %}</td>
+        <td class="px-3 py-2 text-right text-xs text-slate-500 dark:text-slate-400">
+          {% if m.file == run_config %}runs next{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="mt-2 max-w-3xl text-xs text-slate-500 dark:text-slate-400">
+  Adding a model means running Maya's own setup in its image; the command is in the comment on the
+  <span class="font-mono">maya</span> service in docker-compose.yaml. Which config runs is the
+  <span class="font-mono">--config</span> on that service's command line.
+</p>
+{% else %}
+<p class="mt-2 text-sm text-slate-500 dark:text-slate-400">No Maya model is set up.</p>
+{% endif %}
+
+<!-- tuning ---------------------------------------------------------------- -->
+{% if run_config and tuning %}
+<h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+  Tuning <span class="font-normal normal-case">for <span class="font-mono">{{ run_config }}</span>, the config that starts next</span>
+</h2>
+{% if not writable %}
+  <div class="mt-2 rounded-md border border-amber-300/60 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10 px-3 py-2 text-sm">
+    Maya's config folder is not mounted into Model Loader, so these are shown but cannot be changed from here.
+  </div>
+{% endif %}
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  {% for name, spec in tunables.items() %}
+  {% set cur = tuning.get(name, '') %}
+  {% set known = spec.choices | map('first') | list %}
+  <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3 {% if not loop.first %}border-t border-slate-200 dark:border-slate-700{% endif %}">
+    <div class="min-w-0 max-w-2xl">
+      <div class="text-sm font-medium">{{ spec.label }}</div>
+      <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ spec.about }}</p>
+    </div>
+    <form hx-post="/maya/tuning" hx-swap="outerHTML" class="flex shrink-0 items-center gap-2">
+      <input type="hidden" name="name" value="{{ name }}">
+      <input type="hidden" name="config" value="{{ run_config }}">
+      <select name="value" {% if not writable %}disabled{% endif %}
+              class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
+        {% if cur not in known %}<option value="{{ cur }}" selected>{{ cur }} (set by hand)</option>{% endif %}
+        {% for val, label in spec.choices %}
+        <option value="{{ val }}" {% if cur == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button {% if not writable %}disabled{% endif %}
+              class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+<p class="mt-2 max-w-3xl text-xs text-slate-500 dark:text-slate-400">
+  {# Values are read from the engine where it reports them, so this cannot claim a setting is
+     live when it is only written. #}
+  Current values come from the running engine where it reports them, so they show what is in
+  force; a change here lands on Maya's next start.
+  {% if not engine_running %}<span class="text-amber-700 dark:text-amber-400">Maya is stopped, so these are read from the config.</span>{% endif %}
+  Not offered: Maya's other settings are for other hardware (NVLink, Windows APUs, Volta, EXL3),
+  for debugging, or approximations that change the answers. Its <span class="font-mono">--calibrate</span>
+  tuning measures the NVIDIA engine only and refuses to run on AMD.
+</p>
+{% endif %}
+
+{% endblock %}
