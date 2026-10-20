@@ -93,14 +93,14 @@ class LlamaBackend:
     def load_failed_current(self) -> bool:
         """Is the load failure something to act on now, or history?
 
-        Current while the backend holds nothing (at --models-max 1 a failed load leaves the
-        router empty, which is exactly when the alarm matters) or for FAILURE_FRESH_S after it
-        was first seen. Once the backend is serving another model, the failure is a record of a
-        past attempt - still shown, dimmed, with its age, never as a red alarm.
+        Current for FAILURE_FRESH_S after it happened, history after that - still shown on the
+        Containers page, dimmed, with its age, never as a red alarm.
+
+        Not "current while the backend holds nothing", which was the first version: an idle
+        router at --models-max 1 holds nothing most of the time, so a five-day-old failure on
+        idle llama-voice stayed red exactly as before.
         """
-        if not self.load_failed:
-            return False
-        return not self.loaded_model or self.load_failed_age < FAILURE_FRESH_S
+        return bool(self.load_failed) and self.load_failed_age < FAILURE_FRESH_S
 
 
 def _parse_started_at(iso: str) -> tuple[str, str]:
@@ -498,6 +498,37 @@ _FAILED_KEY = "backends.failed_since"
 _failed_seen: dict[str, float] | None = None     # loaded from the db once, then kept here
 
 
+_EXIT_LINE = "exited with status"
+
+
+def _failure_time_from_log(backend: str, failure: str) -> float | None:
+    """When the failure actually happened, from llama.cpp's own log line, or None.
+
+    A failure is first SEEN whenever this app first probes after it - a deploy, a restart - which
+    can be days late: llama-voice's gemma-4-31B failure happened 2026-10-15 18:34 and was first
+    "seen" five days later. The router logs `instance name=<model> exited with status N` with a
+    docker timestamp, so the first sighting is dated from that where it exists. Read once per
+    new failure, never on the steady-state path.
+    """
+    from datetime import datetime
+    model = failure.split(" (exit", 1)[0]
+    needle = f"instance name={model} {_EXIT_LINE}"
+    try:
+        client = _docker_client()
+        raw = client.containers.get(backend).logs(timestamps=True, tail=20000) if client else b""
+    except Exception:  # noqa: BLE001 - no log is "date it from now", not an error
+        return None
+    for line in reversed(raw.decode("utf-8", "replace").splitlines()):
+        if needle in line:
+            stamp = line.split(" ", 1)[0]
+            try:
+                # 2026-10-15T18:34:26.984590009Z - fromisoformat takes microseconds, not nanos
+                return datetime.fromisoformat(stamp[:26] + "+00:00").timestamp()
+            except ValueError:
+                return None
+    return None
+
+
 def _note_failure(backend: str, failure: str | None) -> float:
     """Seconds since this backend's current load failure was first seen; 0.0 when none.
 
@@ -526,7 +557,7 @@ def _note_failure(backend: str, failure: str | None) -> float:
         age = 0.0
         if failure:
             if want not in seen:
-                seen[want] = time.time()
+                seen[want] = _failure_time_from_log(backend, failure) or time.time()
                 changed = True
             age = max(0.0, time.time() - seen[want])
         snapshot = _json.dumps(seen) if changed else None
@@ -673,7 +704,8 @@ async def snapshot_llama_backends() -> list[LlamaBackend]:
             out[i].loaded_model = loaded
             out[i].probe_error = err
             out[i].load_failed = failed
-            out[i].load_failed_age = _note_failure(out[i].name, failed)
+            # In a thread: a NEW failure reads the backend's log once to date it.
+            out[i].load_failed_age = await asyncio.to_thread(_note_failure, out[i].name, failed)
             out[i].loading_model = loading
             out[i].loading_since = _note_loading(out[i].name, loading)
             out[i].sleeping_model = sleeping

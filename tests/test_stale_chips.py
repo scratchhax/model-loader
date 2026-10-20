@@ -24,6 +24,7 @@ def fdb(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "_DB_PATH", tmp_path / "f.db")
     db.init()
     monkeypatch.setattr(backends, "_failed_seen", None)
+    monkeypatch.setattr(backends, "_failure_time_from_log", lambda backend, failure: None)
     yield
 
 
@@ -64,10 +65,11 @@ class TestCurrentOrHistory:
     def _b(self, **kw):
         return LlamaBackend(name="llama-voice", found=True, status="running", **kw)
 
-    def test_empty_backend_is_current_however_old(self):
-        # At --models-max 1 a failed load leaves the router empty: that is the alarm.
-        b = self._b(load_failed="gemma (exit 1)", load_failed_age=9 * 86400)
-        assert b.load_failed_current
+    def test_old_failure_is_history_even_on_an_idle_backend(self):
+        # The first version kept "nothing loaded" as current - and an idle router holds nothing
+        # most of the time, so llama-voice stayed red exactly as before.
+        b = self._b(load_failed="gemma (exit 1)", load_failed_age=5 * 86400)
+        assert not b.load_failed_current
 
     def test_serving_something_else_makes_an_old_failure_history(self):
         b = self._b(load_failed="gemma (exit 1)", load_failed_age=3 * 86400,
@@ -116,3 +118,41 @@ class TestParkedEngine:
         html = self._strip(web, monkeypatch, parked=False)
         assert "parked · take over" not in html and 'hx-post="/engines/strata/activate"' not in html
         assert html.count(">active</span>") == 2                       # maya and strata
+
+
+class TestDatedFromTheLog:
+    LOG = b"".join(line + b"\n" for line in (
+        b"2026-10-15T18:34:26.932768624Z [48649] E srv load_model: failed to load model",
+        b"2026-10-15T18:34:26.984590009Z I srv run: instance name=gemma-4-31B-it-Q6_K exited with status 1",
+        b"2026-10-20T17:00:00.000000000Z I srv other line"))
+
+    def _client(self, logs):
+        class C:
+            def logs(self, timestamps, tail):
+                assert timestamps
+                return logs
+
+        class Cli:
+            class containers:
+                @staticmethod
+                def get(name):
+                    return C()
+        return Cli()
+
+    def test_the_real_time_not_the_first_probe(self, monkeypatch):
+        from datetime import datetime, timezone
+        monkeypatch.setattr(backends, "_docker_client", lambda: self._client(self.LOG))
+        t = backends._failure_time_from_log("llama-voice", "gemma-4-31B-it-Q6_K (exit 1)")
+        assert datetime.fromtimestamp(t, timezone.utc).isoformat()[:19] == "2026-10-15T18:34:26"
+
+    def test_no_line_means_now(self, monkeypatch):
+        monkeypatch.setattr(backends, "_docker_client", lambda: self._client(b"nothing here\n"))
+        assert backends._failure_time_from_log("b", "other (exit 1)") is None
+
+    def test_a_new_failure_is_dated_from_its_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db, "_DB_PATH", tmp_path / "g.db")
+        db.init()
+        monkeypatch.setattr(backends, "_failed_seen", None)
+        monkeypatch.setattr(backends, "_docker_client", lambda: self._client(self.LOG))
+        age = backends._note_failure("llama-voice", "gemma-4-31B-it-Q6_K (exit 1)")
+        assert age > 4 * 86400            # days old the moment it is first seen

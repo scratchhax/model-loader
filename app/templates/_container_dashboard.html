@@ -171,10 +171,9 @@
    backend not meant to serve it is never. Shown so it is not lost, not as an alarm. #}
 {% set age = b.load_failed_age %}
 <div class="mt-3 text-[11px] text-slate-500 dark:text-slate-400">
-  An earlier load of <span class="font-mono">{{ b.load_failed }}</span> failed here
-  ({% if age >= 86400 %}{{ (age / 86400)|round|int }} d{% elif age >= 3600 %}{{ (age / 3600)|round|int }} h{% else %}{{ (age / 60)|round|int }} min{% endif %} ago
-  or more); it has served <span class="font-mono">{{ b.loaded_model }}</span> since. llama.cpp keeps
-  the flag until that model is tried here again.
+  An earlier load of <span class="font-mono">{{ b.load_failed }}</span> failed here,
+  {% if age >= 86400 %}{{ (age / 86400)|round|int }} d{% elif age >= 3600 %}{{ (age / 3600)|round|int }} h{% else %}{{ (age / 60)|round|int }} min{% endif %} ago.
+  llama.cpp keeps the flag until that model is tried here again; Diagnose reads the reason from its log.
 </div>
 {% endif %}
 
