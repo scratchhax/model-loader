@@ -12,7 +12,8 @@
 <p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
   One endpoint for everything that needs inference here. Point a client at
   <span class="font-mono">http://wheatley:{{ port }}/v1</span> and ask for
-  <span class="font-mono">strata</span> or <span class="font-mono">llama</span> — those names stay
+  <span class="font-mono">strata</span>, <span class="font-mono">llama</span> or
+  <span class="font-mono">maya</span> — those names stay
   valid when the engine changes, which the real model ids do not. Real ids still work when you
   mean one specific model.
 </p>
@@ -39,6 +40,12 @@
           Strata serves whatever it started with and cannot load on demand, so the choice is one
           of the <strong>installed packs</strong> and it applies on the next start — a statement
           of intent, not a switch.
+        {% elif e == 'maya' %}
+          {# One model per container, fixed by the config Maya's own setup wrote - so a default
+             here would be a control that does nothing. Say what does decide it instead. #}
+          Maya serves the one model its config names, so there is nothing to choose here:
+          <span class="font-mono">maya</span> always means that model. Changing it means
+          re-running Maya's setup (see the maya service in docker-compose.yaml).
         {% else %}
           llama.cpp loads on demand, so this takes effect on the next request asking for
           <span class="font-mono">llama</span>.
@@ -64,6 +71,7 @@
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Pin</button>
     </form>
     {% endif %}
+    {% if e != 'maya' %}
     <form hx-post="/router/default" hx-swap="outerHTML" class="flex items-center gap-2">
       <input type="hidden" name="engine" value="{{ e }}">
       <select name="model" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
@@ -78,6 +86,7 @@
       </select>
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
     </form>
+    {% endif %}
     {# The one control on this page that moves hardware by itself, so it is labelled as what it
        does rather than as a feature name, and it sits last - after you have said which server
        and which model, because switching to an engine with neither set just fails later. #}

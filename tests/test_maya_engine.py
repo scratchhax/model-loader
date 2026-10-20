@@ -332,4 +332,8 @@ class TestRouterPageWithMaya:
         monkeypatch.setattr(ra, "_live_map", _lm([m], {"glm-5.3-flash": m}))
         r = web.get("/router")
         assert r.status_code == 200
-        assert 'value="maya"' in r.text and "glm-5.3-flash" in r.text
+        assert 'value="maya"' in r.text
+        # No default picker for a one-model engine: it would be a control that does nothing.
+        assert "always means that model" in r.text
+        defaults = r.text.split('hx-post="/router/default"')[1:]
+        assert defaults and not any('value="maya"' in f.split("</form>")[0] for f in defaults)
