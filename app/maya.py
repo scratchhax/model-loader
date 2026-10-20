@@ -203,10 +203,12 @@ TUNABLES = {
         "about": ("The CPU computes the experts that are in neither card's VRAM, one thread pool "
                   "per card, half the cores each by default. Card 1 sits on a slower PCIe link "
                   "here (an expert crosses it in 1.07 ms against card 0's 0.19 ms), so it leans "
-                  "on the CPU harder - Maya's docs name exactly this case for setting the pools "
-                  "per card."),
+                  "on the CPU harder. Measured 2026-10-20 on v1.1.18, 128K context, greedy, "
+                  "median of 4 warm 256-token answers: 7 + 7 34.5-34.8 tok/s (run first and "
+                  "last), 5 + 9 36.7 (+6%), 4 + 10 37.5 (+8%); after a 16K prompt 30.4-31.3, "
+                  "32.5 and 31.0. 5 + 9 is the one that gains on both."),
         "kind": "env", "key": ("MAYA_GLM_CPU_LANE0", "MAYA_GLM_CPU_LANE1"),
-        "choices": [("", "7 + 7 (default)"), ("5,9", "5 + 9"), ("4,10", "4 + 10")],
+        "choices": [("", "7 + 7 (default)"), ("5,9", "5 + 9 (measured best)"), ("4,10", "4 + 10")],
         "metric": None,
     },
 }
