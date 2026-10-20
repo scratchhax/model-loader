@@ -131,6 +131,15 @@
       </div>
     </div>
 
+    {# Engine updates. Loaded once, not polled: it changes every few hours at most, and the
+       check behind it runs in the background so the page never waits on GitHub. #}
+    <div>
+      <div class="mb-2 flex items-baseline justify-between">
+        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Engine updates</h2>
+      </div>
+      <div hx-get="/updates" hx-trigger="load" hx-swap="outerHTML"></div>
+    </div>
+
   </section>
 </div>
 
