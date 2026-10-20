@@ -65,6 +65,18 @@ class TestWriting:
         assert maya_engine.set_tunable("parallel", "4", CFG)[0]
         assert _cfg(conf)["args"][-2:] == ["--parallel", "4"]
 
+    def test_arg_default_removes_the_flag(self, conf):
+        maya_engine.set_tunable("parallel", "4", CFG)
+        assert maya_engine.set_tunable("parallel", "", CFG)[0]
+        assert "--parallel" not in _cfg(conf)["args"]
+        assert _cfg(conf)["args"][-2:] == ["--expert-cache", "auto"]
+
+    def test_absent_flag_reads_as_the_default_choice(self, web, conf, monkeypatch):
+        # A config with no --parallel is Maya's default, not a hand edit.
+        monkeypatch.setattr(maya_engine, "run_config_name", lambda client, container="maya": CFG)
+        r = web.get("/maya")
+        assert "(set by hand)" not in r.text and '<option value="" selected>1 (default)' in r.text
+
     def test_env_pair_written_and_cleared(self, conf):
         assert maya_engine.set_tunable("cpu-lane", "4,10", CFG)[0]
         env = _cfg(conf)["env"]

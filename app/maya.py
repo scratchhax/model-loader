@@ -186,7 +186,7 @@ TUNABLES = {
                   "speed; more serves an agent that fans out, each extra conversation holding its "
                   "own state."),
         "kind": "arg", "key": "--parallel",
-        "choices": [("1", "1 (one at a time)"), ("2", "2"), ("4", "4")],
+        "choices": [("", "1 (default)"), ("2", "2"), ("4", "4")],
         "metric": None,
     },
     "slots": {
@@ -280,7 +280,11 @@ def set_tunable(name: str, value: str, config: str, conf_dir: Path | None = None
     if spec["kind"] == "arg":
         args = list(cfg.get("args") or [])
         key = spec["key"]
-        if key in args[:-1]:
+        if not value:                        # back to Maya's default: the flag goes
+            if key in args:
+                i = args.index(key)
+                del args[i:i + 2]
+        elif key in args[:-1]:
             args[args.index(key) + 1] = value
         elif key in args:                    # a flag with its value missing: complete it
             args.append(value)
