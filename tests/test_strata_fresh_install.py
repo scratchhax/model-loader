@@ -72,5 +72,35 @@ def test_the_strata_tab_offers_it(web, box, monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "models_dir", models)
     r = web.get("/strata/models")
-    assert r.status_code == 200 and "Downloaded, not set up yet" in r.text
+    assert r.status_code == 200 and "Not set up yet" in r.text
     assert 'name="gguf_dir" value="/gguf-root/strata-abliterated-IQ3_S"' in r.text
+
+
+# ------------------------------------------------------------------ stranded: run config deleted by setup
+
+def _tier(family, model, first, shards):
+    return sm.Tier(family=family, model=model, family_title="", family_by="",
+                   tag="" if family == "qwen" else f"{family}-", download_gb=0, ram_gb=0,
+                   arena_gb=0, experimental=False, vision=True, shards=shards,
+                   first_shard=first, hash_pinned=False)
+
+
+def test_a_pack_whose_run_config_setup_deleted_is_offered_with_its_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "d.db")
+    db.init()
+    data = tmp_path / "data2"
+    f = data / "Strata-data" / "models" / "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"
+    f.mkdir(parents=True)
+    for i in (1, 2):
+        (f / f"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-0000{i}-of-00002.gguf").write_bytes(b"x")
+    models = tmp_path / "models"
+    models.mkdir()
+    tiers = [_tier("qwen", "IQ3_S", "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf", 2),
+             _tier("qwen", "IQ3_XXS", "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf", 2)]
+    got = sm.stranded_installs(tiers, set(), data, models)
+    assert list(got) == ["iq3_s"]
+    assert got["iq3_s"]["gguf_dir"] == "/data/Strata-data/models/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"
+    assert got["iq3_s"]["stranded"] and got["iq3_s"]["complete"]
+    assert sm.stranded_installs(tiers, {"iq3_s"}, data, models) == {}       # set up: not stranded
+    (f / "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf").unlink()
+    assert sm.stranded_installs(tiers, set(), data, models) == {}           # a shard missing: not offered

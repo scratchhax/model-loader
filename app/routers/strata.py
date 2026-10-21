@@ -31,6 +31,13 @@ STRATA_ENV_FILE = os.environ.get("STRATA_ENV_PATH", "/strata/strata.env")
 STRATA_DATA = os.environ.get("STRATA_DATA_DIR") or None
 
 
+def _not_set_up(tiers, inst: dict) -> dict:
+    """Installs Strata has not set up (yet, or again): fresh downloads, then stranded packs."""
+    out = strata_models.downloaded_installs(set(inst))
+    out.update(strata_models.stranded_installs(tiers, set(inst) | set(out)))
+    return out
+
+
 def _strata_state() -> dict:
     """Catalog, what is installed, and which pairs still have a free pack name."""
     tiers = strata_models.catalog(STRATA_CONTAINER)
@@ -42,7 +49,7 @@ def _strata_state() -> dict:
     return {
         "tiers": tiers,
         "installed": inst,
-        "downloaded": strata_models.downloaded_installs(set(inst)),
+        "downloaded": _not_set_up(tiers, inst),
         "free": {t.install_tag for t in strata_models.free_slots(set(inst), tiers)},
         "selection": sel,
         "engine_up": bool(tiers),

@@ -698,6 +698,47 @@ def record_provenance(install_tag: str, repo_id: str, family: str, model: str,
     db.set_setting(_PROV_KEY, json.dumps(cur))
 
 
+def stranded_installs(tiers, known: set[str], data_root=None, models_root=None) -> dict[str, dict]:
+    """{install_tag: {...}} for tiers whose files are on disk but whose run config is gone.
+
+    0.2's setup deletes the saved run settings of every install made for a different card
+    selection ("The saved run settings use graphics card '1', GPU/GPUS asks for '0,1': making
+    them again (model files are kept)") and makes them again at that model's next start. Measured
+    2026-10-20: starting SC117's model on both cards removed iq3_s's. Its files and pack stayed,
+    but with no run config it was listed nowhere, and the entry point, which finds a folder from
+    the run config, would have left GGUF_DIR empty, so setup would have downloaded the 83 GB
+    model again. Found here by the catalog's own shard names, in the engine's model folder or in
+    ./models, and offered with that folder.
+    """
+    from pathlib import Path
+    from . import strata as strata_engine
+    from .config import settings
+    data_root = Path(data_root) if data_root else strata_engine.live_data_dir()
+    places = [(data_root / "Strata-data" / "models", "/data/Strata-data/models/"),
+              (Path(models_root) if models_root else settings.models_dir, _PATH_VIEWS[0][0])]
+    folders: list[tuple[Path, str]] = []
+    for root, engine_prefix in places:
+        try:
+            folders += [(p, engine_prefix + p.name) for p in sorted(root.iterdir()) if p.is_dir()]
+        except OSError:
+            continue
+    prov = provenance()
+    out: dict[str, dict] = {}
+    for t in tiers:
+        tag = t.install_tag
+        if tag in known or not t.first_shard:
+            continue
+        n = max(1, int(t.shards or 1))
+        names = ([t.first_shard.replace("-00001-of-", f"-{i:05d}-of-") for i in range(1, n + 1)]
+                 if n > 1 and "-00001-of-" in t.first_shard else [t.first_shard])
+        hit = next(((f, engine) for f, engine in folders if all((f / x).is_file() for x in names)), None)
+        if hit:
+            out[tag] = {"about": describe_install(tag, prov), "family": t.family, "model": t.model,
+                        "gguf_dir": hit[1], "files": len(names), "present": len(names),
+                        "complete": True, "stranded": True}
+    return out
+
+
 def downloaded_installs(installed_tags: set[str], models_dir=None) -> dict[str, dict]:
     """{install_tag: {...}} for models downloaded from HF search that Strata has not set up yet.
 

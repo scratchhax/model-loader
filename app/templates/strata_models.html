@@ -110,7 +110,7 @@
    names it. Offered with the folder its files are in, which "Use next start" passes as GGUF_DIR;
    without it, setup would download the family's own model instead. #}
 {% if downloaded %}
-<h3 class="mt-5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Downloaded, not set up yet</h3>
+<h3 class="mt-5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Not set up yet</h3>
 <div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
@@ -120,10 +120,15 @@
           <div class="flex items-center gap-2.5">
             {{ avatar(d.about.owner or '?', avatars.get(d.about.owner, ''), size=24) }}
             <div class="min-w-0">
+              {% if d.about.repo %}
               <a href="https://huggingface.co/{{ d.about.repo }}" target="_blank" rel="noopener"
                  class="font-mono text-xs hover:underline">{{ d.about.repo }}</a>
+              {% else %}<span class="font-mono text-xs">{{ tag }}</span>{% endif %}
               <div class="text-[11px] text-slate-500 dark:text-slate-400">
-                {{ d.model }} · slot <span class="font-mono">{{ tag }}</span> · set up at its first start (Strata builds its pack from these files)
+                {{ d.model }} · slot <span class="font-mono">{{ tag }}</span> ·
+                {% if d.stranded %}
+                <span title="Strata's setup deletes the saved run settings of installs made for another card selection, and makes them again at that model's next start. The files and pack are still here.">files on disk, run settings dropped by Strata; set up again at its next start</span>
+                {% else %}downloaded; set up at its first start (Strata builds its pack from these files){% endif %}
               </div>
             </div>
           </div>
