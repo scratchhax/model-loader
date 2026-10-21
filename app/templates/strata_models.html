@@ -91,7 +91,8 @@
 <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
   Selection is written to the file Strata reads on start, the same way the GPU pin is — it applies on
   the next restart, not immediately.
-  {% if selection.FAMILY %}Next start: <span class="font-mono">{{ selection.FAMILY }} / {{ selection.MODEL }}</span>.{% endif %}
+  {% if selection.FAMILY %}Next start: {% if next_label %}<span class="font-mono">{{ next_label }}</span>
+    (in the <span class="font-mono">{{ selection.FAMILY }} / {{ selection.MODEL }}</span> slot){% else %}<span class="font-mono">{{ selection.FAMILY }} / {{ selection.MODEL }}</span>{% endif %}.{% endif %}
 </p>
 {% else %}
 <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing prepared yet.</p>

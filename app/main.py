@@ -440,7 +440,8 @@ def _strata_choices() -> list[tuple[str, str]]:
         except (OSError, ValueError):
             pass
         owner = (prov.get(tag, {}).get("repo") or "").split("/")[0]
-        label = f"{name}  ({owner})" if owner else name
+        real = strata_models.install_label(strata_models.describe_install(tag, prov))
+        label = f"{real}  ({owner}, served as {name})" if real else (f"{name}  ({owner})" if owner else name)
         if d.get("missing"):
             label += "  — source files missing"
         out.append((tag, label))

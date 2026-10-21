@@ -68,7 +68,14 @@
         </div>
 
         {% if hero_model %}
-        <h2 class="mt-1.5 truncate font-mono text-xl font-semibold tracking-tight text-white sm:text-2xl">{{ hero_model }}</h2>
+        <h2 class="mt-1.5 truncate font-mono text-xl font-semibold tracking-tight text-white sm:text-2xl"
+            {% if hero_alias %}title="{{ hero_alias.repo }}"{% endif %}>{{ hero_alias.label if hero_alias else hero_model }}</h2>
+        {% if hero_alias %}
+        {# Strata only knows the catalog slot the model was installed into; say both, so the name on
+           this card and the one a client lists are recognisably the same model. #}
+        <div class="mt-0.5 text-[11px] text-slate-500">{{ hero_alias.owner }} · Strata serves it as
+          <span class="font-mono">{{ hero_model }}</span> (installed into its {{ hero_alias.tag }} slot)</div>
+        {% endif %}
         <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
           {% if hero_shape and hero_shape.is_moe %}
           <span class="rounded bg-violet-500/15 px-1.5 py-0.5 font-medium text-violet-300"

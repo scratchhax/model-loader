@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .. import db, gpu_procs, hf, hw, ini, services, telemetry, vram_live
 from .. import strata as strata_engine
+from .. import strata_models
 from ..config import settings
 from ..downloader import manager
 from ..fit import _gpu_tenants, _solo_backend
@@ -314,8 +315,11 @@ async def _hero_context() -> dict:
     pp_peak = max(pp) if pp else 0.0
     cx = services.ctx_history(b.name)
     cx_peak = max(cx) if cx else 0.0
+    hero_engine = services.engine_for(b.name)
+    # A Strata model in a borrowed catalog slot is served under that slot's name; say what it is.
+    hero_alias = strata_models.served_labels().get(model_id) if hero_engine == "strata" else None
     return {"speed": sp, "hero_model": model_id, "hero_backend": b.name,
-            "hero_engine": services.engine_for(b.name),
+            "hero_engine": hero_engine, "hero_alias": hero_alias,
             "hero_shape": shape, "hero_quant": quant, "hero_size_h": size_h,
             "hero_ctx_cfg": ctx_cfg, "hero_vram_used": vram_used, "hero_vram_total": vram_total,
             # Blank mid-load. tps_history is per BACKEND, so the line drawn during a swap is
