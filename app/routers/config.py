@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
-from .. import autoconfig, gguf_meta, ini, services, telemetry
+from .. import autoconfig, engine_controls, gguf_meta, ini, services, telemetry
 from ..config import settings
 from ..utils import shard_key
 from ..fit import _backend_list, _resolve_section_gguf
@@ -42,7 +42,7 @@ def _config_context(request: Request, flash: dict | None = None) -> dict:
 
 
 @router.get("/config", response_class=HTMLResponse)
-def config_page(request: Request, saved: str = "", deleted: str = "", err: str = "", edit: str = "") -> HTMLResponse:
+async def config_page(request: Request, saved: str = "", deleted: str = "", err: str = "", edit: str = "") -> HTMLResponse:
     flash = None
     if saved:
         flash = {"ok": True, "msg": f"Saved section [{saved}]."}
@@ -50,10 +50,11 @@ def config_page(request: Request, saved: str = "", deleted: str = "", err: str =
         flash = {"ok": True, "msg": f"Deleted section [{deleted}]."}
     elif err:
         flash = {"ok": False, "msg": err}
-    ctx = _config_context(request, flash)
+    ctx = await asyncio.to_thread(_config_context, request, flash)
     # ?edit=<section> makes the page open straight into that section's form, which is how
     # direct links from elsewhere (e.g. a model's "edit models.ini") arrive here.
     ctx["edit_section"] = edit if (edit and edit in ini.section_names()) else ""
+    ctx.update(await engine_controls.rows_context_async())    # llama's routing row
     return templates.TemplateResponse("config.html", ctx)
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from app import main as app_main
+from app import engine_controls
 from app import strata_models
 from tests.test_routes_smoke import web  # noqa: F401 - the fixture: real app, empty box
 
@@ -23,8 +23,8 @@ def _where(seen):
 
 def test_router_page_blocking_work_is_off_the_loop(web, monkeypatch):
     seen: list[str] = []
-    real = app_main._strata_choices
-    monkeypatch.setattr(app_main, "_strata_choices", lambda: (_where(seen), real())[1])
+    real = engine_controls.strata_choices
+    monkeypatch.setattr(engine_controls, "strata_choices", lambda: (_where(seen), real())[1])
     assert web.get("/router").status_code == 200
     assert seen == ["thread"]
 

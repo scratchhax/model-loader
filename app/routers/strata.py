@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
-from .. import hf, services, strata_models
+from .. import engine_controls, hf, services, strata_models
 from ..config import settings
 from ..downloader import manager
 from ..utils import human_bytes
@@ -94,6 +94,7 @@ async def strata_models_page(request: Request) -> HTMLResponse:
     st["tuning"] = (await asyncio.to_thread(strata_models.tuning_state, st["tuning_tag"], metrics, STRATA_DATA)
                     if st["tuning_tag"] else {})
     st["engine_running"] = metrics is not None
+    st.update(await engine_controls.rows_context_async())
     return templates.TemplateResponse("strata_models.html",
                                       {"request": request, "query": "", "avatars": avatars, **st})
 

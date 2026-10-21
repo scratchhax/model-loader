@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from .. import engine_controls
 from .. import maya as maya_engine
 from .. import services
 from ..web import templates, _form_note
@@ -49,8 +52,10 @@ def _maya_state() -> dict:
 
 
 @router.get("/maya", response_class=HTMLResponse)
-def maya_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("maya.html", {"request": request, **_maya_state()})
+async def maya_page(request: Request) -> HTMLResponse:
+    state = await asyncio.to_thread(_maya_state)
+    return templates.TemplateResponse("maya.html", {"request": request, **state,
+                                                    **await engine_controls.rows_context_async()})
 
 
 @router.post("/maya/tuning", response_class=HTMLResponse)

@@ -9,6 +9,10 @@
   <h1 class="text-xl font-semibold tracking-tight">Strata</h1>
   <a href="/search" class="text-sm text-slate-500 dark:text-slate-400 hover:underline">llama.cpp search {{ icon('chevron-right', 13) }}</a>
 </div>
+{# This engine's routing controls: the same row the Router tab shows for it. #}
+<div class="mt-4 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  {% with e = 'strata', first = true %}{% include "_engine_row.html" %}{% endwith %}
+</div>
 
 {% if not engine_up %}
   <div class="mt-4 rounded-md border border-amber-300/60 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10 px-3 py-2 text-sm">

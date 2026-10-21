@@ -1,0 +1,85 @@
+{# One engine's routing controls: which server, which model runs next, and auto-switch.
+
+   The Router tab shows one per engine; each engine's settings page (Strata, Maya, models.ini for
+   llama) opens with its own, so an engine's controls are with the engine and look the same
+   everywhere. Every form answers into itself (.form-note, or the auto-switch partial), so the row
+   works wherever it is included.
+
+   Expects: e, first, and engine_controls.rows_context()'s keys. #}
+  {% set live = e in live_engines %}
+  <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3 {% if not first %}border-t border-slate-200 dark:border-slate-700{% endif %}">
+    <div class="min-w-0">
+      <div class="flex items-center gap-2">
+        <span class="font-mono text-sm">{{ e }}</span>
+        {% if live %}
+          <span class="rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 px-2 py-0.5 text-[10px]">running</span>
+        {% else %}
+          <span class="rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 px-2 py-0.5 text-[10px]">not holding the cards</span>
+        {% endif %}
+      </div>
+      <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        {% if e == 'strata' %}
+          {# The two engines load models in fundamentally different ways, and pretending
+             otherwise would make this control lie about one of them. #}
+          Strata serves whatever it started with and cannot load on demand, so the choice is one
+          of the <strong>installed packs</strong> and it applies on the next start — a statement
+          of intent, not a switch.
+        {% elif e == 'maya' %}
+          {# One model per container, fixed by the config Maya's own setup wrote - so a default
+             here would be a control that does nothing. Say what does decide it instead. #}
+          Maya serves the model its config names; the choice is one of the
+          <strong>installed models</strong>. Installing another means running Maya's setup again
+          (see the maya service in docker-compose.yaml).
+        {% else %}
+          llama.cpp loads on demand, so this takes effect on the next request asking for
+          <span class="font-mono">llama</span>.
+        {% endif %}
+      </p>
+    </div>
+    <div class="flex shrink-0 flex-wrap items-center gap-2">
+    {# Pinning is separate from the default because they answer different questions: WHICH
+       SERVER handles this engine, and WHICH MODEL it should load. Automatic ranking is a guess
+       from container names; this is where you say what you meant. #}
+    {% if backends_by_engine.get(e) | length > 1 or pins.get(e) %}
+    {# Stopped backends are listed too - see the note in _backends(). Pinning to one is allowed
+       and takes effect when it next runs; a request meanwhile is refused by name rather than
+       sent somewhere else. #}
+    <form hx-post="/router/backend" hx-target="find .form-note" hx-swap="innerHTML" class="flex items-center gap-1">
+      <input type="hidden" name="engine" value="{{ e }}">
+      <select name="backend" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
+        <option value="">auto</option>
+        {% for n, running in backends_by_engine.get(e, []) %}
+        <option value="{{ n }}" {% if pins.get(e) == n %}selected{% endif %}>{{ n }}{% if not running %} (stopped){% endif %}</option>
+        {% endfor %}
+      </select>
+      <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Pin</button>
+      <span class="form-note"></span>
+    </form>
+    {% endif %}
+    {# Maya starts the config its compose command names, so a choice here would be recorded and
+       never read. It is shown, so the row matches the other engines, and not offered. #}
+    {% set fixed = e == 'maya' %}
+    <form hx-post="/router/default" hx-target="find .form-note" hx-swap="innerHTML" class="flex items-center gap-2"
+          {% if fixed %}title="Maya starts the model its compose command names (--config {{ maya_run_config or '?' }}); it is not chosen here."{% endif %}>
+      <input type="hidden" name="engine" value="{{ e }}">
+      <select name="model" {% if fixed %}disabled{% endif %} class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
+        <option value="">(none)</option>
+        {# (value, label): for llama both are the model id; for Strata the value is the INSTALL
+           TAG, because the choosable unit there is an installed pack rather than the one model
+           it happens to be serving. Maya's are its installed models, the same idea. #}
+        {% for val, label in per_engine.get(e, []) %}
+        <option value="{{ val }}" {% if defaults.get(e) == val %}selected{% endif %}
+                {% if val in unloaded %}title="In models.ini but no running llama backend serves it — that backend was started before this section existed. Restart it (Containers page) to load."{% endif %}>{{ label }}{% if val in unloaded %} (not loaded){% endif %}</option>
+        {% endfor %}
+      </select>
+      {% if not fixed %}
+      <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+      {% endif %}
+      <span class="form-note"></span>
+    </form>
+    {# The one control on this page that moves hardware by itself, so it is labelled as what it
+       does rather than as a feature name, and it sits last - after you have said which server
+       and which model, because switching to an engine with neither set just fails later. #}
+    {% with on = autoswitch.get(e), dwell = autoswitch_dwell %}{% include "_autoswitch_toggle.html" %}{% endwith %}
+    </div>
+  </div>
