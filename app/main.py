@@ -59,6 +59,41 @@ async def _readonly_guard(request: Request, call_next):
     return await call_next(request)
 
 
+_UNSAFE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
+def cross_site(headers) -> str:
+    """Why a mutating request is refused as coming from another site, or "".
+
+    This app holds the docker socket, so a form post is as good as root on the host, and with no
+    check any page open in a browser on the LAN could make one (a cross-site form POST needs no
+    script and no CORS). Browsers name the page a request came from in Origin, and in Referer
+    when they leave Origin out; either one naming a different host is refused, and so is
+    Origin: null (a sandboxed frame or a file:// page). A request with neither is a script or
+    the router process asking for a switch, and is let through: this is not authentication.
+    """
+    from urllib.parse import urlsplit
+    src = headers.get("origin") or headers.get("referer") or ""
+    if not src:
+        return ""
+    if src == "null":
+        return "a page with no origin"
+    host = urlsplit(src).netloc.lower()
+    mine = {h.lower() for h in (headers.get("host"), headers.get("x-forwarded-host")) if h}
+    return "" if host in mine else f"a page on {host or src}"
+
+
+@app.middleware("http")
+async def _same_site_only(request: Request, call_next):
+    if request.method in _UNSAFE_METHODS:
+        why = cross_site(request.headers)
+        if why:
+            return JSONResponse(status_code=403,
+                                content={"detail": f"refused: this request came from {why}, "
+                                                   f"not from Model Loader"})
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def _startup() -> None:
     db.init()
