@@ -210,9 +210,10 @@ class TestSoloContextInUse:
         assert out.ctx_used == 83278
         assert out.prompt_tokens == 83278  # the working slot's prompt, not the parked
 
-    def test_idle_headline_still_shows_resident_slot_sum(self, monkeypatch):
-        # Nothing working: the remembered figures are the honest "how full the
-        # window has been" answer, parked conversations and all.
+    def test_idle_headline_is_the_fullest_slot(self, monkeypatch):
+        # Nothing working: the fullest parked conversation against its window. Every Strata
+        # slot can fill the whole window (0.2 held 204,510 and 189,900 at once), so the SUM it
+        # used to show read "617.8k of 262k window" - more than full, and meaning nothing.
         raw = [{"id": 0, "n_ctx": 262144, "is_processing": False,
                 "n_prompt_tokens": 139632},
                {"id": 1, "n_ctx": 262144, "is_processing": False,
@@ -223,7 +224,15 @@ class TestSoloContextInUse:
                 "n_prompt_tokens": 0}]
         sp, out = self._speed(monkeypatch, {"open_task": None, "newest": ""}, raw)
         assert out.state == "idle"
-        assert out.ctx_used == 139632 + 30415
+        assert out.ctx_used == 139632 and out.ctx_total == 262144
+
+    def test_two_long_conversations_never_overfill_the_bar(self, monkeypatch):
+        raw = [{"id": 0, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 204510},
+               {"id": 1, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 189900},
+               {"id": 2, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 223405},
+               {"id": 3, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 0}]
+        sp, out = self._speed(monkeypatch, {"open_task": None, "newest": ""}, raw)
+        assert out.ctx_used == 223405 <= out.ctx_total
 
     def test_idle_solo_row_is_history_not_pool_context(self, monkeypatch):
         import time as _time

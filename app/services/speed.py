@@ -984,12 +984,17 @@ async def inference_speed(container_name: str, internal_port: int | None,
     ctx_cached = sum(sl.ctx_cached for sl in live_slots or slots)
     per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
     if _engine == "strata":
-        # Strata's slots share ONE pool: /slots reports each slot's n_ctx as the whole engine
-        # context (measured live: context 262144, batch_slots 4, every slot n_ctx 262144),
-        # not the per-slot share llama-server derives from --ctx-size / parallel. Multiplying
-        # by the slot count inflated the context bar's denominator fourfold - "of 1048k
-        # window" against a 262k window.
+        # Every Strata slot reports the whole engine context as its n_ctx (context 262144,
+        # batch_slots 4, every slot n_ctx 262144), not the per-slot share llama-server derives
+        # from --ctx-size / parallel, so the slot count must not multiply it ("of 1048k window").
+        # And each slot really can fill that window: on 0.2, 2026-10-21, slots 0 and 1 held
+        # 204,510 and 189,900 tokens at once. So a SUM of slots is not comparable with it either:
+        # it read "617.8k of 262k window". The fullest conversation against its window is, and
+        # it is what the tile's tooltip promises.
         ctx_total = per_slot_ctx
+        fullest = max(live_slots or slots, key=lambda sl: sl.ctx_used, default=None)
+        if fullest is not None:
+            ctx_used, ctx_cached = fullest.ctx_used, fullest.ctx_cached
     else:
         ctx_total = per_slot_ctx * len(slots)
     if solo is not None and solo.state in ("prefill", "generating"):
