@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app import hf
+from app import db, hf
 from app.config import settings
 from app.downloader import ChunkState, DownloadJob, DownloadManager
 
@@ -78,6 +78,8 @@ class TestDownloadJob:
 @pytest.fixture
 def mgr(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "models_dir", tmp_path)
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "d.db")   # the restart list is written there
+    db.init()
 
     async def noop(self, j):
         pass

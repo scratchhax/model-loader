@@ -290,7 +290,32 @@ def starting_backends(bs: list[dict], now: float | None = None) -> list[dict]:
     return out
 
 
+# How long one discovery is reused. Every request used to list the containers (a synchronous
+# docker call, on the event loop, that inspects each one) and then probe /v1/models and /health
+# on each backend in turn before it was forwarded. Two seconds is shorter than any swap step, so
+# a backend coming up is seen at most that late; a switch clears it (request_switch).
+_LIVE_TTL_S = 2.0
+_live_cache: tuple[float, tuple[list[dict], dict[str, dict]]] | None = None
+
+
+def invalidate_live_map() -> None:
+    global _live_cache
+    _live_cache = None
+
+
 async def _live_map() -> tuple[list[dict], dict[str, dict]]:
+    """_discover(), reused for _LIVE_TTL_S."""
+    global _live_cache
+    now = time.time()
+    if _live_cache and now - _live_cache[0] < _LIVE_TTL_S:
+        return _live_cache[1]
+    got = await _discover()
+    if _LIVE_TTL_S > 0:
+        _live_cache = (time.time(), got)
+    return got
+
+
+async def _discover() -> tuple[list[dict], dict[str, dict]]:
     """(backends with their models and readiness, {model_id: the PREFERRED READY backend}).
 
     `ready` is carried rather than filtered out, because the two callers want different things:
@@ -298,13 +323,17 @@ async def _live_map() -> tuple[list[dict], dict[str, dict]]:
     disappear from a client's dropdown and come back during a swap, while resolve() refuses to
     route to it. Dropping it here would have done both at once.
     """
-    bs = sorted(_backends(), key=_rank)
+    bs = sorted(await asyncio.to_thread(_backends), key=_rank)
     by_model: dict[str, dict] = {}
     gpu_only = ini.gpu_sections() if any(b.get("cpu_only") for b in bs) else set()
     async with httpx.AsyncClient() as client:
-        for b in bs:
+        # Every backend probed at once; the ranking below still decides who wins a model id.
+        # Within one backend the order stands: llama's readiness IS its model list.
+        async def probe(b: dict) -> None:
             b["models"] = await _models_of(client, b)
             b["ready"] = await _ready(client, b)
+        await asyncio.gather(*(probe(b) for b in bs))
+        for b in bs:
             if not b["ready"]:
                 continue
             _seen_ready[b["name"]] = b.get("started_at", "")
@@ -1134,6 +1163,7 @@ async def request_switch(engine: str) -> tuple[bool, str]:
     measured, so a dropdown you change twice costs roughly 45 s one way and 110 s the other.
     """
     db.set_setting("router.autoswitch.last_at", str(time.time()))
+    invalidate_live_map()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as c:
             r = await c.post(f"{_UI_BASE}/engines/{engine}/activate", data={"soft": "1"})
