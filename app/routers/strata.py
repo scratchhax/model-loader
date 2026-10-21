@@ -82,14 +82,16 @@ def strata_tuning(install_tag: str = Form(...), flag: str = Form(...),
 
 @router.get("/strata/models", response_class=HTMLResponse)
 async def strata_models_page(request: Request) -> HTMLResponse:
-    st = _strata_state()
+    # _strata_state reads the catalog with a docker exec and strata_metrics is a blocking HTTP
+    # call; both go to a thread so this page cannot stall the process's other requests.
+    st = await asyncio.to_thread(_strata_state)
     owners = [d["about"]["owner"] for d in st["installed"].values() if d["about"]["owner"]]
     try:
         avatars = await hf.owner_avatars(owners) if owners else {}
     except httpx.HTTPError:
         avatars = {}      # an icon is decoration; never fail the page for one
-    metrics = services.strata_metrics(STRATA_CONTAINER)
-    st["tuning"] = (strata_models.tuning_state(st["tuning_tag"], metrics, STRATA_DATA)
+    metrics = await asyncio.to_thread(services.strata_metrics, STRATA_CONTAINER)
+    st["tuning"] = (await asyncio.to_thread(strata_models.tuning_state, st["tuning_tag"], metrics, STRATA_DATA)
                     if st["tuning_tag"] else {})
     st["engine_running"] = metrics is not None
     return templates.TemplateResponse("strata_models.html",
@@ -111,7 +113,7 @@ async def _strata_results_response(request: Request, q: str = "") -> HTMLRespons
     read, and a user who searched for it deserves to be told that rather than shown an empty
     page that looks like a broken search.
     """
-    st = _strata_state()
+    st = await asyncio.to_thread(_strata_state)
     error: str | None = None
     rows: list[dict] = []
     avatars: dict[str, str] = {}
@@ -182,7 +184,7 @@ _CANT_INSTALL = "Can&rsquo;t install"
 async def strata_install(repo_id: str = Form(...), family: str = Form(...),
                          model: str = Form(...)) -> HTMLResponse:
     """Plan the install, place what we already have, and queue only what is missing."""
-    st = _strata_state()
+    st = await asyncio.to_thread(_strata_state)
     tier = next((t for t in st["tiers"] if t.family == family and t.model == model), None)
     if tier is None:
         return _blocked_chip("that family/tier is not in the engine's catalog", _CANT_INSTALL)

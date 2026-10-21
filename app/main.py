@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 
@@ -574,8 +575,17 @@ def router_conversation(request: Request, conv: str) -> HTMLResponse:
 
 @app.get("/router", response_class=HTMLResponse)
 async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
+    # Discovery is async; everything after it (docker listings, Maya's configs through docker's
+    # archive API, install configs on disk, the history queries) is blocking, so it runs in a
+    # thread. On the event loop it stalled every other request this process serves, the
+    # Overview's half-second poll included.
     since = _router_since(range)
     bs, by_model = await router_api._live_map()
+    ctx = await asyncio.to_thread(_router_page_context, bs, range, since)
+    return templates.TemplateResponse("router.html", {"request": request, **ctx})
+
+
+def _router_page_context(bs: list[dict], range: str, since: float) -> dict:
     per_engine: dict[str, list] = {}
     for b in bs:
         if b["engine"] == "strata":
@@ -617,8 +627,7 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
     strata_next = _strata_selected_tag(strata_models.read_selection(STRATA_ENV_FILE))
     if strata_next:
         defaults["strata"] = strata_next
-    return templates.TemplateResponse("router.html", {
-        "request": request,
+    return {
         "engines": router_api.ENGINES,
         "per_engine": per_engine,
         "unloaded": unloaded,
@@ -645,7 +654,7 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
         "totals": router_api.totals(since),
         "charts": _router_charts(router_api.series(since)),
         "retention": router_api.retention_state(),
-    })
+    }
 
 
 @app.post("/router/default", response_class=HTMLResponse)
