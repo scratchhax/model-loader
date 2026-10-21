@@ -146,3 +146,11 @@ class TestPage:
 
     def test_nav_has_maya(self, web):
         assert 'href="/maya"' in web.get("/").text
+
+
+def test_dashboard_port_comes_from_the_published_binding():
+    from app.routers.maya import host_port
+    running = {"NetworkSettings": {"Ports": {"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8087"}]}}}
+    stopped = {"NetworkSettings": {"Ports": {}}, "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": "9001"}]}}}
+    assert host_port(running) == "8087" and host_port(stopped) == "9001"
+    assert host_port({}) == "" and host_port(None) == ""
