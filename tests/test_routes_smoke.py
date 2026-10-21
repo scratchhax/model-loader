@@ -69,12 +69,12 @@ def web(tmp_path, monkeypatch):
 
 PAGES = [
     ("/", "Model Loader"),
-    ("/models", "Models directory"),
+    ("/models", ">Models</h1>"),
     ("/settings", "Settings"),
     ("/search", "Search Hugging Face"),
     ("/downloads", "Downloads"),
     ("/config", "models.ini"),
-    ("/containers", "llama.cpp containers"),
+    ("/containers", ">Containers</h1>"),
     ("/prompts", "Prompt library"),
     ("/benchmark", "Model Loader"),
 ]

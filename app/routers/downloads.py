@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from .. import autoconfig, db, downloader, hf
 from ..downloader import manager
-from ..web import templates, _blocked_chip, _form_note, _QUEUED_CHIP
+from ..web import templates, _blocked_chip, _form_note, _toast, _QUEUED_CHIP
 
 router = APIRouter()
 
@@ -107,10 +107,7 @@ async def download_multi(repo_id: str = Form(...), shard_base: str = Form(...)) 
     try:
         detail = await hf.repo_detail(repo_id)
     except httpx.HTTPError as e:
-        return HTMLResponse(
-            f'<span class="shrink-0 inline-flex items-center rounded-md bg-red-100 dark:bg-red-950 '
-            f'text-red-800 dark:text-red-300 px-3 py-1.5 text-xs font-medium" title="{e}">HF error</span>'
-        )
+        return _blocked_chip(str(e), "HF error")
     shards = sorted((f for f in detail.files if f.shard_base == shard_base),
                     key=lambda f: (f.shard_index or 0, f.path))
     if shards:
@@ -144,23 +141,21 @@ async def download_multi(repo_id: str = Form(...), shard_base: str = Form(...)) 
 async def download_url(url: str = Form(...), filename: str = Form("")) -> HTMLResponse:
     url = url.strip()
     if not (url.startswith("http://") or url.startswith("https://")):
-        return HTMLResponse('<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">URL must start with http:// or https://</div>')
+        return _toast(False, "URL must start with http:// or https://", fail="")
     if not filename.strip():
         from urllib.parse import urlparse, unquote
         p = urlparse(url).path
         filename = unquote(p.rsplit("/", 1)[-1]) if p else ""
     filename = filename.strip()
     if not filename:
-        return HTMLResponse('<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">could not derive filename — set one explicitly</div>')
+        return _toast(False, "could not derive a filename; set one explicitly", fail="")
     if "/" in filename or ".." in filename:
-        return HTMLResponse('<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">filename must be a plain basename</div>')
+        return _toast(False, "filename must be a plain basename", fail="")
 
     if filename.lower().endswith(".gguf") and "mmproj" not in filename.lower():
         reason = autoconfig.foreign_gguf_reason(await hf.url_gguf_header(url))
         if reason:
-            return HTMLResponse(
-                '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">'
-                f'Not queued. {html.escape(reason)}</div>')
+            return _toast(False, f"Not queued. {reason}", fail="")
 
     total = 0
     try:
@@ -177,7 +172,7 @@ async def download_url(url: str = Form(...), filename: str = Form("")) -> HTMLRe
     manager.enqueue_url(url=url, filename=final_filename, total_bytes=total)
     return HTMLResponse(
         f'<div class="rounded-md bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 px-3 py-2 text-sm">'
-        f'Queued <span class="font-mono">{filename}</span>. See progress below.</div>'
+        f'Queued <span class="font-mono">{html.escape(filename)}</span>. See progress below.</div>'
     )
 
 

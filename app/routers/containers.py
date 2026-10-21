@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 from datetime import datetime
 
@@ -12,7 +13,7 @@ from ..config import settings
 from .. import strata as strata_engine
 from ..downloader import manager
 from ..fit import _gpu_tenants, _solo_backend
-from ..web import templates, _toast
+from ..web import templates, _banner, _toast
 from .models import _update_status_map
 
 router = APIRouter()
@@ -176,30 +177,17 @@ def containers_strata_pin(name: str, card: str = Form(...)) -> HTMLResponse:
     setting looks applied while the process is still on the old card.
     """
     if services.engine_for(name) != strata_engine.ENGINE:
-        return HTMLResponse(
-            '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 '
-            'px-3 py-2 text-sm">not a Strata backend</div>'
-        )
+        return _toast(False, "not a Strata backend", fail="")
     ok, msg = strata_engine.set_pin(card)
     if not ok:
-        return HTMLResponse(
-            f'<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 '
-            f'px-3 py-2 text-sm">{msg}</div>'
-        )
+        return _toast(False, msg, fail="")
     services.restart_llama_backend(name)
-    return HTMLResponse(
-        f'<div class="rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 '
-        f'px-3 py-2 text-sm">{msg} — restarting {name}. It reloads ~55 GB into RAM, so give it '
-        f'a minute or two before the port answers.</div>'
-    )
+    return _banner("warn", f"{msg}; restarting {name}. It reloads ~55 GB into RAM, so give it "
+                           f"a minute or two before the port answers.")
 
 
 def _strata_config_toast(ok: bool, msg: str) -> HTMLResponse:
-    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300" if ok
-           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
-    return HTMLResponse(
-        f'<div class="rounded-md {cls} px-3 py-2 text-sm">{msg}</div>'
-    )
+    return _banner("ok" if ok else "fail", msg)
 
 
 @router.post("/containers/{name}/strata-timeshare", response_class=HTMLResponse)
@@ -286,22 +274,14 @@ def containers_strata_unload(name: str) -> HTMLResponse:
 @router.post("/containers/sync-openwebui", response_class=HTMLResponse)
 def containers_sync_openwebui() -> HTMLResponse:
     ok, msg = services.sync_openwebui_endpoints()
-    if ok:
-        return HTMLResponse(
-            f'<div class="rounded-md bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 px-3 py-2 text-sm">✓ {msg}</div>'
-        )
-    return HTMLResponse(
-        f'<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">Sync failed: {msg}</div>'
-    )
+    return _toast(ok, msg, fail="Sync failed:")
 
 
 @router.post("/containers/openwebui-align-capabilities", response_class=HTMLResponse)
 def containers_openwebui_align() -> HTMLResponse:
     """Make OpenWebUI's per-model capabilities match models.ini, and drop stale records."""
     ok, msg = services.align_openwebui_capabilities()
-    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
-           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
-    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Align failed:"} {msg}</div>')
+    return _toast(ok, msg, fail="Align failed:")
 
 
 @router.post("/containers/openwebui-filter", response_class=HTMLResponse)
@@ -310,16 +290,11 @@ async def containers_openwebui_filter(request: Request) -> HTMLResponse:
     form = await request.form()
     url = (form.get("url") or "").strip()
     if not url:
-        return HTMLResponse(
-            '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">No connection specified.</div>'
-        )
+        return _toast(False, "No connection specified.", fail="")
     model_ids = [str(v) for v in form.getlist("model_ids") if str(v).strip()]
     # Writes webui.db through docker exec and restarts open-webui (up to 30 s) - off the loop.
     ok, msg = await asyncio.to_thread(services.set_openwebui_model_filter, url, model_ids)
-    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
-           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
-    mark = "✓" if ok else "Filter failed:"
-    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{mark} {msg}</div>')
+    return _toast(ok, msg, fail="Filter failed:")
 
 
 
@@ -375,15 +350,11 @@ async def models_openwebui_visibility(request: Request) -> HTMLResponse:
     model_id = (form.get("model_id") or "").strip()
     show = str(form.get("show") or "").lower() in ("1", "true", "on", "yes")
     if not url or not model_id:
-        return HTMLResponse(
-            '<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">Missing model or connection.</div>'
-        )
+        return _toast(False, "Missing model or connection.", fail="")
     # Same as the filter route: webui.db write + open-webui restart behind it.
     ok, msg = await asyncio.to_thread(
         services.toggle_openwebui_model, url, model_id, show, sorted(ini.section_names()))
-    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
-           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
-    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">{"✓" if ok else "Failed:"} {msg}</div>')
+    return _toast(ok, msg)
 
 
 @router.get("/containers/{name}/dashboard", response_class=HTMLResponse)
@@ -391,7 +362,7 @@ async def containers_dashboard(request: Request, name: str) -> HTMLResponse:
     backends = await services.snapshot_llama_backends()
     b = next((x for x in backends if x.name == name), None)
     if b is None:
-        return HTMLResponse(f"<span class='text-xs text-slate-500'>unknown backend: {name}</span>")
+        return HTMLResponse(f"<span class='text-xs text-slate-500'>unknown backend: {html.escape(name)}</span>")
     # Throughput rides along with the rest of the 2 s poll rather than having its own timer:
     # one refresh, one consistent picture, and no second interval to reason about.
     speed = await services.inference_speed(name, b.internal_port, b.loaded_model)
@@ -518,10 +489,7 @@ def containers_restart(name: str) -> HTMLResponse:
 async def containers_test(name: str, prompt: str = Form(...), max_tokens: int = Form(256)) -> HTMLResponse:
     result = await services.test_prompt(name, prompt, max_tokens=max_tokens)
     if not result.get("ok"):
-        return HTMLResponse(
-            f'<div class="rounded-md bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 px-3 py-2 text-sm">'
-            f'{result.get("err", "test failed")}</div>'
-        )
+        return _toast(False, str(result.get("err", "test failed")), fail="")
     reply = (result.get("reply") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     tps = result.get("tokens_per_s")
     tps_bit = f" · {tps} tok/s" if tps else ""
@@ -532,7 +500,7 @@ async def containers_test(name: str, prompt: str = Form(...), max_tokens: int = 
     return HTMLResponse(
         f'<div class="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-3">'
         f'<pre class="text-xs whitespace-pre-wrap font-mono">{reply}</pre>'
-        f'<div class="mt-2 text-[10px] text-slate-500 dark:text-slate-400 font-mono">{meta}</div>'
+        f'<div class="mt-2 text-[10px] text-slate-500 dark:text-slate-400 font-mono">{html.escape(meta)}</div>'
         f'</div>'
     )
 
@@ -541,7 +509,7 @@ async def containers_test(name: str, prompt: str = Form(...), max_tokens: int = 
 def containers_logs(name: str, q: str = "", level: str = "") -> HTMLResponse:
     ok, out = services.container_logs(name)
     if not ok:
-        return HTMLResponse(f"<span class='text-red-400'>{out}</span>")
+        return HTMLResponse(f"<span class='text-red-600 dark:text-red-400'>{html.escape(out)}</span>")
 
     if q or level:
         needle = q.lower()

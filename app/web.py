@@ -63,13 +63,27 @@ def _form_note(ok: bool, msg: str, label: str = "saved") -> HTMLResponse:
                         f'Failed: {html.escape(msg)}</span>')
 
 
-def _toast(ok: bool, msg: str) -> HTMLResponse:
-    """The banner the models page swaps into #models-owui-toast. Shared so three routes that
-    report into the same strip cannot drift apart in markup."""
-    cls = ("bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300" if ok
-           else "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300")
-    return HTMLResponse(f'<div class="rounded-md {cls} px-3 py-2 text-sm">'
-                        f'{"&check;" if ok else "Failed:"} {html.escape(msg)}</div>')
+_BANNER_TONES = {
+    "ok": "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300",
+    "fail": "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300",
+    "warn": "bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300",
+}
+
+
+def _banner(tone: str, text: str, prefix: str = "") -> HTMLResponse:
+    """The one result banner, for every action that reports into a strip on its page.
+
+    About twenty routes used to build this div by hand in three colours, and several put an
+    error message, a container name or a model's reply into the page unescaped. `text` is
+    escaped here; `prefix` is trusted markup (a check mark, "Failed:").
+    """
+    return HTMLResponse(f'<div class="rounded-md {_BANNER_TONES[tone]} px-3 py-2 text-sm">'
+                        f'{prefix}{html.escape(text)}</div>')
+
+
+def _toast(ok: bool, msg: str, fail: str = "Failed:") -> HTMLResponse:
+    """A success or failure banner: a check mark, or `fail` ("" for none), then the message."""
+    return _banner("ok" if ok else "fail", msg, "&check; " if ok else (f"{fail} " if fail else ""))
 
 
 
