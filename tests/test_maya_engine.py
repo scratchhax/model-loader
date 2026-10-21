@@ -113,6 +113,9 @@ class TestMayaResolve:
 
     def test_still_loading(self, monkeypatch, rdb):
         m = _b("maya", "maya", [], ready=False)
+        import time as _t
+        m["started_at"] = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime(_t.time() - 20)) + ".1Z"
+        monkeypatch.setattr(ra, "_seen_ready", {})
         monkeypatch.setattr(ra, "_live_map", _lm([m], {}))
         with pytest.raises(ra.Unresolved, match="starting up"):
             run(ra.resolve("maya"))

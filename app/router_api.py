@@ -415,11 +415,20 @@ async def resolve(asked: str) -> tuple[dict, str]:
             # Lumping it in with "not the engine holding the cards" sent people to flip a switch
             # that was already flipped, and routing to it returned 502 from a closed port, which
             # reads as a broken engine rather than one still coming up.
-            coming = [b["name"] for b in bs if b["engine"] == asked and not b.get("ready")]
-            if coming:
+            idle = [b for b in bs if b["engine"] == asked and not b.get("ready")]
+            if idle and starting_backends(idle):
                 raise Unresolved(
-                    f"{asked} is starting up ({', '.join(coming)} is running but not serving "
-                    f"yet). Nothing is wrong; it is not ready.")
+                    f"{asked} is starting up ({', '.join(b['name'] for b in idle)} is running "
+                    f"but not serving yet). Nothing is wrong; it is not ready.")
+            if idle:
+                # Up and NOT starting: it served since this start, or started long ago. That is a
+                # parked engine, or one Strata's own watchdog stopped ("the next request restarts
+                # it", measured 2026-10-21). Calling that "starting up" told people to wait for
+                # something that would never happen on its own.
+                raise Unresolved(
+                    f"{asked} is up but its engine is not loaded ({', '.join(b['name'] for b in idle)} "
+                    f"is parked, or its engine stopped after an error). Load it in Model Loader, or "
+                    f"turn on auto-switch for {asked} and the next request loads it.")
             other = ", ".join(sorted({b["engine"] for b in bs if b.get("ready")})) or "none"
             raise Unresolved(
                 f"{asked} is not the engine holding the cards right now (running: {other}). "

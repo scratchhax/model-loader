@@ -253,8 +253,22 @@ class TestResolve:
 
     def test_starting_up_gets_its_own_answer(self, monkeypatch, rdb):
         s = _b("strata", "strata", [], ready=False)
+        import time as _t
+        s["started_at"] = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime(_t.time() - 20)) + ".1Z"
+        monkeypatch.setattr(ra, "_seen_ready", {})
         monkeypatch.setattr(ra, "_live_map", _lm([s], {}))
         with pytest.raises(ra.Unresolved, match="starting up.*not ready"):
+            run(ra.resolve("strata"))
+
+    def test_parked_or_stopped_is_not_starting_up(self, monkeypatch, rdb):
+        # Measured 2026-10-21: Strata's watchdog stopped the engine and waits for a request to
+        # start it again. "Starting up, nothing is wrong" told people to wait for nothing.
+        import time as _t
+        s = _b("strata", "strata", [], ready=False)
+        s["started_at"] = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime(_t.time() - 60)) + ".1Z"
+        monkeypatch.setattr(ra, "_seen_ready", {"strata": s["started_at"]})   # it served since
+        monkeypatch.setattr(ra, "_live_map", _lm([s], {}))
+        with pytest.raises(ra.Unresolved, match="up but its engine is not loaded.*auto-switch"):
             run(ra.resolve("strata"))
 
     def test_other_engine_holds_the_cards(self, monkeypatch, rdb):
