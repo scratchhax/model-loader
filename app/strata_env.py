@@ -2,8 +2,7 @@
 
 Three things live in it, each set from a different page: the GPU pin (GPU / GPUS, Containers), the
 model selection (FAMILY / MODEL / GGUF_DIR, Strata tab) and the launcher's tunables (PARALLEL and
-STRATA_SET, Strata tab). Each used to parse and rewrite the file its own way. They all go through
-here now, so the rules are stated once:
+STRATA_SET, Strata tab). All of them go through here, so the rules are stated once:
 
   * it is read the way sh reads it: the last assignment of a key wins, `export` is allowed, a
     quoted value keeps its spaces, and an unquoted value ends at whitespace or a `#` comment;

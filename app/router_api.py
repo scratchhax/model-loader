@@ -2,25 +2,23 @@
 
 THE PROBLEM THIS SOLVES. Clients bind to model IDs, and on this host the ID is not stable. The
 engines are mutually exclusive, so switching from llama.cpp to Strata changes every usable ID at
-once; switching which pack Strata runs changes it again
-(`qwen3.8-flash-next-abliterated-iq3_s` one day, `...unsloth-ud-iq4_xs` the next). Anything that
-saved a model name - an Open WebUI workspace model, an IDE config - breaks on every switch.
+once, and switching which pack Strata runs changes it again. Anything that saved a model name
+(an Open WebUI workspace model, an IDE config) would break on every switch.
 
-SO THE ALIAS IS THE ENGINE NAME. `strata` and `llama` are always valid and always mean "whatever
-that engine currently has", which is the thing that does not change. The real IDs are still
-advertised and still work, so naming a specific model when you mean a specific model costs you
-nothing.
+SO THE ALIAS IS THE ENGINE NAME. `strata`, `llama` and `maya` are always valid and always mean
+"whatever that engine currently has", which is the thing that does not change. The real IDs are
+still advertised and still work, so naming a specific model when you mean one costs nothing.
 
-WHAT THIS DELIBERATELY DOES NOT DO. It never starts, stops or switches an engine. Lifecycle
-belongs to the live Model Loader, which knows about VRAM drain and exclusivity; a second thing
-driving the same two cards is how this setup already produced crash loops. When the engine a
-request asks for is not the one holding the cards, the router says so and stops.
+LIFECYCLE STAYS WITH THE UI PROCESS. The router never starts or stops an engine itself; the
+live Model Loader knows about VRAM drain and exclusivity, and two things driving the same cards
+is how this setup produced crash loops. When the engine a request asks for is not the one
+holding the cards, the router either asks the UI process to switch (auto-switch, per engine, off
+by default; see may_autoswitch) or says why not and stops.
 
 WHY A DEFAULT MODEL IS PER ENGINE AND MEANS TWO DIFFERENT THINGS. llama.cpp's router loads on
 demand, so naming a default is enough to get a model. Strata cannot: its loaded model is whatever
 the container started with, and changing it needs a restart. So a Strata default is a statement
-of intent for the next start, not something this can satisfy now - and the router reports that
-rather than silently bouncing an engine somebody is using.
+of intent for the next start, not something this can satisfy now.
 """
 
 from __future__ import annotations
@@ -282,10 +280,9 @@ def starting_backends(bs: list[dict], now: float | None = None) -> list[dict]:
     return out
 
 
-# How long one discovery is reused. Every request used to list the containers (a synchronous
-# docker call, on the event loop, that inspects each one) and then probe /v1/models and /health
-# on each backend in turn before it was forwarded. Two seconds is shorter than any swap step, so
-# a backend coming up is seen at most that late; a switch clears it (request_switch).
+# How long one discovery is reused. A discovery lists the containers and probes /v1/models and
+# /health on every backend; two seconds is shorter than any swap step, so a backend coming up is
+# seen at most that late, and a switch clears it (request_switch).
 _LIVE_TTL_S = 2.0
 _live_cache: tuple[float, tuple[list[dict], dict[str, dict]]] | None = None
 
@@ -423,8 +420,7 @@ async def resolve(asked: str) -> tuple[dict, str]:
             if idle:
                 # Up and NOT starting: it served since this start, or started long ago. That is a
                 # parked engine, or one Strata's own watchdog stopped ("the next request restarts
-                # it", measured 2026-10-21). Calling that "starting up" told people to wait for
-                # something that would never happen on its own.
+                # it"), and neither comes back by waiting.
                 raise Unresolved(
                     f"{asked} is up but its engine is not loaded ({', '.join(b['name'] for b in idle)} "
                     f"is parked, or its engine stopped after an error). Load it in Model Loader, or "
@@ -738,8 +734,8 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
         backend, model = await resolve(want)
     except Unresolved as e:
         # Only a streamed OpenAI-shaped request can be told to wait, because that is the only
-        # shape with somewhere to put the explanation. Everything else keeps the 503, which now
-        # at least says why no switch happened.
+        # shape with somewhere to put the explanation. Everything else keeps the 503, which
+        # says why no switch happened.
         narratable = streaming and shape == "openai"
         detail = str(e)
 
@@ -865,8 +861,7 @@ async def _relay_gen(out: dict, backend: dict, model: str, path: str, shape: str
     TWO THINGS THIS HAS TO GET RIGHT, both invisible while they work:
 
     1. Do not buffer. The point of streaming is the first token arriving early; collecting the
-       response to inspect it would hand the client one block at the end - the same thing the
-       old 501 was avoiding, only slower and pretending to work.
+       response to inspect it would hand the client one block at the end.
 
     2. Let a client disconnect reach the engine. When the caller goes away this generator is
        closed, the httpx stream context exits, and the upstream connection drops - which is how
@@ -1014,10 +1009,9 @@ _LIVE_PHASES = ("stopping", "draining", "starting", "loading")
 async def swap_in_flight_for(asked: str) -> bool:
     """Is a switch ALREADY running, and is it bringing up the engine `asked` names?
 
-    This is the whole of the narration trigger, and it is deliberately the half that cannot
-    cause anything: it answers "is the hardware already moving", never "should it move". The
-    switch is started by a person clicking the engine control in the UI, and all this does is
-    turn the 503 that used to meet them a second later into a description of their own switch.
+    This is the narration trigger, and it is deliberately the half that cannot cause anything:
+    it answers "is the hardware already moving", never "should it move". It turns the 503 that
+    would meet a request a second into somebody's own switch into a description of that switch.
 
     Both conditions matter. Without "already running", this would be auto-switching with no
     policy. Without "for this engine", a request for Strata arriving during a switch to llama
@@ -1109,13 +1103,12 @@ async def may_autoswitch(target: str) -> tuple[bool, str]:
     Checked cheapest first, and the order matters: the two that read over HTTP or scan state go
     last so an everyday "it is switched off" costs one settings read.
 
-    There is deliberately NO idle grace here. An earlier draft refused to switch if the current
-    engine had served anything in the last few minutes, which is the right rule for protecting
-    somebody else's session and the wrong rule for the person who just changed their own
-    dropdown twenty seconds after reading an answer - it refused the exact thing the feature
-    exists to do. In-flight is the honest test: nothing is being taken from anyone if nothing
-    is being served. The grace belongs back here the day a second person's work gets yanked,
-    and `conversation_key` is how it would tell "mine" from "theirs".
+    There is deliberately NO idle grace here. Refusing because the current engine served
+    something in the last few minutes protects somebody else's session, and refuses the person
+    who just changed their own dropdown, which is the exact thing the feature exists to do.
+    In-flight is the honest test: nothing is being taken from anyone if nothing is being served.
+    The grace belongs back here the day a second person's work gets yanked, and
+    `conversation_key` is how it would tell "mine" from "theirs".
     """
     if target not in ENGINES:
         return False, f"{target!r} is not an engine name"
@@ -1155,13 +1148,11 @@ async def may_autoswitch(target: str) -> tuple[bool, str]:
 async def request_switch(engine: str) -> tuple[bool, str]:
     """Ask the UI process to hand the cards to `engine`.
 
-    A POST to the same endpoint the engine control uses, for the reason given on that endpoint:
-    `_switch_lock` and `_switch_state` are per-process and this container runs two, so the UI
-    process owns the switch and everyone else asks. Soft parks a displaced Strata instead of
-    stopping it, which returns the VRAM in ~0.3 s and leaves the container and its settings up.
-    That makes the RELEASE immediate, which is what lets the engine being asked for start
-    sooner. It does not make the return leg quick: a parked Strata asked back took 104 s when
-    measured, so a dropdown you change twice costs roughly 45 s one way and 110 s the other.
+    A POST to the same endpoint the engine control uses: `_switch_lock` and `_switch_state` are
+    per-process and this container runs two, so the UI process owns the switch and everyone else
+    asks. Soft parks a displaced Strata instead of stopping it, which returns the VRAM in ~0.3 s
+    and leaves the container and its settings up, so the engine being asked for starts sooner.
+    It does not make the way back quick: a parked Strata takes about 100 s to load again.
     """
     db.set_setting("router.autoswitch.last_at", str(time.time()))
     invalidate_live_map()

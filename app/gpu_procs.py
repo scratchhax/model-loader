@@ -2,14 +2,9 @@
 
 The rest of the app only knows about llama backends, because they are the only thing it
 starts. The cards do not care. Anything with /dev/kfd can hold VRAM - a TTS server, an image
-generator, a stray benchmark - and until this module existed such a tenant reached the
-overview only as an unexplained bulge in the "other" residual.
-
-Worse, a SMEARED one. The per-card meter apportions what it cannot identify by each card's
-measured usage, so a tenant sitting entirely on one card was drawn across both. Measured
-2026-10-04 with chatterbox-tts holding 6.28 GB on card 0 and nothing at all on card 1, the
-strip reported "other 3.42 GB" on card 0 and "other 2.58 GB" on card 1 - 2.58 GB of a
-container's footprint attributed to a card it had not allocated a byte on.
+generator, a stray benchmark - and without this such a tenant reaches the overview only as an
+unexplained "other" residual, smeared across both cards by the per-card apportionment even
+when it sits entirely on one.
 
 The kernel publishes the answer, per process AND per card:
 
@@ -26,15 +21,14 @@ Three things make that usable here rather than merely present:
   - the pids are the HOST's, and this container cannot read /proc for them. But it holds the
     docker socket, and `docker top` reports host pids. That is the whole of the mapping.
 
-One wrinkle, found by measurement rather than reasoning: the per-process `vram_*` files are
-world-readable from any container, but the TOPOLOGY nodes beside them return EPERM unless the
-reader holds /dev/kfd. Tested on this box - a plain container, `--cap-add SYS_ADMIN`,
-`apparmor=unconfined` and `seccomp=unconfined` all fail; `--privileged` works, and so does any
-ordinary container that was given `devices: [/dev/kfd, /dev/dri]`. So the map is read locally
-when it can be and otherwise through one `docker exec` into a GPU container the app already
-talks to. Topology is fixed for the life of the kernel, so that costs one exec per process,
-not one per poll - and the alternative, handing this container the GPU just to read two
-integers, buys nothing the socket it already holds does not.
+One wrinkle: the per-process `vram_*` files are world-readable from any container, but the
+TOPOLOGY nodes beside them return EPERM unless the reader holds /dev/kfd. A plain container,
+`--cap-add SYS_ADMIN`, `apparmor=unconfined` and `seccomp=unconfined` all fail; `--privileged`
+works, and so does any ordinary container that was given `devices: [/dev/kfd, /dev/dri]`. So
+the map is read locally when it can be and otherwise through one `docker exec` into a GPU
+container the app already talks to. Topology is fixed for the life of the kernel, so that costs
+one exec per process, not one per poll - and handing this container the GPU just to read two
+integers buys nothing the socket it already holds does not.
 
 AMD only, deliberately rather than by oversight. This is a KFD interface; the NVIDIA
 equivalent is `nvidia-smi --query-compute-apps=pid,used_gpu_memory,gpu_uuid`, which is a
@@ -598,16 +592,10 @@ def set_container_running(name: str, start: bool) -> tuple[bool, str]:
             return True, f"{name} starting - it reloads its weights, give it a moment"
         if c.status != "running":
             return True, f"{name} is already stopped"
-        # No explicit timeout: an explicit one is sent as ?t= and OVERRIDES the container's
-        # own StopTimeout, so a hardcoded value here silently ignores whatever the service
-        # declared in compose. Each service knows its own shutdown cost; this does not.
-        #
-        # It matters more than it looks. comfyui's PID 1 is the image's bash entrypoint, which
-        # never execs, and bash defers a signal until its foreground child finishes - so python
-        # is never told to stop and the full grace period always elapses before SIGKILL. With 30
-        # hardcoded here, ejecting it took a measured 37 s for a container that had nothing to
-        # flush. Its compose entry sets stop_grace_period: 5s, which is only honoured if we stay
-        # out of the way.
+        # No explicit timeout: one is sent as ?t= and OVERRIDES the container's own
+        # StopTimeout, so a hardcoded value here would ignore whatever the service declared in
+        # compose. Each service knows its own shutdown cost (comfyui's bash PID 1 never passes
+        # the signal on, so it always waits out its grace period; compose sets that to 5 s).
         c.stop()
         return True, f"{name} stopped and its VRAM released"
     except (DockerException, OSError) as e:

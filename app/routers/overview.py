@@ -148,26 +148,17 @@ async def _hero_context() -> dict:
         # it. A loading model has no slots to read either.
         sp = (await services.inference_speed(b.name, b.internal_port, b.loaded_model)
               if b.loaded_model else None)
-        # Three questions, in the order they matter on a box whose whole point is the cards:
+        # Ranked by what matters on a box whose whole point is the cards:
         #
-        #   generating now   the thing actually working always leads, GPU or not
-        #   touches a GPU    an idle CPU backend is not the headline while a card holds a model
-        #   is a chat router a TTS server holds its model permanently and so always counts as
-        #                    loaded; it must not outrank the model you are talking to
+        #   generating now (4)   the thing actually working always leads, GPU or not
+        #   loading (3)          a swap in progress is the most interesting thing after that
+        #   touches a GPU (2)    an idle CPU backend is not the headline while a card holds a model
+        #   chat router (1)      a TTS server holds its model permanently and so always counts as
+        #                        loaded; it must not outrank the model you are talking to
         #
-        # Ranking on `router` alone tied three backends that share one models.ini - the GPU
-        # router, llama-cpu and llama-voice - so the winner was whichever docker happened to
-        # enumerate first, and the hero appeared to pick at random. In practice it would show
-        # llama-cpu serving wheatley-voice while a 25 GB model sat on the cards.
-        #   is it loading        a swap in progress is the most interesting thing on the box
-        #                           after something actually generating, and it is the state
-        #                           that used to render as a blank panel for up to 40 seconds
-        #
-        # 3 puts it above any idle backend (2 + 1 at most) and below anything live (4 and up),
-        # which is the order you would read them in out loud.
-        #   is it asleep         it still owns a model and will serve it; it outranks nothing
-        #                            and loses to everything, but it beats not being shown at
-        #                            all, which is what used to happen
+        # A sleeping model gets no points: it still owns a model and is shown, but outranks
+        # nothing. Without the GPU and router terms the three backends that share one models.ini
+        # (the GPU router, llama-cpu, llama-voice) tie, and docker's list order picks the hero.
         _gpu = b.vendor in ("rocm", "cuda")
         rank = ((4 if (sp and sp.live) else 0) + (3 if b.loading_model else 0)
                 + (2 if _gpu else 0) + (1 if b.router else 0))
@@ -216,14 +207,9 @@ async def _hero_context() -> dict:
     model_id = (b.loading_model or b.loaded_model or b.sleeping_model or "").split(",")[0].strip()
 
     # Fold in this backend's log before anything reads its spawn record. Rate-limited to once
-    # every 20 s internally, so an HTMX poll does not re-read the log every two seconds.
-    #
-    # This used to happen only inside _hero_mtp(), which returns early when the RECORDED argv
-    # declares no --spec-type - and that record is exactly the thing that goes stale. Load a
-    # model whose predecessor did not speculate and nothing on this page ever refreshed it:
-    # observed four minutes after a swap, with the VRAM meter costing a 25 GB dense gemma
-    # against the 90 GB MoE record it replaced. A page that renders a backend's state should
-    # not depend on what the previous model happened to have configured.
+    # every 20 s internally, so an HTMX poll does not re-read the log every two seconds. Done
+    # here, not only inside _hero_mtp(), because that returns early when the RECORDED argv
+    # declares no --spec-type, and the record is exactly what goes stale after a swap.
     try:
         await asyncio.to_thread(telemetry.ingest, [b.name])
     except Exception:  # noqa: BLE001 - stale telemetry must never cost the hero

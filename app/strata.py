@@ -67,18 +67,14 @@ def read_pin(path: Path | None = None) -> str:
 def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
     """Rewrite the pin file to name `selection` ("1" or "1,0"). Returns (ok, message).
 
-    Rewrites the existing line in place and leaves every comment untouched, because those
-    comments are the file's record of why it is not HIP_VISIBLE_DEVICES - exactly the thing
-    someone reading it later needs. An append-only writer would leave two GPU= lines and `sh`
-    sourcing the file would take the last; a truncating writer would throw the explanation away.
+    Through strata_env, which rewrites each key in place and keeps every comment: those comments
+    are the file's record of why it is not HIP_VISIBLE_DEVICES.
 
-    Both switches are always named: the chosen one set, the other explicitly CLEARED. The
-    entry point sources this file and then exports GPU and GPUS as they stand - a compose
-    service that bakes `GPUS=1,0` into the container environment keeps that value through a
-    restart unless the file overwrites it, and the entry point passes --gpus after --gpu, so
-    the stale bake wins. (Measured on this box: a pin to one card left the engine across
-    both until the file said GPUS= as well.) An empty assignment is what sourcing needs to
-    see to clear the variable; deleting the line does nothing.
+    Both switches are always named: the chosen one set, the other explicitly CLEARED. The entry
+    point sources this file and then exports GPU and GPUS as they stand, and a compose service
+    that bakes `GPUS=1,0` into the container keeps that value through a restart unless the file
+    overwrites it; since the entry point passes --gpus after --gpu, the stale bake would win. An
+    empty assignment is what sourcing needs to clear the variable; deleting the line does nothing.
     """
     cards = [c.strip() for c in str(selection).split(",") if c.strip()]
     if not cards or not all(c.isdigit() for c in cards):
@@ -93,13 +89,10 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
         return False, why
     if single:
         return True, f"pinned to card {cards[0]}"
-    # Upstream publishes figures showing a split LOSING (4K prompts 1,776 -> 1,244 tok/s,
-    # decode ~60 -> ~51) and this message used to repeat them. They were measured on Coder
-    # IQ1_M, which keeps half the experts and therefore fits one 32 GB card - the one case
-    # where a split cannot pay. Measured here on the packs this box actually runs, the split
-    # is 2.2-2.5x FASTER on long prompts, because one card holds only ~53% of the experts.
-    # The rule, not the number: compare the engine's "N ranked pairs" against "expert cache
-    # M slots". M < N means a split pays.
+    # Upstream's figures show a split LOSING, but they were measured on Coder IQ1_M, which fits
+    # one 32 GB card. On the packs this box runs one card holds only ~53% of the experts, and the
+    # split is 2.2-2.5x FASTER on long prompts. The rule, not the number: compare the engine's
+    # "N ranked pairs" against "expert cache M slots"; M < N means a split pays.
     return True, (f"split across cards {', '.join(cards)} — card {cards[0]} is the main one. "
                   "Measured on this box the split is 2.2-2.5x faster on long prompts; "
                   "upstream's contrary figure is for a pack that fits one card.")
@@ -170,10 +163,10 @@ def config_tag(attrs: dict | None) -> str:
 # Where the engine's files are, and in which layout.
 #
 # 0.1.x (our own image): /data/config/strata-<tag>.json, /data/packs/<tag>, /data/models.
-# 0.2 (upstream's image, from 2026-10-20): /data/install/strata-<tag>.json (setup writes it on
-# every start and keeps keys it does not own, #629), /data/Strata-data/{models,packs,mtp},
-# /data/state (presets, the key). The two cannot be told apart by version string cheaply, but
-# they can by what is on disk, which is also what every reader below actually depends on.
+# 0.2 (upstream's image): /data/install/strata-<tag>.json (setup writes it on every start and
+# keeps keys it does not own, #629), /data/Strata-data/{models,packs,mtp}, /data/state
+# (presets, the key). The two cannot be told apart by version string cheaply, but they can by
+# what is on disk, which is also what every reader below actually depends on.
 # ---------------------------------------------------------------------------
 
 def data_dir(attrs: dict | None, own_attrs: dict | None = None) -> Path | None:

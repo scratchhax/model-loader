@@ -117,17 +117,13 @@ def _container_status(name: str) -> str:
 def _backend_list() -> list[dict]:
     """Backend descriptors for autoconfig, from the env whitelist or auto-discovery.
 
-    Extracted so the benchmark results page can ask for the same fit estimate the autoconfig
-    panel shows, rather than growing a second, drifting copy of this.
+    Shared so the benchmark results page asks for the same fit estimate the autoconfig panel
+    shows rather than growing a second copy.
 
-    A discovered llama container that is STOPPED used to be dropped - its sampler probe is
-    dead, so its VRAM read 0 and the panel hard-stopped with "no GPU backend available".
-    But the card totals are a property of the machine, not of the running container, and
-    the plan being sized describes the state AFTER the engine switch. So a stopped GPU
-    backend is now offered with the sysfs card facts and an `offline` flag the panel
-    discloses. A running container whose probe still reads 0 (CPU build, unreadable SMI)
-    is dropped exactly as before - there the machine facts may not describe that
-    container's devices at all.
+    A STOPPED discovered GPU backend is offered with the sysfs card facts and an `offline` flag
+    the panel discloses: the card totals are a property of the machine, and the plan being sized
+    describes the state after the engine switch. A running container whose probe still reads 0
+    (CPU build, unreadable SMI) is dropped, since the machine facts may not describe its devices.
     """
     out = []
     for bn in services._effective_container_names():
@@ -300,13 +296,9 @@ def _resolve_section_gguf(name: str) -> tuple[Path | None, str, str | None]:
         subdir_path = settings.models_dir / subdir_name
         if subdir_path.is_dir():
             gguf_files = sorted([q for q in subdir_path.iterdir() if q.is_file() and q.suffix.lower() == ".gguf"])
-            # Every companion, not just mmproj. This used to test `"mmproj" not in name` and
-            # then take main_files[0] - the alphabetically first survivor - which on a real
-            # folder picked ...-MAX-MTP-IQ2_M.gguf over ...-MAX-Q8_0.gguf because M sorts before
-            # Q. The section named ...-Q8_0 was therefore configured to run an 11.3 GiB IQ2_M
-            # quant while the 27.7 GiB Q8_0 beside it was never loaded. ini._is_companion
-            # already knew about draft heads; this was a third copy of the narrower mmproj-only
-            # test, and the one missed when the other two were unified.
+            # Every companion, not just mmproj (ini._is_companion knows draft heads too).
+            # Otherwise the alphabetically first survivor wins, which picks a
+            # ...-MAX-MTP-IQ2_M.gguf over the ...-MAX-Q8_0.gguf the section is named for.
             main_files = [q for q in gguf_files
                           if not ini._is_companion(q.name, autoconfig.file_size_or_none(q))
                           ] or gguf_files

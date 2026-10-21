@@ -102,10 +102,8 @@ _SAMPLE_INTERVAL_S = 1.0   # rocm-smi/nvidia-smi through docker exec costs ~90 m
                            # dashboard cannot show anything fresher than this.
 
 # Container CPU%/RSS is read on its own thread because Docker's stats endpoint blocks for ~2 s
-# per container while it derives CPU% from two internal samples. Measured: with three backends
-# that dragged the shared 1 s tick out to 6.1 s, and every GPU figure, sparkline and filter
-# window on the page inherited the delay. Nothing needs RSS at 1 Hz; the GPU probe does want to
-# be near it, so the two no longer share a loop.
+# per container while it derives CPU% from two samples, and sharing the 1 s tick would delay
+# every GPU figure on the page by seconds. Nothing needs RSS at 1 Hz.
 _RUNTIME_INTERVAL_S = 2.0
 _RUNTIME_MAX_AGE_S = 20.0
 _RUNTIME_CACHE: dict[str, tuple[float, "ContainerRuntimeStats | None"]] = {}
@@ -115,8 +113,7 @@ _sampler_started = False
 
 
 def _client() -> docker.DockerClient | None:
-    # Shared app-wide client; used to be docker.from_env() per call, which the
-    # 2 s sampler leaked continuously.
+    # Shared app-wide client; a docker.from_env() per call leaked on every 2 s sample.
     return docker_client()
 
 
@@ -302,15 +299,11 @@ def _amd_name(card_key: str, card: dict) -> str:
 def _read_amd_power(container) -> dict[str, tuple[float, float]]:
     """{card key: (draw W, cap W)} from a rocm-smi call that asks for nothing else.
 
-    Power has to be read on its own, and this is not fussiness. "Average Graphics Package Power"
-    is an average over the interval since the previous read, so it is sensitive to when in the
-    invocation each card gets sampled. Bundled behind --showid --showproductname --showuse
-    --showmemuse --showmeminfo --showtemp --showfan, the gap before each card differs enough to
-    skew them in opposite directions: measured on two evenly loaded cards, 14 consecutive reads
-    of the bundled command produced a split worse than 60 W in 12 of them - 63/302, 263/49,
-    65/270 - while the same 14 reads of --showpower alone gave 152/153, 152/150, 152/154, matching
-    hwmon exactly. The pair total stayed correct throughout, which is the tell for a timing
-    artefact rather than a bad sensor.
+    Power has to be read on its own. "Average Graphics Package Power" averages over the interval
+    since the previous read, so it depends on when in the invocation each card is sampled:
+    bundled behind the other --show flags, two evenly loaded cards read as far apart as 63/302 W
+    while --showpower alone gave 152/153 W, matching hwmon. The pair total stays right either
+    way, which is the tell for a timing artefact rather than a bad sensor.
 
     Returns {} if the call fails, and the caller falls back to the bundled figures.
     """
@@ -337,12 +330,10 @@ def _read_amd_power(container) -> dict[str, tuple[float, float]]:
     return out
 
 
-# The amdgpu driver publishes per-card telemetry in sysfs, world-readable from any container - this one
-# included, with no /dev/kfd and no ROCm. It is the first source now, because the rocm-smi route needs
-# a running GPU container that SHIPS rocm-smi, and since Strata moved to upstream's 0.2 image
-# (2026-10-20) none does while Strata holds the cards: that image has no ROCm tools, gpu-monitor has
-# none, and Maya's and llama's images that do are stopped exactly then. The strip went blank -
-# "No GPU telemetry yet" - for the whole time Strata was the engine, swap included.
+# The amdgpu driver publishes per-card telemetry in sysfs, world-readable from any container,
+# this one included, with no /dev/kfd and no ROCm. It is the first source because the rocm-smi
+# route needs a running GPU container that ships rocm-smi, and none does while Strata 0.2 holds
+# the cards (its image has no ROCm tools, and Maya's and llama's are stopped then).
 _SYSFS_DRM = "/sys/class/drm"
 
 # PCI device id -> name. The driver exposes no marketing name for these cards (product_name is
@@ -616,26 +607,20 @@ _POWER_WINDOW = 3
 def _clean_card_power(name: str, cards: list[GpuCard]) -> None:
     """Replace each card's raw power sample with a median of recent ones, in place.
 
-    A guard, not the fix. Nearly all of the bad per-card wattage this used to show came from
-    bundling the power query with the others in one rocm-smi call, which _read_amd_power now
-    avoids - that alone took impossible readings from 48% of samples to 5%.
-
-    What remains is the sensor. Both available sources overshoot the enforced cap sometimes, and
-    the one that looks most trustworthy is not: pooled over 36 steady-load samples against a
-    210 W cap,
+    A guard for the sensor itself; reading power on its own (_read_amd_power) removes most bad
+    readings. Both available sources overshoot the enforced cap sometimes, and the one that
+    looks most trustworthy is not. Pooled over 36 steady-load samples against a 210 W cap:
 
         hwmon power1_average (what nvtop shows)   sd 87.9 W   median 148 W   29/72 over cap
         rocm-smi --showpower, raw                 sd 21.5 W   median 154 W    2/72 over cap
         rocm-smi --showpower, median of 3         sd  4.7 W   median 154 W    0/72 over cap
 
-    which is why nvtop is also seen reporting wattages its own cap forbids. The two sensors agree
-    on the answer - pair total 305 vs 308 W - and disagree on how much noise they show.
+    The two sensors agree on the answer (pair total 305 vs 308 W) and disagree on the noise.
 
-    A median rather than an average, because the errors are impulses and an average cannot shrug
-    one off. Width 3 rather than 5: the extra samples buy about 1 W of jitter and cost a second
-    of lag. And no discarding of over-cap readings, tempting as that is - the excursions come in
-    mirrored pairs, so dropping the high half while keeping the low half can only read low, which
-    measured as a -7.5 W bias when tried.
+    A median rather than an average, because the errors are impulses. Width 3 rather than 5:
+    the extra samples buy about 1 W of jitter and cost a second of lag. And no discarding of
+    over-cap readings: the excursions come in mirrored pairs, so dropping only the high half
+    can only read low.
     """
     for c in cards:
         key = (name, c.index)
@@ -675,8 +660,7 @@ def _collect(name: str) -> BackendStats:
         # The pooled figure is what the wall estimate sums, so it has to follow the cards.
         gpu.power_w = round(sum(card.power_w for card in gpu.cards), 1)
         gpu.power_cap_w = round(sum(card.power_cap_w for card in gpu.cards), 1)
-    # Whatever the runtime thread last published. Deliberately not read inline: that is the
-    # call that used to make this function take two seconds.
+    # Whatever the runtime thread last published. Not read inline: that call takes ~2 s.
     with _LOCK:
         entry = _RUNTIME_CACHE.get(name)
     cont = entry[1] if entry and (time.time() - entry[0]) <= _RUNTIME_MAX_AGE_S else None

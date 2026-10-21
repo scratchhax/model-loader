@@ -62,8 +62,7 @@ def diagnose_container(name: str) -> tuple[bool, list[dict], str]:
     (ok, findings, err); findings is empty-and-ok when the log simply holds no known signature.
 
     Reads the CURRENT run only. `docker logs` keeps history across restarts, and a 1200-line tail
-    easily reaches back past one: after a preset was fixed and the router restarted, Diagnose
-    kept reporting the old section's missing-projector error from hours before the restart.
+    easily reaches back past one, which would keep reporting an error fixed before the restart.
     Bounding by the run is the right cut rather than treating the router's "listening" line as a
     success marker, because the router validates presets during boot and only THEN listens - so
     a startup preset error sits just before that line, and would be hidden the moment it happened.

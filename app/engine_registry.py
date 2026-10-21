@@ -1,13 +1,11 @@
 """Every inference engine this app drives, declared once.
 
-What an engine IS used to be spread over a dozen constants: router_api.ENGINES and SINGLE_MODEL,
-services.engines.READY_TIMEOUT_S, speed._METRICS_ENGINES, engine_colors.ENGINE_COLORS,
-updates.ENGINES, each module's own ENGINE string. A fourth engine meant finding all of them. They
-are now read from here, and the one rule they all disagreed on the spelling of, "is it serving",
-is `serving()` below.
+router_api.ENGINES and SINGLE_MODEL, services.engines.READY_TIMEOUT_S, speed._METRICS_ENGINES,
+engine_colors.ENGINE_COLORS and updates.ENGINES are all read from here, and so is the one rule
+they share, "is it serving" (`serving()` below). A fourth engine is one more entry.
 
 Order matters: ENGINES[0] is what a request naming no model gets, and /v1/models lists the engine
-aliases in this order. Maya goes last so adding it changed neither.
+aliases in this order.
 """
 
 from __future__ import annotations
@@ -50,9 +48,9 @@ ENGINES: dict[str, Engine] = {e.name: e for e in (
         single_model=False, ready_path="/v1/models", ready_timeout_s=420.0,
         updates={"repo": "ggml-org/llama.cpp", "kind": "release", "image": "ghcr.io/ggml-org/llama.cpp"},
         runbook="docker compose pull <service>, then recreate it"),
-    # A start from a cold page cache took ~5 min (measured 2026-10-20: GLM-5.3-Flash Maya-S warms
-    # 43 + 46 GB of expert tiers before its port opens), so 420 s would call a healthy start slow.
-    # Maya is a fork of Strata's server and kept its /metrics document field for field.
+    # A start from a cold page cache takes ~5 min (Maya warms 43 + 46 GB of expert tiers before
+    # its port opens), so 420 s would call a healthy start slow. Maya is a fork of Strata's
+    # server and kept its /metrics document field for field.
     Engine(
         name="maya", label="Maya", color=("fuchsia", "217,70,239"),
         single_model=True, ready_path="/health", ready_timeout_s=900.0,

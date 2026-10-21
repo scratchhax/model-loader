@@ -76,12 +76,11 @@ async def download_single(repo_id: str = Form(...), path: str = Form(...), size:
         # A speculative-decoding head, when the repo ships one for this model. Only the
         # SMALLEST is taken: repos commonly publish BF16/F16/Q8_0/Q4_0 of the same head, they
         # are 60-170 MB, they sit in VRAM all session, and draft quality below Q8 barely moves
-        # the acceptance rate. Queueing all four would waste bandwidth and disk to no purpose.
+        # the acceptance rate.
         #
-        # These used to be skipped entirely after community draft models segfaulted
-        # llama-server. That was a generic draft paired with an unrelated model; a head shipped
-        # in the model's own repo is trained against it, and llama.cpp drives it through
-        # draft-mtp rather than draft-simple. Autoconfig still only PROPOSES enabling it.
+        # A head from the model's own repo is trained against it, and llama.cpp drives it
+        # through draft-mtp; a generic community draft paired with an unrelated model is what
+        # segfaults llama-server. Autoconfig still only PROPOSES enabling it.
         heads = [f for f in detail.files
                  if f.path.lower().endswith(".gguf")
                  and "mmproj" not in Path(f.path).name.lower()

@@ -53,14 +53,13 @@ _DOCKER_LOCK = threading.Lock()
 def docker_client() -> "docker.DockerClient | None":
     """One shared docker client for the whole app, not one per call.
 
-    Every module used to call `docker.from_env()` per call and none ever closed it:
-    with the 500 ms-2 s polls that leaked a requests.Session and a urllib3 pool
-    continuously. The SDK client is safe to share across threads (the urllib3 pool
-    is thread-safe and the session is read-only after construction), and it has to
-    survive a dockerd restart, so the cached client is pinged at most once per 5 s
-    and rebuilt when the ping fails - the self-heal the per-call version got free.
+    A `docker.from_env()` per call, never closed, leaks a requests.Session and a urllib3 pool on
+    every 500 ms-2 s poll. The SDK client is safe to share across threads (the urllib3 pool is
+    thread-safe and the session is read-only after construction), and it has to survive a
+    dockerd restart, so the cached client is pinged at most once per 5 s and rebuilt when the
+    ping fails.
 
-    Returns None when docker is unreachable, like the per-call version did.
+    Returns None when docker is unreachable.
     """
     global _DOCKER_CLIENT, _DOCKER_CLIENT_OK
     with _DOCKER_LOCK:

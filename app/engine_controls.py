@@ -51,9 +51,7 @@ def rows_context(bs: list[dict]) -> dict:
             if m not in per_engine[b["engine"]]:
                 per_engine[b["engine"]].append(m)
     # (value, label) pairs, which is what the template unpacks. Every engine but Strata offers
-    # its model ids as both; Strata's are built from installed packs below. Converting llama
-    # alone left any other engine's list as bare strings, and the Router tab 500'd ("too many
-    # values to unpack") the first time Maya was running.
+    # its model ids as both; Strata's are built from installed packs below.
     per_engine.setdefault("llama", [])     # always present: the unloaded sections join it below
     for e in list(per_engine):
         per_engine[e] = [(m, m) for m in per_engine[e]]
@@ -78,8 +76,8 @@ def rows_context(bs: list[dict]) -> dict:
         defaults["maya"] = maya_runs
     elif len(per_engine.get("maya", [])) == 1:
         defaults["maya"] = per_engine["maya"][0][0]
-    # Strata's row, likewise: the install strata.env names, which the Strata tab can also change.
-    # The stored router.default.strata went stale the first time it did.
+    # Strata's row, likewise: the install strata.env names (the Strata tab can change it), not a
+    # stored router.default.strata.
     strata_next = strata_router._strata_selected_tag(strata_models.read_selection(strata_router.STRATA_ENV_FILE))
     if strata_next:
         defaults["strata"] = strata_next

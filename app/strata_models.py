@@ -112,15 +112,13 @@ class RepoMatch:
 def _docker_exec_json(container: str, code: str, timeout: int = 20) -> dict | None:
     """Run a snippet inside the engine container and parse its stdout as JSON.
 
-    Through the Docker SDK, NOT a `docker` subprocess: this app runs in a container that has
-    the daemon socket bind-mounted but no docker CLI on PATH, so shelling out returns
-    FileNotFoundError and the catalog silently comes back empty - a page that renders fine and
-    lists nothing, which is exactly how this was first shipped and caught.
+    Through the Docker SDK, NOT a `docker` subprocess: this app's container has the daemon
+    socket bind-mounted but no docker CLI on PATH, so shelling out would fail and the catalog
+    would come back silently empty.
 
-    The catalog is read from the RUNNING ENGINE rather than duplicated here. Strata adds
-    families and tiers between releases (UD-IQ4_XS stopped being experimental in 0.1.39), and a
-    hardcoded copy here would keep offering what the image no longer has, or hide what it
-    gained, with no error either way.
+    The catalog is read from the RUNNING ENGINE rather than duplicated here: Strata adds
+    families and tiers between releases, and a hardcoded copy would keep offering what the
+    image no longer has, or hide what it gained, with no error either way.
     """
     from .utils import docker_client, timed_shell
     cli = docker_client()
@@ -372,12 +370,9 @@ _PATH_VIEWS = (
 def _missing_sources(cfg: dict, root=None) -> list[str]:
     """Paths an install needs that are NOT there any more.
 
-    This exists because an install can rot without anything touching it. `/gguf` used to be a
-    bind of ONE model directory; replacing it with `/gguf-root` (the whole models root) left
-    every earlier install pointing at a mount the container no longer has. Nothing reported
-    that: the config was valid, the pack was intact, and the failure only appeared as a
-    container that would not start - the same silent, crash-looping shape as the staged-config
-    bug. An install whose files have moved should say so where it is listed, not when it is
+    An install can rot without anything touching it, for example when a mount is renamed: the
+    config stays valid and the pack intact, and the only symptom is a container that will not
+    start. An install whose files have moved should say so where it is listed, not when it is
     selected.
     """
     out: list[str] = []
@@ -500,14 +495,11 @@ def plan_install(match: RepoMatch, models_root: str, dest_subdir: str,
     abliterated IQ3_S shard 2 and ISTA-DASLab's IQ3_S shard 2 are the same 28.8 GB object
     (sha256 316b46f3...). Re-fetching it would double a 55 GB download for nothing.
 
-    REUSE IS BY CONTENT HASH ONLY. An earlier cut of this matched on byte size alone and, in
-    its first test, proposed installing a DIFFERENT model's vision encoder
-    (Qwen3.8-Flash-Next-UD-Q3_K_XL/mmproj-BF16.gguf) because it happened to weigh the same -
-    while the Hub etags prove the abliterated encoder is a different file. Weights and encoders
-    of one architecture collide on size routinely, so size is a way to FIND a candidate and
-    never a reason to trust one. A size candidate is hashed (`verify=True`) and either confirmed
-    or discarded; with `verify=False` it is reported under "candidates" for the UI to offer,
-    and is NOT counted as reuse.
+    REUSE IS BY CONTENT HASH ONLY. Weights and encoders of one architecture collide on size
+    routinely (a different model's vision encoder can weigh exactly the same), so size is a way
+    to FIND a candidate and never a reason to trust one. A size candidate is hashed
+    (`verify=True`) and either confirmed or discarded; with `verify=False` it is reported under
+    "candidates" for the UI to offer, and is NOT counted as reuse.
 
     `match.files[*]["sha"]` is the Hub's LFS etag, which is the file's sha256. Fill it in with
     `fetch_etags()` before planning, or every reuse decision degrades to a candidate.
@@ -560,8 +552,7 @@ async def fetch_etags(repo_id: str, paths: list[str], revision: str = "main") ->
 
     Both look like a sha256, so reading the wrong one fails silently and expensively: every
     reuse check then compares a real local hash against a CDN hash, never matches, and the
-    planner re-downloads tens of GB it already has. (That is not hypothetical - it happened
-    while this was being written, and cost a 28.8 GB shard its correct reuse.)
+    planner re-downloads tens of GB it already has.
 
     `follow_redirects` is OFF for the same reason: huggingface.co answers the HEAD with
     x-linked-etag and then redirects to a CDN whose response carries only `etag`. Following the
@@ -703,12 +694,11 @@ def stranded_installs(tiers, known: set[str], data_root=None, models_root=None) 
 
     0.2's setup deletes the saved run settings of every install made for a different card
     selection ("The saved run settings use graphics card '1', GPU/GPUS asks for '0,1': making
-    them again (model files are kept)") and makes them again at that model's next start. Measured
-    2026-10-20: starting SC117's model on both cards removed iq3_s's. Its files and pack stayed,
-    but with no run config it was listed nowhere, and the entry point, which finds a folder from
-    the run config, would have left GGUF_DIR empty, so setup would have downloaded the 83 GB
-    model again. Found here by the catalog's own shard names, in the engine's model folder or in
-    ./models, and offered with that folder.
+    them again (model files are kept)") and makes them again at that model's next start. Until
+    then the install is listed nowhere, and the entry point, which finds a model's folder from
+    its run config, would leave GGUF_DIR empty, so setup would download the model again. Found
+    here by the catalog's own shard names, in the engine's model folder or in ./models, and
+    offered with that folder.
     """
     from pathlib import Path
     from . import strata as strata_engine

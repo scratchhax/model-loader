@@ -1,8 +1,7 @@
 """Writing files that another process reads: atomically, and with a rolling backup.
 
-strata.env (sourced by Strata's entry point at start), Strata's run configs and Maya's configs are
-all read by an engine while this app may be writing them. They used to share Strata's private
-helpers, with Maya reaching into strata.py for them; they live here now.
+strata.env (sourced by Strata's entry point at start), Strata's run configs and Maya's configs
+are all read by an engine while this app may be writing them.
 """
 
 from __future__ import annotations
