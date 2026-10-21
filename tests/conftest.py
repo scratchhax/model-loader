@@ -27,3 +27,12 @@ def _fresh_router_discovery(monkeypatch):
     from app import router_api
     monkeypatch.setattr(router_api, "_LIVE_TTL_S", 0.0)
     monkeypatch.setattr(router_api, "_live_cache", None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_container_discovery(monkeypatch):
+    """Container discovery is reused for a couple of seconds; tests swap the fake docker between
+    calls, so each sees a fresh one unless it is testing the reuse itself."""
+    from app.services import backends
+    monkeypatch.setattr(backends, "_DISCOVER_TTL_S", 0.0)
+    monkeypatch.setattr(backends, "_discover_cache", None)

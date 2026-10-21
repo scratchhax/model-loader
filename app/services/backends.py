@@ -378,11 +378,51 @@ def _engine_label(c) -> str:
     return str(labels.get("ai-lab.engine") or "").strip().lower()
 
 
+# One discovery, reused for this long by every caller in every thread. A single GPU-strip build
+# asked for it five times (and _effective_container_names four more), each a docker list that
+# inspects every container: 211 docker API calls per strip, polled every second, and the strip
+# took 2-3 s to answer a 1 s poll (measured 2026-10-21). Two seconds is shorter than any start.
+_DISCOVER_TTL_S = 2.0
+_discover_cache: tuple[float, list[dict]] | None = None
+_discover_lock = threading.Lock()
+
+
 def discover_llama_containers() -> list[dict]:
     """Return metadata for every container that is a backend: a llama.cpp:server-* image, or
     any container declaring an `ai-lab.engine` label. Includes stopped containers so the user
-    can see and start them.
+    can see and start them. Reused for _DISCOVER_TTL_S; callers get their own copies.
     """
+    global _discover_cache
+    with _discover_lock:
+        hit = _discover_cache
+        if hit and time.time() - hit[0] < _DISCOVER_TTL_S:
+            return [dict(d) for d in hit[1]]
+        out = _discover_llama_containers()
+        if _DISCOVER_TTL_S > 0 and _docker_client() is not None:
+            _discover_cache = (time.time(), out)
+        return [dict(d) for d in out]
+
+
+def invalidate_discovery() -> None:
+    global _discover_cache
+    _discover_cache = None
+
+
+def _image_name(c) -> str:
+    """The image a container was created from, by name. From its own config, which costs nothing;
+    `c.image` is an inspect of the image per container (85 of the strip's 211 calls). Only a
+    container created from a bare image id falls back to asking for the image's tags."""
+    name = str(((c.attrs or {}).get("Config") or {}).get("Image") or "")
+    if name and not name.startswith("sha256:"):
+        return name.lower()
+    try:
+        tags = c.image.tags or [c.image.short_id]
+        return (tags[0] if tags else "").lower()
+    except DockerException:
+        return ""
+
+
+def _discover_llama_containers() -> list[dict]:
     client = _docker_client()
     if client is None:
         return []
@@ -392,11 +432,7 @@ def discover_llama_containers() -> list[dict]:
     except DockerException:
         return []
     for c in containers:
-        try:
-            tags = c.image.tags or [c.image.short_id]
-            img = (tags[0] if tags else "").lower()
-        except DockerException:
-            img = ""
+        img = _image_name(c)
         engine = _engine_label(c)
         if not engine and "ghcr.io/ggml-org/llama.cpp" not in img and "llama.cpp" not in img:
             continue
