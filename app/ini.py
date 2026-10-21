@@ -621,11 +621,10 @@ def suggest_defaults(summary: dict) -> tuple[dict[str, str], list[str]]:
     if isinstance(ctx, int) and ctx > 0:
         fields["ctx-size"] = str(ctx)
 
-    # Runtime defaults. These used to be supplied by the container's CLI baseline, but
-    # compose args OVERRIDE models.ini rather than falling back to it — so the compose
-    # commands were reduced to router-only plumbing and every preset must now be
-    # self-sufficient. `parallel` in particular is not optional: llama-server defaults
-    # to n_slots = 4, which would silently quarter each slot's share of ctx-size.
+    # Runtime defaults, in the preset itself: compose args OVERRIDE models.ini rather than
+    # falling back to it, so the compose commands carry only router plumbing and every preset
+    # must be self-sufficient. `parallel` in particular is not optional: llama-server defaults to
+    # n_slots = 4, which would silently quarter each slot's share of ctx-size.
     fields["ngl"] = "999"
     fields["flash-attn"] = "on"
     fields["cache-type-k"] = "q8_0"

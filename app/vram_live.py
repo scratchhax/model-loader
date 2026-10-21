@@ -88,14 +88,11 @@ def _components(name: str, vendor: str, gpu_count: int,
     """Static per-load VRAM components for what this backend has loaded, or None when any
     input needed for an honest estimate is missing or contradictory.
 
-    `loaded_ids` is what the router says is resident RIGHT NOW. It has to be checked, because
-    everything here describes a SPAWN RECORD scraped from the log and those two can disagree:
-    telemetry ingests on a 20 s timer, so for the first seconds of a new model the newest
-    recorded spawn is still the previous one. Pairing a live measurement with the wrong
-    model's file does not degrade gracefully - it produces a confident, specific, wrong
-    answer. Observed: a dense 25 GB gemma fully resident on the cards, measured at 48.7 GB of
-    VRAM, costed against the 90.8 GB Flash-Next record that was 32 seconds older, and reported
-    as "60% of experts in system RAM" on a model that has no experts and spilled nothing.
+    `loaded_ids` is what the router says is resident RIGHT NOW, and it has to be checked:
+    everything here describes a SPAWN RECORD scraped from the log, and telemetry ingests on a
+    20 s timer, so for the first seconds of a new model the newest spawn is still the previous
+    one. Pairing a live measurement with the wrong model's file gives a confident, specific,
+    wrong answer rather than a vague one.
     """
     cfg = db.latest_server_config(name)
     argv = cfg.get("argv") or {}
@@ -188,20 +185,13 @@ def _components(name: str, vendor: str, gpu_count: int,
                 aux_gb += 7.0 * max(0, 1024 - 512) * layers * hidden / 1e9
         except OSError:
             pass
-    # A speculative draft head costs FAR more than its file. Measured 2026-10-04 on
-    # gemma-4-31B-it-Q6_K, tensor split, ctx 262144, ubatch 1024, same mmproj in both runs:
+    # A speculative draft head costs FAR more than its file: it runs its OWN context, so it
+    # allocates a SECOND compute buffer sized from the same ctx and ubatch as the target
+    # (measured per card on gemma-4-31B-it-Q6_K, tensor split, ctx 262144: 2735.29 MiB for the
+    # draft against 2735.32 for the target; 43.27 GiB without the draft, 49.43 with). Its own
+    # weights (382 MiB/card) and KV (425 MiB) are the small part.
     #
-    #     without draft   43.27 GiB      with draft   49.43 GiB      difference 6.16 GiB
-    #
-    # against the 0.56 GB this used to charge - eleven times under, and the single largest
-    # error in the whole meter. The buffer inventory says why: the draft runs its OWN context,
-    # so it allocates a SECOND compute buffer sized from the same ctx and ubatch as the target.
-    # Measured per card, 2735.29 MiB for the draft against 2735.32 for the target - identical.
-    # Its own weights (382.31 MiB/card) and KV (425.00) are the small part.
-    #
-    # The flag is `--model-draft`. This used to look for `--spec-draft-model`, which llama.cpp
-    # does not emit, so a draft head was charged NOTHING AT ALL - the bug behind the ~3 GB/card
-    # "other" residual that prompted the measurement.
+    # The flag is `--model-draft`; llama.cpp does not emit `--spec-draft-model`.
     draft_s = (argv.get("--model-draft") or argv.get("-md")
                or argv.get("--spec-draft-model") or "").strip()
     # What the head costs IN TOTAL, reported but never apportioned. The two halves land in
@@ -303,14 +293,9 @@ def draft_cost(name: str, gpu, loaded_ids: frozenset[str] | None = None) -> dict
 
     None when the running instance is not speculating. The second figure is the point: on a
     box that is VRAM-bound, the head is not paid for in gigabytes, it is paid for in CONTEXT.
-    Converting its cost at this model's own KV rate turns "6.2 GB" - a number nobody can judge
-    - into "94k of context", which is the trade actually being made and can be weighed against
-    the acceptance rate sitting next to it.
-
-    The head is far more than its file: it runs its own context and so allocates a SECOND
-    compute buffer sized from the same ctx and ubatch as the target. Measured on
-    gemma-4-31B-it-Q6_K, 43.27 GiB without against 49.43 GiB with - 6.16 GiB, of which the
-    weights were 382 MiB per card and the duplicate buffer 2735 MiB.
+    Converting its cost at this model's own KV rate turns "6.2 GB" into "94k of context", the
+    trade actually being made, to weigh against the acceptance rate beside it. (The head runs
+    its own context, so it costs a second compute buffer as well as its weights.)
     """
     if gpu is None or getattr(gpu, "gpu_count", 0) <= 0:
         return None
@@ -500,15 +485,10 @@ def tenants_only_per_card(cards: list,
                           foreign_by_card: dict[int, list[tuple[str, float]]]) -> dict[int, dict]:
     """Per-card meter built from MEASUREMENT ALONE: who else is on the card, and what is left.
 
-    This exists because breakdown() is all-or-nothing on the BACKEND's model, and it says None
-    for a long list of good reasons - no model loaded, one asleep, no spawn telemetry, an
-    offload it cannot cost. In every one of those cases the card falls back to a plain fill,
-    and a foreign tenant's VRAM goes unexplained even though it is the one quantity here that
-    was never estimated in the first place.
-
-    Observed 2026-10-04: router idle with nothing loaded, chatterbox-tts holding 5.88 GB of
-    card 0. The tenant table said "chatterbox-tts 5.88 GB" and the bar directly above it showed
-    an anonymous fill - two readouts on one screen disagreeing about the same card.
+    breakdown() is all-or-nothing on the BACKEND's model and says None for many good reasons (no
+    model loaded, one asleep, no spawn telemetry, an offload it cannot cost). A foreign tenant's
+    VRAM is measured, never estimated, so it is still shown then; otherwise the tenant table and
+    the bar above it disagree about the same card.
 
     So when the estimate cannot be drawn, draw what was measured. Every segment here is the
     kernel's own per-process figure; "other" is the remainder, which is honest because nothing
@@ -568,21 +548,17 @@ def per_card(vb: dict, cards: list,
       KV       -
 
     Weights and KV therefore share what is left of each card's measured usage, split by the
-    POOLED weights:KV ratio. That is an apportionment and is labelled as one, but it is a
-    defensible one: both scale with the number of layers a card holds, so a card with more
-    layers holds proportionally more of each. It beats the previous single
-    "weights + KV + compute" lump, which was honest but answered "is this card full" when the
-    question is "full of what".
+    POOLED weights:KV ratio. That is an apportionment and is labelled as one, but a defensible
+    one: both scale with the number of layers a card holds. It answers "full of what", not just
+    "is this card full".
 
     Each card's segments still sum to that card, and the free share stays measured.
 
     `foreign_by_card` is the fifth itemised cost and it is EXACT, measured per process and per
-    card by gpu_procs. It has to be subtracted before the apportionment, not merely drawn: the
+    card by gpu_procs. It is subtracted before the apportionment, not merely drawn: the
     apportionment splits each card's unexplained usage by how much of it there is, so a tenant
-    sitting entirely on one card used to be spread across both. Measured on this box with
-    chatterbox-tts holding 6.28 GB on card 0 and nothing on card 1, the strip reported "other
-    3.42 GB" and "other 2.58 GB" - the second of those describing a card the container had not
-    allocated a byte on, and both of them stealing from the weights figure beside them.
+    sitting entirely on one card would otherwise be spread across both and taken out of the
+    weights figures.
     """
     out: dict[int, dict] = {}
     if not vb or not cards:

@@ -109,11 +109,8 @@ async def _tree_entries(repo_id: str, revision: str = "main",
     """Every entry in a repo tree, following HF's cursor pagination to the end.
 
     HF serves 50 entries a page and hands back the rest behind a `Link: <...>; rel="next"`
-    header. A GGUF repo is routinely larger than that - unsloth publishes a dozen quants of
-    three shards each - so reading only the first page returns an arbitrary alphabetical slice
-    of it. This used to be implemented twice, and only one of the two paginated: the update
-    check saw page one, which is why gemma mmproj files resolved and Qwen3.8-Flash-Next's
-    UD-Q3_K_XL shards, further down the alphabet, looked as though they did not exist.
+    header. A GGUF repo is routinely larger than that (unsloth publishes a dozen quants of three
+    shards each), so reading only the first page returns an arbitrary alphabetical slice of it.
     """
     entries: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=30.0, headers=_auth_headers(), follow_redirects=True) as client:
@@ -339,11 +336,9 @@ async def repo_file_meta(repo_id: str, revision: str = "main") -> dict[str, dict
 def _match_repo_path(local_name: str, meta: dict[str, dict]) -> str:
     """The repo path a locally-stored file came from, or "".
 
-    These two are not the same string and the check used to compare them directly, so every
-    model downloaded since the subdir layout arrived scored "unknown" and no staleness was
-    ever evaluated for anything actually held. Downloads land under a subdir of OUR choosing -
-    `Qwen3.8-27B-UD-Q4_K_M/Qwen3.8-27B-UD-Q4_K_M.gguf` - while the repo may keep the file at
-    the top level, or under a quant directory of its own with a different name.
+    The two are not the same string: downloads land under a subdir of OUR choosing
+    (`Qwen3.8-27B-UD-Q4_K_M/Qwen3.8-27B-UD-Q4_K_M.gguf`) while the repo may keep the file at the
+    top level, or under a quant directory of its own with a different name.
 
     Exact path first, since a repo that does use subdirectories may hold the same basename in
     several of them; basename only as the fallback.

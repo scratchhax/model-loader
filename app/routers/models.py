@@ -245,8 +245,7 @@ async def _models_list_ctx(request: Request, snap, flash=None) -> dict:
     shapes = _shapes_for_files(snap)
     # What a section can DO is derived from its own config - GGUF header, its mmproj, its spec
     # profile - by the same helper the models.ini cards use. OpenWebUI's record is a copy of
-    # that and can lag or have never seen a section at all, which is exactly what happened to
-    # voice-cpu: its file showed image and audio, its own row showed an unreadable projector.
+    # that and can lag, or never have seen a section at all.
     try:
         section_caps = _section_caps(ini.list_sections())
     except Exception:  # noqa: BLE001 - an unreadable ini must not take the models page down

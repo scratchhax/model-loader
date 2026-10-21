@@ -19,9 +19,8 @@ from .stratactl import strata_load, strata_unload
 
 # Two inference engines cannot share these cards. A llama.cpp router with --models-max 1 holds
 # its model until something evicts it, and Strata sizes its expert cache against free VRAM at
-# startup, so whichever starts second gets the scraps - or, as measured on this box, dies on
-# "mtp: buffers do not fit (0 MiB of 32624 MiB VRAM free on this GPU)". Making them exclusive
-# is the only arrangement where either one gets the hardware it was configured for.
+# startup, so whichever starts second gets the scraps or dies ("mtp: buffers do not fit").
+# Making them exclusive is the only arrangement where either gets the hardware it was set up for.
 #
 # The switch stops every OTHER BACKEND that was given a GPU, plus any non-backend GPU tenant
 # that is actually holding VRAM right now.
@@ -29,9 +28,8 @@ from .stratactl import strata_load, strata_unload
 # The two halves have different tests for a reason. A backend is stopped even when it holds
 # nothing, because holding nothing is its idle state and the next request would take the cards
 # straight back. A tenant is stopped only when it is measurably in the way, because plenty of
-# containers are handed /dev/kfd and allocate nothing - gpu-monitor is one, and the first
-# version of this stopped it, SIGKILLed it when its shutdown ran past the grace period, and
-# left the box without its monitoring sidecar to free zero bytes.
+# containers are handed /dev/kfd and allocate nothing (gpu-monitor is one); stopping those frees
+# nothing and loses a service.
 
 # What the current switch is doing, for the panel to render. One at a time by construction -
 # the lock is held for the whole run, so a second request is rejected rather than interleaved.
@@ -91,21 +89,9 @@ def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
     """Poll one backend until it is actually serving. (ready, note).
 
     `docker start` returning is not "serving", and the gap is not small: Strata reads ~55 GB of
-    experts into RAM before its port opens - measured at 90 s here - and a llama router is 10-40 s
-    depending on the model. Reporting the switch done at `docker start` meant clicking the button,
-    seeing "done", finding nothing on the port and concluding it had not worked. That is exactly
-    what happened.
-
-    The question is per-engine, because "200" means different things. On llama it is /v1/models:
-    llama.cpp's /health returns 503 "Loading model" while loading (and curl does not fail on a
-    503, so a naive poll measures a model mid-load), while /v1/models only answers once the
-    router is up. On Strata it is /health, because /v1/models answers 200 with the model listed
-    as "unloaded" - a 200 there can mean "up and serving nothing", which is precisely the state a
-    POST /load passes through on its way to loaded. /health carries the one bool that settles it
-    ({"loaded": true}), and during a cold start the port is closed until the model is in, so the
-    same poll covers cold start and warm /load alike. On Maya it is /health with status "ok":
-    there is no load/unload pair, the port opens only once the model is in, and the statuses it
-    reports otherwise ("updating", "reloading") mean up but not taking requests.
+    experts into RAM before its port opens, and a llama router takes 10-40 s depending on the
+    model. What "serving" means per engine (which path, what a 200 must say) is
+    engine_registry.serving().
     """
     client = _docker_client()
     if client is None:
@@ -157,12 +143,9 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
     the whole reason this switch exists). Unload gives back the same VRAM and RAM in ~0.3 s, so
     the RELEASE is immediate and the container keeps its settings.
 
-    It does not make the way back quick. Measured 2026-10-15: a parked Strata asked to load
-    again took 104 s, against ~90 s for a cold container start. This docstring used to claim
-    "the way back costs seconds instead of a 90 s cold start", which was inferred from the page
-    cache staying warm and never measured - and the inference fails in exactly the case it was
-    written for, since the other engine reads its own 25 GB model in between and evicts that
-    cache. The trade is that a parked-but-running server can be woken by a stray request, so
+    It does not make the way back quick: a parked Strata asked to load again takes about as long
+    as a cold container start, because the other engine reads its own model in between and
+    evicts the page cache. A parked-but-running server can also be woken by a stray request, so
     hard remains the default and soft is what the checkbox asks for.
 
     `share` displaces nothing: it starts the engine's backends and leaves every other holder
@@ -223,14 +206,13 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
 
             # Wait for the DRIVER to release it, not merely for the process to exit. Strata
             # sizes its expert cache against free VRAM at startup and llama.cpp's own fitter
-            # does the same; starting the moment docker returns means reading a stale figure
-            # and silently getting a fraction of the card. Measured on this box, the drop is
-            # not instant after the process is gone.
+            # does the same, and the drop is not instant after the process is gone, so starting
+            # the moment docker returns reads a stale figure and gets a fraction of the card.
             #
             # Only when something was actually released. The drain asks "has the VRAM the
-            # switch is reclaiming come back", and share reclaims nothing - the other
-            # engine's 30+ GB is the point of the mode, so waiting for it to drop waits
-            # sixty seconds and then fails with "something outside docker is holding them".
+            # switch is reclaiming come back", and share reclaims nothing - the other engine's
+            # 30+ GB is the point of the mode, so waiting for it would wait sixty seconds and
+            # then fail.
             if not (plan_unload or plan_stop):
                 held = 0.0
             else:

@@ -572,9 +572,8 @@ class DownloadManager:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=req_headers) as client:
                 async with client.stream("GET", url) as resp:
                     if resp.status_code == 416 and start > 0:
-                        # 416 means the temp is BIGGER than the remote file - stale or
-                        # corrupt, not finished. It used to be taken as "complete" and
-                        # promoted, oversized, over the destination.
+                        # 416 means the temp is BIGGER than the remote file: stale or
+                        # corrupt, not finished, so it must never be promoted.
                         if attempt == 0:
                             job.temp_path.unlink(missing_ok=True)
                             job.downloaded_bytes = 0

@@ -21,11 +21,10 @@ _CTX_CANDIDATES = (
     294912, 327680, 360448, 393216, 425984, 458752, 491520, 524288,
     589824, 655360, 720896, 786432, 851968, 917504, 983040, 1048576,
 )
-# Every value above is a multiple of 4096 (most are multiples of 8192), which keeps them on
-# llama.cpp's internal block-alignment boundaries — the reason arbitrary values like 160000
-# behave badly. The upper range used to step by 16384, which was too coarse: a model that
-# already fits near its ceiling had only one or two reachable steps left, so the offload
-# frontier collapsed to two points and "Balanced" came out identical to "Fast".
+# Every value above is a multiple of 4096 (most of 8192), which keeps them on llama.cpp's
+# block-alignment boundaries; arbitrary values like 160000 behave badly. The upper range steps
+# finely enough that a model already near its ceiling keeps several reachable steps (at 16384
+# the frontier collapsed to two points and "Balanced" came out identical to "Fast").
 
 _CACHE_BYTES_PER_ELEM = {
     "": 2.0, "f16": 2.0, "bf16": 2.0, "f32": 4.0,
@@ -34,25 +33,14 @@ _CACHE_BYTES_PER_ELEM = {
 }
 
 _RESERVE_PER_GPU = 0.5   # CUDA runtime + driver context, per card.
-                         # This was 1.0 for a while, after Qwen3.8-27B at ctx=159744 loaded and
-                         # then OOMed on its first inference. The diagnosis at the time was
-                         # "bigger cuBLAS workspaces"; the real cause was the compute buffer,
-                         # which grows with ctx and was not in the budget at all - so a flat
-                         # reserve was the only lever available, and it had to be sized for the
-                         # worst ctx anyone might pick. compute_buffer_gb() now charges that
-                         # properly per context, so this is back to what it actually covers:
-                         # ~300 MB of CUDA context per card, plus slack. Measured with a model
-                         # loaded, the two cards carry ~0.3 GB each beyond model+KV+compute.
+                         # ~300 MB of runtime context per card plus slack (measured ~0.3 GB a
+                         # card beyond model+KV+compute). The compute buffer, which grows with
+                         # ctx, is charged separately by compute_buffer_gb().
 # Every key autoconfig has an opinion about. For each one it either SETS a value or wants the
-# key GONE — nothing here may survive a Fill untouched. The list is what makes "Fill form" honest:
-# Fill writes the keys present in `values` and clears the rest of this set, so a recommendation
-# cannot leave a stale placement pin behind and report success.
-#
-# This replaces a hand-maintained set that held only {cpu-moe, n-cpu-moe}. Because ngl and
-# tensor-split were missing from it, the panel reported "n-cpu-moe -> unset" while Fill silently
-# left ngl=999 and tensor-split=17,13 in place — Save then wrote them straight back and the user
-# saw no change at all. _domain_gaps() below guards against that returning: any key assigned but
-# not declared here is surfaced as a quirk rather than silently escaping.
+# key GONE; nothing here may survive a Fill untouched. Fill writes the keys present in `values`
+# and clears the rest of this set, so a recommendation cannot leave a stale placement pin (ngl,
+# tensor-split) behind and report success. _domain_gaps() surfaces any key assigned but not
+# declared here as a quirk rather than letting it escape silently.
 AUTOCONFIG_DOMAIN: frozenset[str] = frozenset({
     # placement / fit — the ones that decide whether the model loads
     "ngl", "tensor-split", "split-mode", "cpu-moe", "n-cpu-moe", "fit",
@@ -91,15 +79,10 @@ _OFF_VALUES: frozenset[str] = frozenset({"off", "false", "0", "no"})
 def _vision_enabled(requested: str, section: dict[str, str] | None) -> bool:
     """Whether a model's projector should be attached. Only consulted when one exists.
 
-    Vision used to be a side effect of a file sitting in the folder: an absent `mmproj =` fell
-    back to scanning for a projector, so there was no way to ask for a text-only config on a
-    model that shipped one. Fill would put the projector straight back, and the fit maths kept
-    reserving its VRAM - which on a 27B capped all-GPU context at 16K instead of ~115K.
-
     An explicit pick from the panel (`on` / `off`) wins. Otherwise the saved section decides: a
     projector named in `mmproj =` is an explicit yes, `mmproj-auto = off` with none named is an
-    explicit no. With neither, vision is on, so every existing section and every fresh download
-    behaves exactly as it did before this became a switch.
+    explicit no. With neither, vision is on. It is a choice at all because a projector costs VRAM
+    (on a 27B it capped all-GPU context at 16K instead of ~115K), so text-only must be possible.
     """
     pick = (requested or "").strip().lower()
     if pick in ("on", "off"):
@@ -118,14 +101,10 @@ _CACHE_RAM_HEADROOM_GB = 8.0    # left for the OS, the other containers and page
 _MODEL_OVERHEAD_SINGLE = 1.00  # Q_K_M loads at ~file size when everything's on one card
 _MODEL_OVERHEAD_SPLIT = 1.02   # +2% for layer-split imbalance (llama.cpp splits on layer
                                # boundaries, so one card usually carries a little more).
-                               # Was 1.08: the extra 6% was standing in for the unbudgeted
-                               # compute buffer. Ground truth from three models on this rig -
-                               # GPU-resident weights equal the file size to within a percent
-                               # (gemma-4-26B 15.77 GiB on GPU vs a 15.78 GiB file; gemma-4-12b
-                               # 6.62 vs 6.7; Qwen3.8-27B keeps ~0.7 GiB of embeddings on the
-                               # CPU and so uses LESS). Keeping 1.08 on top of an explicit
-                               # compute charge double-counts it, and cost Qwen3.8-27B 40K of
-                               # context that measurement shows it can hold.
+                               # Ground truth on this rig: GPU-resident weights equal the
+                               # file size to within a percent (gemma-4-26B 15.77 GiB on GPU vs
+                               # a 15.78 GiB file; gemma-4-12b 6.62 vs 6.7), so anything more
+                               # would double-count the compute buffer charged separately.
 _CACHE_DEFAULT = "q8_0"  # symmetric K/V; K stays q8, V could drop to q4 for +20% ctx (future preset)
 _SSM_STATE_BYTES = 4 * 1024 * 1024  # ~4 MB per SSM layer, derived from typical state_size×inner_size
 _CPU_LAYER_PENALTY = 20.0  # how much slower one CPU-resident DENSE layer is than a GPU one.
@@ -139,24 +118,15 @@ _CPU_LAYER_PENALTY = 20.0  # how much slower one CPU-resident DENSE layer is tha
                            # speed % as a well-calibrated estimate rather than a guarantee.
 _MMPROJ_VRAM_MULT = 1.0  # projector weights land in VRAM at ~their file size.
                          # Verified on Qwen3-VL-4B: mmproj-F32.gguf is 1.55 GB on disk and
-                         # llama-server allocates 1584.43 MiB for it. (An earlier 2.0 here was
-                         # a mis-calibration: that same 1584 MiB was compared against the 0.78 GB
-                         # BF16 projector in the directory rather than the F32 one actually
-                         # referenced by the preset.)
+                         # llama-server allocates 1584.43 MiB for it.
 _MMPROJ_COMPUTE_GB = 0.5  # modality-encoder scratch beyond the projector weights.
-                          # This is deliberately small. An earlier 1.8 here was calibrated off a
-                          # FAILED allocation line in a log (an attempt at a much larger ctx, on a
-                          # different model) and then multiplied by gpu_count — which reserved
-                          # 5.34 GB for a 0.87 GB projector and made a working model report
-                          # "doesn't fit at any context". Ground truth from a loaded
-                          # Qwen3.8-27B-OBLITERATED at ctx=130768: 22.63 GiB used total, of which
-                          # model+KV+projector accounts for ~20.96 GiB — so ALL remaining overhead,
-                          # both cards' CUDA contexts included, is ~1.67 GiB. _RESERVE_PER_GPU
-                          # already covers most of that.
+                          # Deliberately small: on a loaded Qwen3.8-27B at ctx=130768,
+                          # everything beyond model+KV+projector, both cards' contexts included,
+                          # came to ~1.67 GiB, most of which _RESERVE_PER_GPU already covers.
 
 
-# Compute buffers: llama.cpp's per-device scratch for one graph evaluation. Measured on this
-# rig (2x RTX 5070, layer split, flash-attn on, default ubatch 512), per card, in MiB:
+# Compute buffers: llama.cpp's per-device scratch for one graph evaluation. Per card, in MiB
+# (2x RTX 5070, layer split, flash-attn on, default ubatch 512):
 #
 #   ctx      gemma-4-26B (30L, 2816H)   Qwen3.8-27B (64L, 5120H)   gemma-4-12b
 #   32768    344                        377                        290
@@ -172,13 +142,9 @@ _MMPROJ_COMPUTE_GB = 0.5  # modality-encoder scratch beyond the projector weight
 # The intercept is small. gemma-4-12b sits lower (5.8) - sliding-window layers need less mask -
 # so taking the higher slope over-reserves slightly on those, which is the safe direction.
 #
-# Why this exists at all: before it, compute buffers were not in the budget, on the theory that
-# the overhead multiplier absorbed them. At small contexts it does. At 262144 gemma-4-26B wants
-# 2.1 GB PER CARD, which is 4.3 GB the fit table could not see - and it approved that context.
-# The model then loaded only because llama.cpp silently retried without pipeline parallelism and
-# squeezed into 1.3 GB, and it stopped loading at all the day another service parked 0.8 GB on
-# one card. Budgeting the number it ASKS for keeps pipeline parallelism intact rather than
-# quietly relying on the fallback.
+# It is budgeted rather than left to an overhead multiplier because at long contexts it is too
+# big to absorb (2.1 GB a card at 262144), and charging the size it ASKS for keeps pipeline
+# parallelism intact instead of quietly relying on llama.cpp's fallback.
 # Per backend, because the two stacks need not allocate alike - but measurement says they do.
 #
 # Qwen3.8-27B-Q4_K_M, per card, compute buffer in MiB:
@@ -188,14 +154,12 @@ _MMPROJ_COMPUTE_GB = 0.5  # modality-encoder scratch beyond the projector weight
 #   65536    633                  633
 #   131072   1145                 1145
 #
-# Identical, which is the useful result: the compute buffer is ggml's graph planning, sized from
-# the model shape and ubatch, not from the vendor's runtime. The fitted slope (7.81 MiB per 1K)
-# lands within 2.5% of the ROCm figures, and the per-card overhead beyond model+KV+compute
-# measured 0.43 GB on ROCm against the 0.5 GB _RESERVE_PER_GPU already charges.
+# Identical: the compute buffer is ggml's graph planning, sized from the model shape and ubatch,
+# not from the vendor's runtime. The per-card overhead beyond model+KV+compute measured 0.43 GB
+# on ROCm against the 0.5 GB _RESERVE_PER_GPU charges.
 #
-# The one number NOT confirmed on ROCm is the pipeline-parallelism fallback ratio: with 32 GB a
-# card, nothing came close to needing the retry, so 0.63 remains a CUDA measurement. It only
-# matters when a context is tight enough to trigger the fallback, which on 64 GB is rare.
+# The one number NOT confirmed on ROCm is the pipeline-parallelism fallback ratio (0.63, a CUDA
+# measurement); it only matters when a context is tight enough to trigger the fallback.
 _COMPUTE_REF_UBATCH = 512.0      # ubatch every slope below was measured at
 _COMPUTE_PROFILES = {
     # vendor: (base MiB, MiB per 1K ctx, no-pipeline-parallel fallback ratio, measured?)
@@ -228,7 +192,7 @@ def _compute_profile(vendor: str) -> tuple[float, float, float, bool]:
 
 
 # Tensor-parallel allocates a SMALLER per-card compute buffer than layer split, not a larger
-# one. Measured on the 2x R9700 (2026-10-04, ubatch 512, q8_0 KV), per card in MiB:
+# one. Per card in MiB on the 2x R9700 (ubatch 512, q8_0 KV):
 #
 #     ctx       Qwen3.8-27B            gemma-4-26B-A4B
 #               layer   tensor  ratio  layer   tensor  ratio
@@ -236,24 +200,16 @@ def _compute_profile(vendor: str) -> tuple[float, float, float, bool]:
 #      65536   633.13   400.28  0.632  600.32  379.30  0.632
 #     131072  1145.13   720.28  0.629 1112.32  699.30  0.629
 #
-# Two different architectures agreeing to three decimal places at every context, which is what
-# makes a flat multiplier defensible rather than a curve fit. The slope is the cleaner statement
-# of it: 8.0 MiB per 1K of context in layer mode against exactly 5.0 in tensor, so 0.625, with
-# the measured ratios landing slightly above that because the fixed floor shrinks by a little
-# less than the slope does.
+# Two architectures agreeing to three decimal places at every context is what makes a flat
+# multiplier defensible: 8.0 MiB per 1K of context in layer mode against 5.0 in tensor, 0.625,
+# the measured ratios slightly above it because the fixed floor shrinks a little less. (The
+# graph is split across both devices, so each card builds activations for its own shard.)
 #
-# Worth stating plainly because the intuition runs the other way: tensor-parallel adds a
-# cross-card reduction per layer and therefore "must" need more scratch. It does not. The graph
-# is split across both devices, so each card builds activations for its own shard.
-#
-# NOTE this is read off llama.cpp's `Meta()` buffer lines, which replace ROCm0/ROCm1 in tensor
-# mode and are PER CARD, not pooled - confirmed by the model buffer, 7338.51 MiB against layer's
-# 14674.45 across two cards, exactly half.
-# DELIBERATELY NOT applied to the fit budget, only to the live meter in vram_live. Charging
-# less would let autoconfig propose a LARGER context for a tensor section, and as of 2026-10-04
-# a tensor load's measured VRAM still exceeds the full estimate by ~3 GB per card from a source
-# nobody has identified (it shows up as the "other" segment). Until that residual is explained,
-# over-charging compute here is the conservative error and partly offsets it. Revisit together.
+# Read off llama.cpp's `Meta()` buffer lines, which replace ROCm0/ROCm1 in tensor mode and are
+# PER CARD, not pooled (the model buffer, 7338.51 MiB against layer's 14674.45, is exactly half).
+# DELIBERATELY NOT applied to the fit budget, only to the live meter in vram_live: a tensor
+# load's measured VRAM still exceeds the full estimate by ~3 GB per card from a source not yet
+# identified (the "other" segment), so over-charging compute here is the conservative error.
 _COMPUTE_TENSOR_SPLIT_MULT = 0.63
 
 
@@ -367,12 +323,10 @@ def kv_cache_bytes(arch: str, ctx: int, layers: int, kv_heads: int,
 
     # ---- Sliding-window attention, from what the model DECLARES ----
     #
-    # Earlier this was guessed: 1-in-6 layers global, a 4096-token window, and the same head
-    # dim for every layer. Gemma-4 declares all of it and none of the guesses match — window
-    # 512 not 4096, a 42-entry per-layer pattern rather than a ratio, SWA head dims of 256
-    # against 512 for global layers, and 18 layers that share another layer's KV and so
-    # allocate none of their own. Guessing over-estimated this model's cache by roughly an
-    # order of magnitude, which shows up as far less offered context than it can really do.
+    # Read, never guessed: Gemma-4 declares a 512-token window, a 42-entry per-layer pattern,
+    # SWA head dims of 256 against 512 for global layers, and 18 layers that share another
+    # layer's KV and allocate none of their own. A generic guess over-estimated its cache by
+    # about an order of magnitude.
     if sliding_window and sliding_window > 0:
         # Read every per-layer quantity off the SAME repeating period.
         #
@@ -536,10 +490,8 @@ class FitRow:
     total_gb: float          # model_gb + kv_gb + compute
     fits: bool
     free_gb: float           # what is left of the card after EVERYTHING below, the two
-                             # off-budget costs included. This was vram - total_gb, which
-                             # ignored reserve_gb and aux_gb and so overstated the headroom by
-                             # more than a gigabyte on a two-card box. The fit maths had always
-                             # charged them - see `budget` - only the report had not.
+                             # off-budget costs (reserve_gb, aux_gb) included, so the
+                             # panel's headroom matches what the fit maths charged.
     # The two costs taken off `budget` before any context is fitted, carried here so the panel
     # can account for every byte of the card rather than drawing a bar that does not add up.
     # Same reasoning as compute_gb above: an invisible cost is how a table ends up approving a
@@ -776,13 +728,10 @@ def _split_feasible(layers: int, n_cpu_moe: int, attention_gb: float,
                     pinned_gb: float, caps: list[float]) -> bool:
     """Does ANY contiguous per-card partition fit? One greedy pass.
 
-    The fit search asks only whether a configuration is placeable, never how to place it
-    best. Answering that with _partition_min_max ran a 64-step binary search per call, and
-    the search makes thousands of calls per page load — measured at 2239 for one model,
-    around nine million inner steps, which turned a snappy preset click into a visible wait.
-
-    Filling each card to capacity in order is optimal for CONTIGUOUS feasibility: taking
-    less on an earlier card can only leave more for a later one, never less.
+    The fit search asks only whether a configuration is placeable, never how to place it best,
+    and it makes thousands of calls per page load, so a binary search per call is too slow.
+    Filling each card to capacity in order is optimal for CONTIGUOUS feasibility: taking less on
+    an earlier card can only leave more for a later one, never less.
     """
     if gpu_count <= 1 or not caps:
         return True
@@ -879,20 +828,14 @@ def _find_fit(model_gb_full: float, kv_gb: float, budget_gb: float,
       * dense -> smallest number of whole layers moved to CPU via `ngl`
 
     For offload_kind == "ngl" the trailing int is the count of CPU-resident LAYERS, not experts.
-
-    The dense branch used to be missing entirely: anything whose weights+KV exceeded the budget
-    was reported as "doesn't fit on any backend", even though a dense model runs perfectly well
-    with some layers on the CPU — that is exactly what the Fast/Balanced/Long presets do. The
-    result was a red X and no options for, say, a 27 GB Q8 on 24 GB of VRAM, when the honest
-    answer is "yes, with N layers offloaded, and here is the speed cost".
+    A dense model larger than VRAM still runs with some layers on the CPU, which is what the
+    Fast/Balanced/Long presets offer.
 
     `card_ok(gpu_gb, kind, n)` is an optional second test, used on multi-GPU backends to check
-    that the per-card split of that configuration actually fits each card. It has to be part
-    of the SEARCH, not a filter applied afterwards: the pooled budget and the per-card limit
-    are satisfied at different offload levels, so the first configuration that clears the pool
-    may still overflow one card while offloading one more layer clears both. Rejecting that
-    first candidate instead of continuing produced a band of contexts reported as impossible
-    while both smaller AND larger ones fitted — non-monotonic, and wrong.
+    that the per-card split of that configuration actually fits each card. It is part of the
+    SEARCH, not a filter afterwards: the pooled budget and the per-card limit are satisfied at
+    different offload levels, so the first configuration that clears the pool may overflow one
+    card while one more offloaded layer clears both.
     """
     def _ok(gpu: float, kind: str, n: int) -> bool:
         if gpu + kv_gb > budget_gb:
@@ -1168,9 +1111,8 @@ def _presets_from_frontier(frontier: list[tuple[int, int, float, float]], backen
     # Long-ctx: max ctx (any ncm)
     long_entry = max(frontier, key=lambda f: (f[1], -f[0]))
 
-    # Balanced: a point STRICTLY between fast and long, so it is never a duplicate of
-    # either. Plain midpoint rounding collapses onto fast when the two are adjacent
-    # (e.g. a 2-point frontier gives (0+1)//2 == 0), which is why Balanced used to vanish.
+    # Balanced: a point STRICTLY between fast and long, so it is never a duplicate of either;
+    # plain midpoint rounding collapses onto fast when the two are adjacent ((0+1)//2 == 0).
     fi = frontier.index(fast_entry)
     li = frontier.index(long_entry)
     if fi > li: fi, li = li, fi
@@ -1248,16 +1190,13 @@ def _presets_from_ctx_only(plan: "BackendPlan", layers: int) -> list[PresetOptio
 def _looks_like_draft(filename: str, size_bytes: int | None = None) -> bool:
     """Heuristic: is this GGUF a speculative-decoding draft head?
 
-    Match on isolated tokens (`-draft-`, `-mtp-`, or the filename starting/ending with those)
-    so we don't false-match main models that have "noMTP" or "nodraft" in their name — those
-    are variants explicitly WITHOUT MTP support (e.g. `Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf`).
+    Match on isolated tokens (`-draft-`, `-mtp-`, or the filename starting/ending with those) so
+    we don't false-match main models with "noMTP" or "nodraft" in their name, the variants
+    explicitly WITHOUT MTP support (e.g. `Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf`).
 
-    The name alone is not enough, which cost real VRAM. `-MTP-` also appears in the name of full
-    quants that INCLUDE the MTP layers rather than consisting of them, e.g.
-    `Qwen3.8-27B-TurboFCFusion-...-NEO-CODER-MAX-MTP-IQ2_M.gguf`, an 11.3 GiB model. Calling that
-    a head had it excluded from getting its own section AND picked as its own draft model, so the
-    same file loaded twice: 42.2 GiB of VRAM measured for 11.3 GiB of weights. Pass size_bytes
-    wherever the path is at hand and the size settles it.
+    The name alone is not enough: `-MTP-` also appears in full quants that INCLUDE the MTP layers
+    (an 11.3 GiB `...-NEO-CODER-MAX-MTP-IQ2_M.gguf`), and calling one a head loads it twice. Pass
+    size_bytes wherever the path is at hand and the size settles it.
     """
     if size_bytes is not None and size_bytes >= _MAX_DRAFT_BYTES:
         return False
@@ -1577,16 +1516,10 @@ def analyze(*,
     # is only ever proposed for a section that does not exist yet, so clearing it and saving
     # stays cleared, and the ngram-* profiles need no draft model at all.
 
-    # Detect a companion mmproj (multimodal projector — vision, audio, or other) and
-    # reserve its real VRAM cost, rather than capping ctx at an arbitrary ceiling.
-    #
-    # A projector is not layer-split; it loads entirely onto the main GPU, so pooled-VRAM
-    # budgeting overshoots by its full size, and the modality encoder allocates scratch on
-    # top. An earlier revision handled that by clamping every multimodal model to 32K ctx,
-    # which was crude and wrong: it slashed a 262K-native MoE coder to 32K purely because a
-    # projector sat in its directory, and (because so many offload points then tied at the
-    # same clamped ctx) collapsed the MoE preset frontier to a single option.
-    # Reserving the measured cost instead lets the normal fit math decide.
+    # Detect a companion mmproj (multimodal projector: vision, audio, or other) and reserve its
+    # real VRAM cost rather than capping ctx. A projector is not layer-split; it loads entirely
+    # onto the main GPU and its encoder allocates scratch on top, so pooled budgeting overshoots
+    # by its full size. Reserving the measured cost lets the normal fit math decide.
     mmproj_rel = ""        # the projector this recommendation ATTACHES; empty when vision is off
     mmproj_gb = 0.0
     projector_rel = ""     # the projector that EXISTS for this model, attached or not
@@ -1613,15 +1546,10 @@ def analyze(*,
         mmproj_gb = mmproj_gb_override
         mmproj_rel = mmproj_rel or "(remote projector)"
 
-    # A draft head is small but it is real VRAM, resident for the whole session, and it is
-    # pinned to the main GPU exactly like the projector. Budget it the same way, or the fit
-    # maths approves a context that leaves no room for the head it is about to recommend.
-    # Only when it will actually LOAD, though. This used to charge any head found beside the
-    # weights, whether or not speculative decoding was on - so a section whose saved profile is
-    # Off, which never loads the head, still lost ~1.15x its size of main-GPU VRAM to it. On
-    # Qwen3.8-27B-Uncensored-noMTP that was a 1.56 GiB draft sitting in the folder, unused,
-    # holding text-only context at 90112 where the same maths gives more without it. Resolving
-    # the profile has to come first for that, so it now lives here rather than after sizing.
+    # A draft head is small but real VRAM, resident for the whole session and pinned to the main
+    # GPU like the projector, so it is budgeted the same way. Only when it will actually LOAD: a
+    # section whose profile is Off never loads the head, and charging it anyway costs text-only
+    # context. The profile has to be resolved first for that, so it lives here.
     mtp_rel = ""           # the head that EXISTS beside these weights
     if models_dir is not None and section_name:
         mtp_rel = (current_section or {}).get("spec-draft-model", "").strip() \
@@ -1732,18 +1660,14 @@ def analyze(*,
                      weight_gb: float | None = None) -> tuple[list[FitRow], int, tuple[str, int]]:
         rows: list[FitRow] = []
         gpu_count = max(1, int(b.get("gpu_count", 1)))
-        # Reserve scales per GPU (each CUDA context takes ~500 MB just to be initialized).
-        # The compute buffer is charged per context inside the loop below - it is the one
-        # term here that grows with ctx, so it cannot live in a flat reserve. (This replaces
-        # an earlier decision to leave it out entirely and let the overhead multiplier absorb
-        # it; that held until a model asked for 2.1 GB a card at 262144. See compute_buffer_gb.)
-        # The projector is pinned to the main GPU, not layer-split. Under an even layer
-        # split every GB pinned to one card costs gpu_count GB of usable POOLED capacity,
-        # because the matching share on the other cards cannot be used for it either.
-        # Measured: Qwen3-VL's 801 MB projector allocates ~1584 MiB on device 0, and its
-        # compute buffer (~1858 MiB) lands there too — so on 2 GPUs a naive pooled
-        # subtraction under-reserves by ~2x and the model OOMs on device 0 while the
-        # second card still shows free VRAM.
+        # Reserve scales per GPU (each runtime context takes ~500 MB just to be initialized).
+        # The compute buffer is charged per context inside the loop below: it is the one term
+        # here that grows with ctx, so it cannot live in a flat reserve (see compute_buffer_gb).
+        # The projector is pinned to the main GPU, not layer-split. Under an even layer split
+        # every GB pinned to one card costs gpu_count GB of usable POOLED capacity, because the
+        # matching share on the other cards cannot be used for it either. Measured: Qwen3-VL's
+        # 801 MB projector allocates ~1584 MiB on device 0 and its compute buffer (~1858 MiB)
+        # lands there too, so a naive pooled subtraction under-reserves by ~2x.
         budget = float(b["vram_gb"]) - _RESERVE_PER_GPU * gpu_count - mmproj_vram_gb
         # Per-card capacities for the single-device feasibility check below. Falls back to an
         # even division of the pool when the sampler has not reported individual cards.
@@ -1814,21 +1738,13 @@ def analyze(*,
 
     # Symmetric q8_0 K/V, always.
     #
-    # An earlier revision escalated V to q4_0 when the model could not reach its context
-    # ceiling, on the theory that V tolerates quantization better than K (K feeds QK^T
-    # through softmax, which amplifies error; V is only weighted-summed afterwards). The
-    # VRAM math was real — 2.1 GiB freed on Qwen3.8-27B at 131K — and short-prompt
-    # benchmarks looked fine, which is exactly why it shipped.
-    #
-    # It was a bad trade. There is no CUDA flash-attention kernel for a q4_0 V cache at
-    # this model's 256-wide head dim, so attention silently falls back to CPU. Measured
-    # on the same 4178-token prompt: q8_0 = 1737 tok/s prompt eval (2.4 s), q4_0 = 115
-    # tok/s (36.2 s). A 15x regression, invisible on short prompts because they do almost
-    # no attention work. Whether a given (quant, head_dim, arch) combination has a CUDA
-    # kernel is not something we can determine from GGUF metadata, so do not guess:
-    # trading a predictable slice of context for an unpredictable 15x cliff is not worth
-    # it. Users who want asymmetric KV can set `cache-type-v` by hand and benchmark a
-    # LONG prompt — short ones will not reveal the fallback.
+    # Not q4_0 V, although V tolerates quantization better than K and it would free real VRAM
+    # (2.1 GiB on Qwen3.8-27B at 131K): there is no CUDA flash-attention kernel for a q4_0 V
+    # cache at a 256-wide head dim, so attention silently falls back to CPU, 15x slower on a
+    # 4178-token prompt (1737 vs 115 tok/s) and invisible on short ones. Whether a (quant,
+    # head_dim, arch) combination has a kernel cannot be read from GGUF metadata, so do not
+    # guess. Users who want asymmetric KV can set `cache-type-v` by hand and benchmark a LONG
+    # prompt.
     v_cache_type = _CACHE_DEFAULT
     plans, per_backend_offload = _fit_all(bytes_per)
 
@@ -1854,11 +1770,8 @@ def analyze(*,
             recommended = sorted(top_plans, key=lambda p: p.vram_gb)[0]
         rec_ctx = recommended.max_ctx
 
-    # Resolved once, here, because three later blocks need it and each used to derive it for
-    # itself inside its own conditional. That worked only while at least one of those branches
-    # was guaranteed to run first; when a cheaper KV estimate meant a model no longer needed
-    # expert offload, the branch that happened to bind it was skipped and the one that read it
-    # was not, raising UnboundLocalError on a model that had rendered fine the day before.
+    # Resolved once, here, because three later blocks need it; deriving it inside one of their
+    # conditionals left it unbound whenever that branch was skipped.
     rec_backend = next((b for b in backends if b["name"] == recommended.name), None) if recommended else None
 
     # build values
@@ -1990,14 +1903,10 @@ def analyze(*,
         # If MoE + offload needed, compute the preset frontier on the recommended backend
         # and let the requested preset override ctx / ncm.
         is_moe_now2 = isinstance(experts, int) and experts > 1
-        # Not `and off_kind`. A MoE that needs no offload used to match neither this branch nor
-        # the dense one below, and fell out with no presets AND no frontier - which the template
-        # renders as a missing Priority section and no explanation for its absence, because the
-        # note that covers "too few tradeoffs to show" is itself guarded on having a frontier.
-        # The dense branch already states the rule this now follows: offer the tradeoff whenever
-        # the model fits at all, not only when it is forced, because choosing context over speed
-        # deliberately is the point. Nothing reached this state until a corrected KV estimate let
-        # gemma-4-26B-A4B fit without offload for the first time.
+        # Not `and off_kind`: a MoE that needs no offload still gets presets and a frontier, the
+        # rule the dense branch below follows. Offer the tradeoff whenever the model fits at all,
+        # because choosing context over speed deliberately is the point; without it the Priority
+        # section vanishes with no explanation.
         if is_moe_now2 and layers > 0:
             gpu_count = max(1, int((rec_backend or {}).get("gpu_count", 1)))
             overhead_mul = _MODEL_OVERHEAD_SPLIT if gpu_count > 1 else _MODEL_OVERHEAD_SINGLE
@@ -2119,29 +2028,19 @@ def analyze(*,
         if off_kind in ("cpu-moe", "n-cpu-moe"):
             # Placement is handed to llama.cpp's own fitter rather than pinned here.
             #
-            # Why: our estimate has to be exactly right or the model will not load, and on a
-            # model that massively overflows VRAM it is not. Measured on Qwen3.8-Flash-Next
-            # (177B, qwen4exp, 83.8 GiB of weights against 23.9 GiB of VRAM):
+            # Our estimate has to be exactly right or the model will not load, and on a model
+            # that massively overflows VRAM it is not: on Qwen3.8-Flash-Next (83.8 GiB of weights
+            # against 23.9 GiB of VRAM) we emitted tensor-split 40,8 where llama.cpp's fitter
+            # computes 20,29, and the load OOMed. Its compute buffer also grows with context
+            # (672 MiB at 32K, 3608 MiB at 256K on one card).
             #
-            #   * we emitted tensor-split 40,8; llama.cpp's fitter computes 20,29 - close to
-            #     inverted. The load OOMed on device 0, the card we had loaded 5:1.
-            #   * compute buffers are not in our budget at all. The note above the fit table
-            #     assumed "~1-2 GB absorbed by the overhead multiplier" and asked to revisit
-            #     "if we hit OOMs on models the picker approves". Measured here: 3.6 GiB on a
-            #     single card. Worse, it scales with CONTEXT, which our 8*ub*layers*hidden
-            #     rule does not model - the same card wanted 672 MiB at 32K and 3608 MiB at
-            #     256K.
+            # `--fit` adjusts only arguments that are UNSET, so pinning ngl/tensor-split
+            # disables it ("n_gpu_layers already set by user to 999, abort"). Leaving them unset
+            # lets llama-server size placement at load time, when it can see real free VRAM; on
+            # Flash-Next that ran 19.86 tok/s at the full 262144 ctx instead of an OOM.
             #
-            # `--fit` adjusts only arguments that are UNSET, so pinning ngl/tensor-split is
-            # what disabled it: the log says "n_gpu_layers already set by user to 999, abort".
-            # Leaving them unset lets llama-server size placement at load time, when it can
-            # see real free VRAM and knows its own allocator. Verified on Flash-Next: 19.86
-            # tok/s at the full 262144 ctx, versus a hard OOM from our pinned config, and the
-            # same speed our best hand-tuned n-cpu-moe reached at 1/8th the context.
-            #
-            # This is deliberately not architecture-specific. Qwen4 proper will land with
-            # another layout we have never seen, and llama.cpp will know how to size it before
-            # we do.
+            # Deliberately not architecture-specific: llama.cpp will know how to size a new
+            # layout before we do.
             values["fit"] = "on"
             values.pop("ngl", None)
             values.pop("cpu-moe", None)
@@ -2220,22 +2119,15 @@ def analyze(*,
         values["mmproj-offload"] = "on"
         # Bound how many tokens a single image may consume.
         #
-        # Vision models with dynamic resolution size their decode buffer from the image,
-        # so a big photo allocates far more VRAM than a small one — and that allocation
-        # happens at INFERENCE time, long after the fit math approved the load. The model
-        # therefore loads fine, serves text fine, and then dies the moment an image
-        # arrives, inside mtmd_helper_decode_image_chunk.
-        #
-        # Measured on Qwen3.8-27B-OBLITERATED (ctx 262144, ngl 43, ~400 MB free on the main
-        # GPU): 1536x1536 decoded fine, 2048x2048 hard-OOM'd and killed the instance. With
-        # image-max-tokens=1024 both 2048x2048 and 3072x2048 decode correctly and peak VRAM
-        # stops moving with resolution — the cap converts an unbounded, input-dependent
-        # spike into a fixed cost the fit math can actually live with.
+        # Vision models with dynamic resolution size their decode buffer from the image, at
+        # INFERENCE time, long after the fit math approved the load, so a large image can OOM a
+        # model that loads and serves text fine. With image-max-tokens=1024 peak VRAM stops
+        # moving with resolution (2048x2048 OOMed without it on a 27B with ~400 MB spare), which
+        # turns an input-dependent spike into a fixed cost the fit math can live with.
         #
         # 1024 is also the floor llama-server asks for on Qwen-VL ("require at minimum 1024
-        # image tokens to function correctly on grounding tasks"), so this pins images to
-        # that value rather than trading away accuracy. Raise it if you have spare VRAM and
-        # want finer detail on large images.
+        # image tokens to function correctly on grounding tasks"), so this costs no accuracy.
+        # Raise it if you have spare VRAM and want finer detail on large images.
         values["image-max-tokens"] = "1024"
 
         # ubatch-size MUST be at least image-max-tokens, or the model aborts on the first
@@ -2286,27 +2178,18 @@ def analyze(*,
     # Multi-GPU: be explicit about the split strategy rather than relying on the
     # container's CLI baseline to supply it.
     #
-    # TENSOR, not layer. Layer split runs the cards in SEQUENCE: card 0 computes its layers,
-    # hands the activations to card 1, card 1 finishes. Only one card is reading weights at any
-    # moment, so a decode step gets a single card's memory bandwidth no matter how many are
-    # fitted, with a PCIe hop and a pipeline bubble on top. Measured on this box with
-    # gemma-4-31B-it-Q6_K across two R9700s: 19.4 tok/s, which works out at roughly 230 GB/s
-    # effective against ~640 GB/s per card. Tensor split has both cards reading their own shard
-    # at the same time.
+    # TENSOR, not layer. Layer split runs the cards in SEQUENCE, so a decode step gets one card's
+    # memory bandwidth however many are fitted, plus a PCIe hop and a pipeline bubble
+    # (gemma-4-31B-Q6_K across two R9700s: ~230 GB/s effective against ~640 GB/s per card).
+    # Tensor split has both cards reading their own shard at once.
     #
-    # A speculative head is dropped wherever tensor is chosen, and that is the deliberate half
-    # of this rule rather than an oversight. llama.cpp cannot do both: under tensor split it
-    # reports "backend sampling not supported with SPLIT_MODE_TENSOR; using CPU", the MTP draft
-    # falls back to a CPU sampler, and the run then aborts inside the flash-attention kernel
-    # once the KV cache is long enough - observed three times as fattn.cu:762 killing gemma
-    # after a ~15k-token prefill. Speculation was buying about 2.13 tokens per forward pass;
-    # a second card's bandwidth is worth more, so tensor wins and MTP is what you fall back to
-    # on hardware where tensor is not available.
+    # A speculative head is dropped wherever tensor is chosen, deliberately: under tensor split
+    # llama.cpp falls back to a CPU sampler for the MTP draft and aborts inside the
+    # flash-attention kernel once the KV cache is long (fattn.cu, after a ~15k-token prefill).
+    # A second card's bandwidth is worth more than the ~2.1 tokens per pass speculation bought.
     #
     # Single-GPU and CPU backends never reach here, so they keep whatever the baseline gives
-    # them and may still use a spec head. That is what stops a GPU-tuned section from becoming
-    # unloadable on llama-cpu or llama-voice: SPLIT_MODE_TENSOR needs at least one device, and
-    # on a CPU-only build it is a fatal load, not a slow one.
+    # them and may still use a spec head; SPLIT_MODE_TENSOR on a CPU-only build is a fatal load.
     if recommended:
         _rb = next((b for b in backends if b["name"] == recommended.name), None)
         if int((_rb or {}).get("gpu_count", 1)) > 1:

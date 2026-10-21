@@ -1,18 +1,17 @@
 """Are the engines behind their upstreams?
 
-The engines on this box move fast - Maya shipped 1.1.17 and 1.1.18 the day after it was
-installed, Strata goes through point releases weekly, llama.cpp publishes several builds a day -
-and finding out used to mean someone remembering to look. This answers it in one place, per
-engine: what runs here, what upstream has, and where the runbook is. It never upgrades anything:
-each engine's upgrade has its own checks and its own rollback (see the runbooks), and an app that
-swapped engines by itself is how this box would lose a working one.
+The engines on this box move fast - several releases a week between them - so this answers it in
+one place, per engine: what runs here, what upstream has, and where the runbook is. It never
+upgrades anything: each engine's upgrade has its own checks and its own rollback (see the
+runbooks), and an app that swapped engines by itself is how this box would lose a working one.
 
 What "running here" means differs per engine, so it is read the way each one can tell it:
 
-  * Strata and Maya are built locally, one image per release, tagged `rocm7-v<version>`, with
-    `rocm7` pointing at the live one. The version is the tag sharing `rocm7`'s image id. When the
-    engine is serving, its own report wins (Strata's /metrics engine.version, Maya's /health
-    version), because that is what is actually loaded.
+  * Maya is built locally, one image per release, tagged `rocm7-v<version>`, with `rocm7`
+    pointing at the live one; the version is the tag sharing `rocm7`'s image id. Strata runs
+    upstream's published image, whose tag names its version. When either is serving, its own
+    report wins (Strata's /metrics engine.version, Maya's /health version), because that is what
+    is actually loaded.
   * llama.cpp is a pulled image. The meaningful question is "would a pull change it", so each
     local llama image's digest is compared with the registry's for the same tag, and the build it
     runs (llama's /props build_info, bNNNNN) against the newest release.
@@ -80,9 +79,8 @@ def latest_build(client: httpx.Client, repo: str) -> dict:
     """llama.cpp's newest bNNNNN build: {tag, published, url}.
 
     NOT /releases/latest. llama.cpp marks every bNNNNN build a pre-release, so GitHub's "latest
-    release" skips all of them and answered v0.7.0, a milestone tag days older than the build the
-    :server image actually tracks (measured 2026-10-20: latest = v0.7.0 of 10-15, newest build
-    b11756 of 10-20). The release list is newest first, builds included.
+    release" skips all of them and answers a milestone tag (v0.7.0) days older than the build the
+    :server image actually tracks. The release list is newest first, builds included.
     """
     r = client.get(f"https://api.github.com/repos/{repo}/releases", params={"per_page": 30})
     r.raise_for_status()

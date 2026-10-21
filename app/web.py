@@ -51,9 +51,9 @@ def _blocked_chip(reason: str, label: str = "Blocked: llama.cpp can&rsquo;t load
 def _form_note(ok: bool, msg: str, label: str = "saved") -> HTMLResponse:
     """The result of a settings form, swapped into the form's own `.form-note` span.
 
-    Settings forms used to swap themselves for a "Saved" chip, so the control was gone until a
-    reload. They now target `find .form-note` instead: the select keeps the value just saved,
-    and this says whether it took. A failure shows its reason, not just a tooltip.
+    Settings forms target `find .form-note` rather than replacing themselves, so the control
+    stays and the select keeps the value just saved; this says whether it took. A failure shows
+    its reason, not just a tooltip.
     """
     if ok:
         return HTMLResponse(f'<span class="text-[11px] text-emerald-700 dark:text-emerald-400" '
@@ -73,9 +73,8 @@ _BANNER_TONES = {
 def _banner(tone: str, text: str, prefix: str = "") -> HTMLResponse:
     """The one result banner, for every action that reports into a strip on its page.
 
-    About twenty routes used to build this div by hand in three colours, and several put an
-    error message, a container name or a model's reply into the page unescaped. `text` is
-    escaped here; `prefix` is trusted markup (a check mark, "Failed:").
+    `text` is escaped here, so an error message, a container name or a model's reply cannot
+    inject markup; `prefix` is trusted markup (a check mark, "Failed:").
     """
     return HTMLResponse(f'<div class="rounded-md {_BANNER_TONES[tone]} px-3 py-2 text-sm">'
                         f'{prefix}{html.escape(text)}</div>')

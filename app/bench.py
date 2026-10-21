@@ -41,23 +41,17 @@ import httpx
 from . import db, hw
 
 # Generation is capped so a run has a predictable duration and every variant does the same
-# amount of work. Without a cap, one model rambling to its context limit turns a five-minute
-# suite into an hour and makes the per-variant numbers incomparable.
-# Reasoning models spend a large part of their budget thinking before they answer, and a cap
-# that runs out mid-thought measures only how fast a model thinks - never whether it can write
-# the code or the prose the prompt was asking for.
+# amount of work; uncapped, one model rambling to its context limit makes the numbers
+# incomparable. Reasoning models spend much of their budget thinking first, and a cap that runs
+# out mid-thought measures only how fast a model thinks, never whether it can write the answer.
 #
 # Measured against the seeded prompts, letting both local models run to a natural stop:
 #
 #   gemma-4-E4B   coding 1376 (406 thinking)   reasoning 2394 (1247 thinking)
 #   gemma-4-12b   coding 1500 (716 thinking)   reasoning 2115 (1292 thinking)
 #
-# So 512 truncated three prompts out of four and 1024 would still have cut the two hardest.
-# 3072 clears the worst observed case with room to spare.
-#
-# Raising the cap costs less time than it looks: a cap is only paid when it is reached, and
-# these finish on their own between 550 and 2400 tokens. What it does end is every request
-# costing exactly 512 tokens because every request was being cut off.
+# 3072 clears the worst observed case with room to spare, and costs less time than it looks: a
+# cap is only paid when it is reached, and these finish on their own at 550-2400 tokens.
 DEFAULT_MAX_TOKENS = 3072
 
 # Upper bound accepted from the form. Kept here so the template can render it rather than
@@ -311,15 +305,13 @@ def _read_load_ms(container: str, alias: str) -> float | None:
         return None
 
     from . import telemetry
-    # The router words this two ways, and only one of them was matched before:
+    # The router words this two ways:
     #
     #   free slot : "ensure_model: model name=X is not loaded, loading..."
     #   eviction  : "ensure_model: evicting idle LRU name=OLD to make room for name=X"
     #               "ensure_model: waiting until model name=X is fully loaded..."  (repeats)
     #
-    # At --models-max 1 every model after the first arrives by eviction, so matching only the
-    # free-slot phrasing meant load time was never measured for them - it returned None for
-    # every cold variant ever recorded.
+    # At --models-max 1 every model after the first arrives by eviction, so both are matched.
     starts = (
         f"ensure_model: model name={alias} is not loaded",
         f"ensure_model: waiting until model name={alias} is fully loaded",
@@ -386,11 +378,9 @@ def start(*, backend: str, aliases: list[str], prompt_ids: list[int],
     with _LOCK:
         if _STATE.active:
             return False, "a benchmark is already running"
-        # Claim the slot inside the SAME lock that tested it. Testing and claiming used to sit
-        # in separate blocks with a docker inspect and a sqlite write between them - tens of
-        # milliseconds in which a double-click, a second tab, or another client could both see
-        # idle, both spawn a worker, and have the second overwrite the first's state, leaving
-        # an orphan thread and a run row stuck at "running".
+        # Claim the slot inside the SAME lock that tested it: with a docker inspect and a sqlite
+        # write between test and claim, a double-click or a second tab could both see idle and
+        # both spawn a worker, leaving an orphan thread and a run row stuck at "running".
         _STATE = JobState(status="starting", backend=backend,
                           total=len(aliases) * len(prompts) * reps, started_at=started)
 

@@ -129,11 +129,9 @@ def _strata_pin_state(backends) -> dict | None:
     # from a container that does. Any GPU-bearing backend will answer, Strata included.
     cands = [x.name for x in backends if x.status == "running" and x.vendor in ("rocm", "cuda")]
     n = strata_engine.card_count(tuple(cands))
-    # The choices, as the values the form posts. Single cards first, then the split - which is
-    # offered rather than recommended: upstream measured it LOSING on this exact pair, because
-    # one 32 GB R9700 already holds every expert and the split only pays when no single card
-    # does. Offering it anyway because that is a claim worth checking on hardware whose memory
-    # bandwidth is half the box it was measured on.
+    # The choices, as the values the form posts. Single cards first, then the split, which is
+    # offered rather than recommended: a split only pays when no single card holds the experts
+    # the model needs (compare the engine's ranked pairs with its expert cache slots).
     choices = [{"value": str(i), "label": f"card {i}"} for i in range(n)]
     if n > 1:
         split = ",".join(str(i) for i in range(n - 1, -1, -1))   # highest first = main card
@@ -144,11 +142,9 @@ def _strata_pin_state(backends) -> dict | None:
     return {
         "backend": b.name,
         "file": strata_engine.read_pin(),
-        # The file IS the live pin while running: the documented entry point sources it on
-        # every start, so any restart applies it, while docker inspect keeps reporting the
-        # create-time environment until a recreate. (Measured: a re-pinned engine ran on
-        # one card while its baked env still said 1,0 - showing that as "live" made the
-        # card claim a restart was needed forever.)
+        # The file IS the live pin while running: the entry point sources it on every start,
+        # so any restart applies it, while docker inspect keeps reporting the create-time
+        # environment until a recreate.
         "live": strata_engine.read_pin() if b.status == "running" else "",
         "choices": choices,
         "running": b.status == "running",
@@ -300,16 +296,12 @@ async def containers_openwebui_filter(request: Request) -> HTMLResponse:
 
 @router.post("/models/redownload", response_class=HTMLResponse)
 async def models_redownload(name: str = Form(...)) -> HTMLResponse:
-    """Queue a fresh copy of every part of one model from the repo it came from.
+    """Queue a fresh copy of every part of one model from the repo it came from (the stale chip).
 
-    The stale chip used to be a span, so the page could tell you a model was out of date and
-    then offer nothing to do about it. This is what the chip posts to.
-
-    It re-downloads the parts the update check actually resolved - local path to repo path,
-    one row per shard - rather than guessing a repo layout, and leaves the existing files in
-    place until each download finishes: the downloader writes to a temp file and os.replace()s
-    it, so a model that is loaded right now keeps serving from the old inode until it is
-    reloaded.
+    It re-downloads the parts the update check actually resolved - local path to repo path, one
+    row per shard - rather than guessing a repo layout, and leaves the existing files in place
+    until each download finishes: the downloader writes to a temp file and os.replace()s it, so
+    a model that is loaded right now keeps serving from the old inode until it is reloaded.
     """
     snap = services.snapshot_models_dir()
     g = next((e for e in snap.ggufs if e.display_name == name), None)
@@ -440,18 +432,15 @@ def engines_switch_state() -> dict:
 def engines_activate(engine: str, soft: str = Form(""), share: str = Form("")) -> HTMLResponse:
     """Hand the cards to one engine: release everything else holding a GPU, then start it.
 
-    This exists because the two engines here cannot share the hardware and the only way to
-    make one let go was an ssh session. A control that needs a terminal is not a control, and
-    a llama router at --models-max 1 has no unload endpoint on this build - stopping the
-    container is the only thing that makes it give the cards back.
+    The engines here cannot share the hardware, and a llama router at --models-max 1 has no
+    unload endpoint on this build, so stopping the container is the only thing that makes it
+    give the cards back.
 
     `soft` (the checkbox on the Engine row) asks backends that support it to unload instead:
     Strata gives the same VRAM and RAM back in ~0.3 s and keeps its container and settings. It
-    does NOT make the return trip quick - measured at 104 s on 2026-10-15, no better than a
-    cold start, because the other engine reads its own model in between and evicts the page
-    cache the old claim here assumed would still be warm. Hard remains the default because a
-    parked server can still be woken by a stray request, and "who owns the cards" deserves an
-    answer that cannot change its mind.
+    does NOT make the return trip quick (about as long as a cold start). Hard remains the
+    default because a parked server can still be woken by a stray request, and "who owns the
+    cards" deserves an answer that cannot change its mind.
 
     `share` (the Share button, offered only when a running engine demonstrably holds a
     strict subset of the cards) starts this engine and displaces nothing - the cards are

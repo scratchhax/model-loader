@@ -52,10 +52,9 @@ def _router_conversations(since: float = 0.0, limit: int = 50) -> list[dict]:
     prefix hash is what makes these questions answerable at all.
     """
     with db._conn() as c:
-        # engine and model come from the conversation's LATEST row, not from MAX() of each.
-        # Independent aggregates pick independently: a conversation that hit Strata and llama
-        # reported MAX(engine)="strata" with MAX(model)="wheatley-voice" - a pair that never
-        # happened, and which read as Strata having loaded a voice model.
+        # engine and model come from the conversation's LATEST row, not from MAX() of each:
+        # independent aggregates pick independently and can pair an engine with a model it
+        # never served.
         return [dict(r) for r in c.execute(
             "SELECT conv, COUNT(*) AS turns, MAX(ts) AS last_ts, "
             "       SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, "

@@ -94,12 +94,9 @@ class LlamaBackend:
     def load_failed_current(self) -> bool:
         """Is the load failure something to act on now, or history?
 
-        Current for FAILURE_FRESH_S after it happened, history after that - still shown on the
-        Containers page, dimmed, with its age, never as a red alarm.
-
-        Not "current while the backend holds nothing", which was the first version: an idle
-        router at --models-max 1 holds nothing most of the time, so a five-day-old failure on
-        idle llama-voice stayed red exactly as before.
+        Current for FAILURE_FRESH_S after it happened, history after that: still shown on the
+        Containers page, dimmed, with its age, never as a red alarm. (Not "current while the
+        backend holds nothing": an idle router at --models-max 1 holds nothing most of the time.)
         """
         return bool(self.load_failed) and self.load_failed_age < FAILURE_FRESH_S
 
@@ -136,10 +133,8 @@ def _parse_started_at(iso: str) -> tuple[str, str]:
 def _extract_ports(attrs: dict) -> tuple[list[str], int | None]:
     """Return (['8082->8080/tcp'], 8080).
 
-    The internal port is one that ACTUALLY has a host binding. Multi-port
-    containers used to get whichever port docker enumerated last - including an
-    unbound one - and the probes then targeted a closed port and reported
-    "nothing loaded" for a server that was fine.
+    The internal port is one that ACTUALLY has a host binding, not whichever port docker
+    enumerates last: probing an unbound port reports "nothing loaded" for a server that is fine.
     """
     ports_map = (attrs.get("NetworkSettings") or {}).get("Ports") or {}
     result: list[str] = []
@@ -225,17 +220,15 @@ def browser_endpoints(browser_host: str) -> list[dict]:
 def _load_failure(status: dict) -> tuple[bool, int | None]:
     """(failed, exit_code) for one model's /v1/models status object.
 
-    Measured on this llama.cpp build by loading a section whose model file does not exist:
+    What this llama.cpp build reports for a section whose model file does not exist:
 
         before the attempt : {"value": "unloaded"}
         after it failed    : {"value": "unloaded", "exit_code": 1, "failed": true}
 
     There is no distinct error `value` and no message; the model returns to unloaded and gains a
     flag, which persists. A model evicted normally reads plain {"value": "unloaded"} with neither
-    key, so the flag is specific to failure and an ordinary model swap never trips it. The check
-    this replaced looked for an error in `value`, which this router never sends, so the dashboard
-    alarm could not fire. A non-zero exit code alone is also treated as a failure, since a clean
-    stop leaves no exit code at all.
+    key, so the flag is specific to failure and an ordinary model swap never trips it. A non-zero
+    exit code alone is also treated as a failure, since a clean stop leaves no exit code at all.
     """
     raw = status.get("exit_code")
     try:
@@ -250,41 +243,28 @@ async def _probe_loaded_model(
 ) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
     """(loaded_model_csv, probe_error, load_failed, loading_model, sleeping_model, unloaded_model).
 
-    loaded_model  — comma list of ids whose status is 'loaded'.
-    probe_error   — a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
-    load_failed   — the first model whose last load failed, as "name (exit N)"; None otherwise.
-                    The only field the dashboard alarm keys off: a real failure, not the normal
-                    unloaded state. See _load_failure for what the router actually reports.
-    loading_model — the model the router is bringing up RIGHT NOW, or None.
-    sleeping_model — a model held under --sleep-idle-seconds: the server still owns it and will
-                    reload it on the next request, but its VRAM is released. Measured: 50.1 GB
-                    awake, 7.3 GB asleep on this box.
-    unloaded_model — a single-model server (Strata) whose port answers while its one model says
-                    "unloaded": the VRAM is free and a request - or POST /load - brings it back
-                    in seconds, because the model files stay in the OS page cache. Only set when
-                    the server lists EXACTLY ONE model and that one says unloaded. A llama router
-                    lists every models.ini section that way, and for it "N configured, none
-                    loaded" is the honest note - a parked Strata and an idle router are different
-                    states and only one of them is one button away from serving.
+    loaded_model   - comma list of ids whose status is 'loaded'.
+    probe_error    - a problem talking to the endpoint (HTTP/JSON), or an idle-state note.
+    load_failed    - the first model whose last load failed, as "name (exit N)"; None otherwise.
+                     The only field the dashboard alarm keys off: a real failure, not the normal
+                     unloaded state. See _load_failure for what the router actually reports.
+    loading_model  - the model the router is bringing up RIGHT NOW, or None. During a swap
+                     NOTHING reports as loaded (the outgoing model flips straight to 'unloaded',
+                     the incoming one sits on 'loading' for 10-40 s), so without this a swap
+                     looks exactly like an idle box.
+    sleeping_model - a model held under --sleep-idle-seconds: the server still owns it and will
+                     reload it on the next request, but its VRAM is released.
+    unloaded_model - a single-model server (Strata) whose port answers while its one model says
+                     "unloaded": the VRAM is free and a request - or POST /load - brings it back.
+                     Only set when the server lists EXACTLY ONE model and that one says
+                     unloaded. A llama router lists every models.ini section that way, and for it
+                     "N configured, none loaded" is the honest note - a parked Strata and an idle
+                     router are different states and only one is one button away from serving.
 
-    sleeping is kept OUT of loaded_model on purpose, and it is not a stylistic choice. Callers
-    treat loaded_model as "there is something here worth probing", and the probe is /slots -
-    which both resets the idle timer and wakes a sleeper. Folding the two together would mean
-    the overview page, polling every 500 ms, silently prevented any model from ever sleeping
-    and woke the one that already had. Display and liveness have to stay separate fields.
-
-    The last of those is why this function was wrong for as long as it has existed. Measured on
-    b11206 by polling this endpoint at 120 ms through a real swap:
-
-        0.00  gemma-4-31B-it-Q6_K=loaded
-        1.11  Qwen3.8-27B-UD-Q4_K_M=loading
-        10.51 Qwen3.8-27B-UD-Q4_K_M=loaded
-
-    The outgoing model flips straight to 'unloaded' and the incoming one sits on 'loading', so
-    for the whole window NOTHING reports as loaded. Collecting only 'loaded' therefore made a
-    model swap indistinguishable from an idle box, and the overview said "nothing loaded" for
-    the entire load - 9.6 s on a 27B, 40 s on gemma-4-31B at Q6_K. The status was always on the
-    wire; it was being thrown away here.
+    sleeping is kept OUT of loaded_model on purpose. Callers treat loaded_model as "there is
+    something here worth probing", and the probe is /slots, which both resets the idle timer and
+    wakes a sleeper: folding the two together would stop any model from ever sleeping while the
+    overview is open. Display and liveness have to stay separate fields.
     """
     if internal_port is None:
         return None, None, None, None, None, None
@@ -378,10 +358,9 @@ def _engine_label(c) -> str:
     return str(labels.get("ai-lab.engine") or "").strip().lower()
 
 
-# One discovery, reused for this long by every caller in every thread. A single GPU-strip build
-# asked for it five times (and _effective_container_names four more), each a docker list that
-# inspects every container: 211 docker API calls per strip, polled every second, and the strip
-# took 2-3 s to answer a 1 s poll (measured 2026-10-21). Two seconds is shorter than any start.
+# One discovery, reused for this long by every caller in every thread: a GPU-strip build alone
+# asked for it nine times, each a docker list that inspects every container. Two seconds is
+# shorter than any start.
 _DISCOVER_TTL_S = 2.0
 _discover_cache: tuple[float, list[dict]] | None = None
 _discover_lock = threading.Lock()
@@ -588,11 +567,10 @@ _EXIT_LINE = "exited with status"
 def _failure_time_from_log(backend: str, failure: str) -> float | None:
     """When the failure actually happened, from llama.cpp's own log line, or None.
 
-    A failure is first SEEN whenever this app first probes after it - a deploy, a restart - which
-    can be days late: llama-voice's gemma-4-31B failure happened 2026-10-15 18:34 and was first
-    "seen" five days later. The router logs `instance name=<model> exited with status N` with a
-    docker timestamp, so the first sighting is dated from that where it exists. Read once per
-    new failure, never on the steady-state path.
+    A failure is first SEEN whenever this app first probes after it (a deploy, a restart), which
+    can be days late. The router logs `instance name=<model> exited with status N` with a docker
+    timestamp, so the first sighting is dated from that where it exists. Read once per new
+    failure, never on the steady-state path.
     """
     from datetime import datetime
     model = failure.split(" (exit", 1)[0]

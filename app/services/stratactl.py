@@ -18,17 +18,14 @@ from .gpu import gpu_holders
 # ---------- Strata load control ----------
 
 # Strata's server keeps its model between two states the rest of this app has no word for:
-# loaded, and parked - port open, VRAM free, model files PERHAPS still in the OS page cache.
-# POST /unload moves it to parked in ~0.3 s and gives back BOTH the VRAM and the pinned expert
-# arena; POST /load brings it back, and blocks until the model answers - so the caller either
-# waits on it or polls /health, never a browser request.
+# loaded, and parked - port open, VRAM free, model files perhaps still in the OS page cache.
+# POST /unload moves it to parked and gives back BOTH the VRAM and the pinned expert arena;
+# POST /load brings it back, and blocks until the model answers - so the caller either waits on
+# it or polls /health, never a browser request.
 #
-# Parked is cheap to ENTER and NOT cheap to leave. A /load after an engine swap was measured at
-# 104 s on 2026-10-15, against the ~90 s a cold container start costs - no saving at all. An
-# earlier version of this comment claimed parked was "seconds from serving again"; that was
-# reasoning from a warm page cache, never a measurement, and it does not survive the situation
-# it was written for, because the other engine reads its own 25 GB model in between and evicts
-# the cache the argument depended on.
+# Parked is cheap to ENTER and NOT cheap to leave: a /load after an engine swap takes about as
+# long as a cold container start (~100 s), because the other engine reads its own model in
+# between and evicts the page cache.
 #
 # The Content-Type is not decoration: the server rejects anything else on these two paths
 # (415) as a CSRF guard, and checks Origin for the same reason - a plain form POST from any
@@ -46,10 +43,9 @@ _strata_metrics_cache: dict[str, tuple[float, "dict | None"]] = {}
 def strata_metrics(name: str) -> dict | None:
     """GET /metrics as a dict, cached for 2 seconds; None when it does not answer.
 
-    The speedometer used to scrape Strata's log because that was the only place the rates
-    lived. /metrics carries the same numbers as data - tok_s while generating,
-    decode_tok_s and hit_rate for the last request, a monotonic completed count - and
-    unlike a log regex it cannot drift out of date when the log format moves.
+    The same rates the log carries, as data: tok_s while generating, decode_tok_s and hit_rate
+    for the last request, a monotonic completed count. Unlike a log regex it cannot drift out of
+    date when the log format moves.
     """
     now = time.time()
     t, val = _strata_metrics_cache.get(name, (0.0, None))
@@ -137,11 +133,9 @@ def _strata_control(name: str, path: str, timeout: float) -> tuple[bool, str]:
 
 _TIMED_OUT = "timed out"
 
-# How long /unload may take to ANSWER. It used to be 10 s on the belief that an unload takes
-# ~0.3 s. It does not always: on 2026-10-20 a park of the UD-IQ4_XS pack at 262K context ran
-# past 10 s and still succeeded - /health said loaded:false and both cards were back to 60 MB -
-# while the Park button reported "Failed: .../unload: timed out", and the engine switch, which
-# calls this same function, would have aborted a perfectly good switch on it.
+# How long /unload may take to ANSWER. Not ~0.3 s: parking a large pack at a 262K context can
+# run past 10 s and still succeed, and a short timeout reported a good park (and aborted a good
+# engine switch) as a failure.
 _UNLOAD_TIMEOUT_S = 60.0
 # After a timeout, how long to watch /health for the park to land before calling it a failure.
 _UNLOAD_CONFIRM_S = 60.0
@@ -229,12 +223,10 @@ def strata_held_cards() -> tuple[int, ...]:
     """The cards a RUNNING Strata backend holds, per the pin file. () when no Strata runs,
     or it runs unpinned.
 
-    The file, not the container's baked environment: the documented entry point sources
-    this file on every start, so after any restart the file is what the process is on,
-    while docker inspect keeps reporting create-time values until the container is
-    recreated. (Measured on this box: a re-pinned engine held one card while its baked env
-    still said 1,0.) Empty on any failure - whole cards are the conservative answer when
-    the truth is unknown, and it is the answer the app gave before Strata existed at all.
+    The file, not the container's baked environment: the entry point sources this file on every
+    start, so after any restart the file is what the process is on, while docker inspect keeps
+    reporting create-time values until the container is recreated. Empty on any failure: whole
+    cards are the conservative answer when the truth is unknown.
     """
     try:
         client = _docker_client()
@@ -388,23 +380,22 @@ def vram_fit_chips(size_bytes: int, summary: dict | None = None) -> list[dict]:
 
     verdict is one of {fits, tight, oom, streams, impossible}.
 
-    `oom` and `impossible` are genuinely different answers and must not look alike. `oom`
-    means "not on the GPU alone" — offload moves layers into system RAM and it runs, slower.
-    `impossible` means the model exceeds VRAM **plus** RAM, so there is nowhere for those
-    layers to go and no setting rescues it. Rendering both as a red cross against a backend
-    name tells the user the GPU is the constraint, when for `impossible` the machine is.
+    `oom` and `impossible` are genuinely different answers and must not look alike. `oom` means
+    "not on the GPU alone": offload moves layers into system RAM and it runs, slower.
+    `impossible` means the model exceeds VRAM **plus** RAM, so there is nowhere for those layers
+    to go and no setting rescues it. Rendering both as a red cross against a backend name tells
+    the user the GPU is the constraint, when for `impossible` the machine is.
 
     An impossible model returns a SINGLE machine-level chip rather than one per backend,
     because naming backends implies picking a different one would help.
 
-    `summary` is the repo's GGUF header (optional — gated repos and header-fetch failures
-    fall back to size-only verdicts). It exists for one question the size cannot answer:
-    is this a mixture-of-experts model on Strata? Strata's design mode is to keep attention
-    and the hot experts resident and STREAM the routed experts from host RAM, so an MoE
-    larger than VRAM is not an offload-candidate-slower — it is the normal case. Measured
-    on this box: a 78.1 GiB IQ3_S Flash-Next running on Strata at ~120 tok/s while the
-    size-only chip called it oom against 63.7 GiB of VRAM. Dense models keep the VRAM-only
-    verdicts on every engine, because for them there is nothing to stream.
+    `summary` is the repo's GGUF header (optional: gated repos and header-fetch failures fall
+    back to size-only verdicts). It answers the one question size cannot: is this a
+    mixture-of-experts model on Strata? Strata keeps attention and the hot experts resident and
+    STREAMS the routed experts from host RAM, so an MoE larger than VRAM is its normal case, not
+    an offload candidate (an IQ3_S Flash-Next well over VRAM runs at full speed there). Dense
+    models keep the VRAM-only verdicts on every engine, because for them there is nothing to
+    stream.
     """
     from .. import hw
     gb = size_bytes / (1024 ** 3)

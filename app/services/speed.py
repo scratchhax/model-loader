@@ -28,17 +28,13 @@ class SlotSpeed:
     ctx_total: int = 0         # this slot's share of the KV pool (ctx-size / parallel)
     ctx_cached: int = 0        # of ctx_used, how many came from cache
     prefill_pct: int = 0       # progress through this slot's prompt, 0-100
-    # The numerator and denominator that percentage came from. A bare percentage cannot tell a
-    # 400-token prompt from an 80,000-token one, and those take 0.3 s and 70 s respectively on
-    # this box - the difference between "it is about to answer" and "go and get a coffee".
+    # The numerator and denominator behind that percentage: a bare percentage cannot tell a
+    # 400-token prompt (under a second) from an 80,000-token one (over a minute).
     prefill_done: int = 0      # prompt tokens read so far, cache hits included
     prefill_total: int = 0     # the whole prompt this slot is working through
-    # The prompt this slot's CURRENT task actually arrived with: cache hits plus processed.
-    # Deliberately not n_prompt_tokens, which keeps growing while the model generates - it is
-    # the slot's whole context, not the prompt. Dividing the (frozen) cache count by the
-    # (growing) context made a perfectly cached conversation appear to shed cache as it
-    # answered: measured on one task, n_prompt_tokens ran 47,626 -> 51,042 over 90 s while
-    # n_prompt_tokens_processed sat still at 46,844.
+    # The prompt this slot's CURRENT task arrived with: cache hits plus processed. Not
+    # n_prompt_tokens, which keeps growing while the model generates (it is the slot's whole
+    # context), so a cache ratio taken against it would shrink as the answer is written.
     prompt_tokens: int = 0
     task_id: int | None = None
 
@@ -55,12 +51,9 @@ class InferenceSpeed:
     """How fast the loaded model is working right now, for the card's speedometer.
 
     The aggregate fields describe the MACHINE: gen_tps is the sum over generating slots, and
-    ctx_used/ctx_total describe the whole KV pool. With parallel = 1, which is most sections,
-    that is identical to the single slot's own figures. With more, reporting one slot's rate as
-    though it were the machine's was simply wrong - measured on a parallel = 3 model, two slots
-    generated at 38.5 and 27.4 tok/s simultaneously (a persistent 40% gap, because speculative
-    decoding accepts more drafts on code than on prose), so no single slot's number described
-    either the conversation you were watching or the box. Per-slot detail lives in `slots`.
+    ctx_used/ctx_total describe the whole KV pool. With parallel = 1 that is the one slot's own
+    figures; with more, slots run at genuinely different rates (speculative decoding accepts more
+    drafts on code than on prose), so per-slot detail lives in `slots`.
     """
     model: str = ""
     state: str = "idle"        # "generating" | "prefill" | "idle" - busiest slot wins
@@ -85,13 +78,10 @@ class InferenceSpeed:
     solo: "SlotSpeed | None" = None
     # When the solo figures were last live, so an idle solo row can date what it is showing.
     solo_last_ts: float = 0.0
-    # Strata only: the share of routed experts served from the GPU's cache on the last request,
-    # which its `done:` line reports. There is no llama.cpp equivalent - llama has no expert
-    # cache - so this is None on every other engine and the tile is simply absent.
-    #
-    # It is the number that decides whether this engine is fast, more than tok/s is: at 99.9%
-    # almost nothing crosses PCIe, and on this box PCIe measured 6.6 GB/s against a 0.55
-    # pcie_frac default. A drop here is the first sign a context or cache change went too far.
+    # Strata only: the share of routed experts served from the GPU's cache on the last request
+    # (its `done:` line). llama has no expert cache, so this is None there and the tile is absent.
+    # It decides this engine's speed more than tok/s does: near 100% almost nothing crosses PCIe,
+    # and a drop is the first sign a context or cache change went too far.
     expert_hit_pct: float | None = None
     # Does this engine report KV cache occupancy? llama does (n_prompt_tokens_cache);
     # Strata does not - its /slots has no cache field and /metrics only answers AFTER a
@@ -111,11 +101,9 @@ class InferenceSpeed:
 def slot_density(n: int) -> str:
     """How much room each slot row gets, chosen from the slot count alone.
 
-    The strip has to survive `parallel = 8` without pushing the hero off the page, and a fixed
-    row height cannot do that: 8 comfortable rows measured 128px, far more than the 24px
-    sparkline they sit beside. So rows shrink and labels abbreviate as the count grows, and
-    slot_columns() wraps them - every slot stays visible at any count, nothing truncates or
-    scrolls. 8 slots land at 4 rows of 16px, which is about the height of one readout.
+    The strip has to survive `parallel = 8` without pushing the hero off the page, so rows shrink
+    and labels abbreviate as the count grows, and slot_columns() wraps them: every slot stays
+    visible at any count, nothing truncates or scrolls.
     """
     if n <= 4:
         return "roomy"      # ~22px rows, "433 / 128,768"
@@ -197,10 +185,8 @@ def _slot_key(container_name: str, index: int) -> str:
 def _slot_speed(container_name: str, s: dict, r: dict, now: float) -> "SlotSpeed":
     """One slot's figures, and its own EMA state. Called once per slot per sample.
 
-    Each slot keeps a separate smoother because their rates genuinely differ: measured on a
-    parallel = 3 section, two slots decoding 400 tokens each in the same batch held 38.5 and
-    27.4 tok/s for seven seconds straight. Speculative decoding is why - the draft head is
-    accepted far more often on code than on prose - so one shared EMA would blur a real signal.
+    Each slot keeps its own smoother because slot rates genuinely differ (speculative decoding
+    accepts more drafts on code than on prose); one shared EMA would blur a real signal.
     """
     index = int(s.get("id") or 0)
     key = _slot_key(container_name, index)
@@ -262,16 +248,13 @@ def _prune_slot_state(container_name: str, live: set[int]) -> None:
         for k in [k for k in store if k.startswith(prefix) and k not in keep]:
             del store[k]
 
-# /slots is the ONLY llama endpoint this app must not poll while a model is idle. It is served as
-# a task on the server's own queue, which is the same queue the idle detector watches, so polling
-# it both resets `--sleep-idle-seconds` and wakes an already-sleeping model. Measured on an
-# R9700 against a 20 s threshold: polling /slots every 500 ms held VRAM at 25.63 GiB for 45 s and
-# it never slept, and polling it once asleep took VRAM straight back from 22.51 to 25.61 GiB.
-# /health and /props both slept normally under the same polling, and /v1/models is router state
-# that is never proxied to the child, so those three are safe at any rate.
+# /slots is the ONLY llama endpoint this app must not poll while a model is idle. It runs as a task
+# on the server's own queue, the queue the idle detector watches, so polling it resets
+# `--sleep-idle-seconds` and wakes a sleeping model. /health, /props and /v1/models (router state,
+# never proxied to the child) are safe at any rate.
 #
-# So occupancy comes from the log instead, and /slots is touched only while a task is genuinely
-# in flight - at which point the model was never going to sleep anyway, so the poll is free.
+# So occupancy comes from the log instead, and /slots is touched only while a task is in flight,
+# when the model was never going to sleep anyway.
 _PROPS_TTL = 60.0                    # n_ctx and slot count only change when a model reloads
 # Both of these are keyed by "container/model", not container alone: the router swaps models
 # under one container, and a 128k context read from the model before the swap must not be shown
@@ -290,8 +273,7 @@ _last_solo: dict[str, tuple[float, float, int, int]] = {}
 
 def _evict_other_models(cache: dict, key: str) -> None:
     """Drop this container's entries for OTHER models. Both caches above are keyed
-    container/model, so every swap used to leave a permanent entry behind; the old
-    model's figures are unreachable the moment a new one loads."""
+    container/model; once a new model loads, the old model's figures are unreachable."""
     prefix = key.split("/", 1)[0] + "/"
     for stale in [k for k in cache if k.startswith(prefix) and k != key]:
         cache.pop(stale, None)
@@ -368,14 +350,10 @@ def prefill_history(container_name: str) -> list[float]:
 def _record_prefill_tps(container_name: str, value: float) -> None:
     """Record a COMPLETED prefill rate, once.
 
-    `value` must be the engine's own finished figure (last_pp_tps), never the in-progress one:
-    a rate measured part way through a prefill is an artefact of where the poll landed.
-
-    Deduped on the value rather than on a request id, because no request id survives into this
-    dict - `open_task` is None the moment the request finishes, which is exactly when the
-    completed rate becomes available. The cost of that choice is that two consecutive requests
-    whose rates round to the same figure collapse into one point. On rates like 640.9 and
-    2756.2 that is rare, and a lost point in a sparkline is a far smaller lie than a plateau.
+    `value` must be the engine's own finished figure (last_pp_tps), never the in-progress one,
+    which is an artefact of where the poll landed. Deduped on the value, because no request id
+    survives into this dict (`open_task` is None the moment the completed rate appears); two
+    consecutive requests whose rates round the same collapse into one point, which is rare.
     """
     v = round(float(value or 0.0), 1)
     if v <= 0:
@@ -391,11 +369,8 @@ def _record_prefill_tps(container_name: str, value: float) -> None:
 async def _slot_states(container_name: str, internal_port: int, model_id: str) -> list[dict]:
     """Every slot the loaded model has, in index order, or [] if they cannot be read.
 
-    All of them, not just the working one: one response already carries the lot, so reporting
-    per-slot detail costs no extra HTTP. It used to return slots[0] unconditionally, which
-    reported an idle slot for every request that landed anywhere else - measured at 38% of tasks
-    (5,304 of 13,922) on Qwen3.8-27B-UD-Q4_K_M, each one a gap in the speedometer and a zero in
-    the history. The caller no longer has to pick one at all.
+    All of them, not just slot 0: one response carries the lot, and a request can land on any
+    slot, so reading only the first reported idle for every request that landed elsewhere.
     """
     url = f"http://{container_name}:{internal_port}/slots"
     try:
@@ -520,13 +495,10 @@ def _rates_from_log_strata(name: str) -> dict:
                 out["cur_pp_pct"] = round(100.0 * (pr or 0) / pt)
                 out["cur_pp_done"] = int(pr or 0)
             # The SIZE is known from the first sample; the PROGRESS is not. Strata reports
-            # prompt_read/prompt_total only once a 16,384-token chunk has landed, so a read
-            # stays null for the first several seconds of a long prompt and for the WHOLE of
-            # any read smaller than one chunk - which is every turn of an agent client working
-            # behind a cached prefix (measured: 833 fresh tokens of an 83,456-token prompt).
-            # Publishing the total regardless lets the UI say which of those two situations
-            # this is. It is the distinction the percentage existed to make: 400 tokens and
-            # 166,754 tokens are 0.3 s and 57 s of waiting on this box.
+            # prompt_read/prompt_total only once a 16,384-token chunk has landed, so a read is
+            # null for the first seconds of a long prompt and for the whole of any read smaller
+            # than one chunk (every turn of an agent behind a cached prefix). Publishing the
+            # total regardless lets the UI tell "about to answer" from "a long wait".
             out["cur_pp_total"] = int(pt or live.get("prompt_tokens") or 0)
         out["last_gen_tps"] = float(last.get("decode_tok_s") or 0.0)
         out["last_gen_tokens"] = int(last.get("output_tokens") or 0)
@@ -627,27 +599,19 @@ def _rates_from_log_strata(name: str) -> dict:
 def _outside_slots(engine: str, r: dict) -> bool:
     """Is the engine working on something that lives in no slot?
 
-    Strata runs a LONE request on its solo path - the fastest route, the one that keeps its MTP
-    drafts - and only moves a conversation into a batch slot when a second request arrives. So
+    Strata runs a LONE request on its solo path (the fastest route, the one that keeps its MTP
+    drafts) and only moves a conversation into a batch slot when a second request arrives. So
     with parallel > 1 every slot reports is_processing=false for the whole of a single request,
-    while /metrics says live.running=1 and live.outside_slots=1 and the log reader says
-    newest='generating'.
-
-    Reading busy-ness from the slots alone was therefore wrong the moment slots were enabled:
-    the settled-task guard concluded the request had finished mid-generation, dropped the slot
-    read, and the panel fell to the idle branch - grey sparklines, an IDLE badge and the previous
-    request's frozen numbers, for every request. Measured during a live generation:
-    is_processing=[False,False,False,False] with running=1, outside_slots=1.
+    while /metrics says live.running=1 and live.outside_slots=1; reading busy-ness from the slots
+    alone shows IDLE for every lone request.
 
     The slot strip stays honest about this: none of them holds the work, and it says so. Only
     the headline state comes from the engine.
     """
     return engine == "strata" and bool(r.get("newest"))
 # Engines that publish Strata's /metrics document (live / requests / totals). Maya is a fork of
-# Strata's server and kept the format field for field - measured on Maya 1.1.16: live.state
-# "reading"/"generating", live.tok_s, live.generated, live.prompt_tokens, requests newest-first
-# with decode_tok_s / output_tokens / prompt_ms / hit_rate, totals.requests. So both are read the
-# one way, and the log scrapers stay for engines that only speak in log lines.
+# Strata's server and kept the format field for field, so both are read the one way; the log
+# scrapers stay for engines that only speak in log lines.
 _METRICS_ENGINES = frozenset(n for n, e in engine_registry.ENGINES.items() if e.strata_metrics)
 
 
@@ -711,25 +675,16 @@ def _rates_from_log(name: str) -> dict:
            "cur_pp_done": 0, "cur_pp_total": 0,
            "last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0, "newest": "",
            "open_task": None, "open_slot": None}
-    # A wide tail, then the router's own chatter removed. It has to be both. While a slot
-    # generates it logs a timing line only every ~3 s, so a long reply buries the
-    # prompt-processing lines from the start of that same request; and in router mode llama.cpp
-    # logs EVERY proxied request, so the window fills with this app's own polling. Measured on
-    # llama-9700x2 while Devstral was generating: 94.8% proxy lines, 63.5 of them per second,
-    # arriving exactly 50 ms apart. tail=1200 therefore covers about ELEVEN SECONDS of wall
-    # clock, and a 88k-token prefill was measured at 104 s and 118 s on that same model.
+    # A wide tail, then the router's own chatter removed. It has to be both: while a slot
+    # generates it logs a timing line only every ~3 s, and in router mode llama.cpp logs every
+    # proxied request, so the window fills with this app's own polling and covers only seconds
+    # of wall clock.
     #
-    # That arithmetic is the whole reason this card used to say "idle" mid-generation, and the
-    # reason widening the tail is not the fix. The launch line is the newest thing in the log the
-    # moment a request starts, so this read always sees it - and then it scrolls out while the
-    # request is still running, the pairing below finds nothing unpaired, and occupancy flips
-    # back to none. A long request is therefore reported busy for ~11 s and idle for the rest of
-    # its life, which is precisely backwards: the slower the model, the sooner the lie.
-    #
-    # So occupancy is carried across reads in _open_tasks instead. Seeing the launch once is
-    # enough; the release line retires it. The tail stays narrow because it only has to be wide
-    # enough to catch each line as it is written, and the cost of reading it is not free: 4.5 ms
-    # at tail=1200 against 144 ms at 60000, on a path that runs every 1.5 s per backend.
+    # That is also why occupancy cannot come from one read: the launch line scrolls out while a
+    # long request is still running, and occupancy would flip back to idle. So it is carried
+    # across reads in _open_tasks: seeing the launch once is enough, and the release line
+    # retires it. The tail only has to catch each line as it is written; wider costs time on a
+    # path that runs every 1.5 s per backend.
     ok, text = container_logs(name, tail=1200, current_run_only=True)
     if not ok:
         return out
@@ -983,12 +938,9 @@ async def inference_speed(container_name: str, internal_port: int | None,
     ctx_used = sum(sl.ctx_used for sl in live_slots or slots)
     ctx_cached = sum(sl.ctx_cached for sl in live_slots or slots)
     # The whole pool: every slot's window, summed, because the numerator sums the slots too.
-    # Strata included. Its slots each report the full context as n_ctx, which was once read as
-    # "one 262k pool the slots share" and the slot count dropped, so a sum of conversations was
-    # measured against one conversation's window ("617.8k of 262k window", 2026-10-21). Each
-    # slot really has its own window: Strata checks every request against max_context, and its
-    # /slots gives each slot the tokens IT holds (slots 0-2 held 204,510 + 189,900 + 223,405 at
-    # once, 4 x 262,144 batch slots). llama's n_ctx is already a per-slot share; same formula.
+    # Strata included: each slot reports the full context as n_ctx and really has its own window
+    # (every request is checked against max_context, and /slots gives each slot the tokens it
+    # holds). llama's n_ctx is already a per-slot share; same formula.
     per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
     ctx_total = per_slot_ctx * len(slots)
     if solo is not None and solo.state in ("prefill", "generating"):
@@ -1047,9 +999,9 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
             # 9 s reload to answer one would hide the very state the caller wants to know about.
             loaded = sleeping
         elif unloaded:
-            # Same reasoning as sleeping: a request WOULD load it (measured 4.6 s warm), but a
-            # diagnostic that silently pays a reload - or a 503 when another engine holds the
-            # card - reports the wrong thing. Name the state; let the caller decide to pay.
+            # Same reasoning as sleeping: a request WOULD load it, but a diagnostic that silently
+            # pays a reload (or a 503 when another engine holds the card) reports the wrong
+            # thing. Name the state; let the caller decide to pay.
             return {"ok": False, "err": f"{unloaded} is unloaded - the server is up but holds "
                                         "no model; press Load or send a real request"}
         return {"ok": False, "err": err or "no model loaded on this backend"}
