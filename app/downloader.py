@@ -315,6 +315,7 @@ class DownloadManager:
         return removed
 
     async def _run(self, job: DownloadJob) -> None:
+        shutting_down = False
         try:
             await self._wait_turn(job)
             job.status = "downloading"
@@ -325,38 +326,47 @@ class DownloadManager:
             job.status = "done"
             job.completed_at = time.time()
         except asyncio.CancelledError:
+            if not job._cancel.is_set():
+                # Shutdown, not the cancel button: a deploy or restart stops the event loop,
+                # which cancels every task. Treating that as a cancel deleted the partial file
+                # and dropped the job from the restart list, so "survives a restart" never
+                # did. The temp stays (with its ranges file, for a parallel one), the job keeps
+                # its status, and the next start re-queues and resumes it.
+                shutting_down = True
+                raise
             job.status = "canceled"
             job.completed_at = time.time()
-            try:
-                if job.temp_path.exists():
-                    job.temp_path.unlink()
-            except OSError:
-                pass
+            for p in (job.temp_path, _ranges_path(job)):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
         except Exception as e:  # noqa: BLE001
             job.status = "error"
             job.error = f"{type(e).__name__}: {e}"
             job.completed_at = time.time()
-            if job.parallel:
-                # A failed parallel temp is a PREALLOCATED full-size sparse file. Keeping it
-                # is how a later attempt got to "resume" a download that was really a hole,
-                # and promote it as a complete model. Single-stream temps are append-only
-                # and genuinely resumable, so only the parallel one goes.
+            if job.parallel and not _ranges_path(job).exists():
+                # A parallel temp is a PREALLOCATED full-size sparse file. Without its ranges
+                # file there is no telling the holes from the data, and keeping one is how a
+                # later attempt once promoted a hole-ridden file as a finished model. With the
+                # ranges file, it is kept: downloading the same file again resumes it.
                 try:
                     job.temp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
         finally:
             self._save_pending()
-            db.record_download(
-                repo_id=job.repo_id,
-                filename=job.filename,
-                dest_path=str(job.dest_path),
-                total_bytes=job.total_bytes,
-                status=job.status,
-                error=job.error,
-                started_at=job.started_at or time.time(),
-                completed_at=job.completed_at,
-            )
+            if not shutting_down:      # a stop is not an outcome worth a history row
+                db.record_download(
+                    repo_id=job.repo_id,
+                    filename=job.filename,
+                    dest_path=str(job.dest_path),
+                    total_bytes=job.total_bytes,
+                    status=job.status,
+                    error=job.error,
+                    started_at=job.started_at or time.time(),
+                    completed_at=job.completed_at,
+                )
 
     async def _verify(self, job: DownloadJob) -> None:
         """Check the finished temp against the published SHA-256 before it becomes the model.
@@ -416,38 +426,49 @@ class DownloadManager:
         if total and total > 0:
             job.total_bytes = total
 
-        # Choose parallel vs single-stream
+        # Choose parallel vs single-stream. A parallel download that stopped resumes as one,
+        # whatever the setting is now: its temp is full-size with holes, which the
+        # append-only single stream would take for a finished file.
         streams = streams_per_file()
-        if accept_ranges and total >= PARALLEL_MIN_SIZE and streams > 1:
-            await self._stream_parallel(job, resolved_url, headers, total, streams)
+        ranges = _load_ranges(job, total) if accept_ranges else None
+        if accept_ranges and total >= PARALLEL_MIN_SIZE and (ranges or streams > 1):
+            await self._stream_parallel(job, resolved_url, headers, total, streams, ranges)
         else:
+            _discard_ranges(job)
             await self._stream_single(job, url, headers)
 
     async def _stream_parallel(self, job: DownloadJob, url: str, headers: dict[str, str], total: int,
-                               n: int | None = None) -> None:
-        # No resume here, and deliberately no "temp size == total means complete"
-        # shortcut: the temp is preallocated to full size below, so that check was
-        # true of every failed run's sparse leftover, and the retry promoted a
-        # hole-ridden file as a finished model. Completion is proven by received
-        # bytes, never by file size.
-        # Preallocate temp file to full size; per-worker seek+write into non-overlapping regions.
-        with open(job.temp_path, "wb") as f:
-            f.truncate(total)
-        job.downloaded_bytes = 0
-        job._speed_samples.append((time.time(), 0))
+                               n: int | None = None, ranges: list | None = None) -> None:
+        # Deliberately no "temp size == total means complete" shortcut: the temp is
+        # preallocated to full size, so that check was true of every failed run's sparse
+        # leftover, and the retry promoted a hole-ridden file as a finished model.
+        # Completion is proven by received bytes, never by file size. What each range has
+        # received is kept in the ranges file beside the temp, which is what lets a stopped
+        # parallel download resume instead of starting over.
         job.parallel = True
-
-        n = n or PARALLEL_CHUNKS
-        chunk = total // n
-        job.chunks = []
-        for i in range(n):
-            start = i * chunk
-            end = (start + chunk - 1) if i < n - 1 else total - 1
-            job.chunks.append(ChunkState(idx=i, start=start, end=end))
+        if ranges:
+            job.chunks = [ChunkState(idx=i, start=s, end=e, downloaded=d)
+                          for i, (s, e, d) in enumerate(ranges)]
+        else:
+            # Preallocate to full size; each worker seeks and writes its own region.
+            with open(job.temp_path, "wb") as f:
+                f.truncate(total)
+            n = n or PARALLEL_CHUNKS
+            chunk = total // n
+            job.chunks = []
+            for i in range(n):
+                start = i * chunk
+                end = (start + chunk - 1) if i < n - 1 else total - 1
+                job.chunks.append(ChunkState(idx=i, start=start, end=end))
+        job.downloaded_bytes = sum(c.downloaded for c in job.chunks)
+        job._speed_samples.append((time.time(), job.downloaded_bytes))
+        _save_ranges(job, total)
 
         async def worker(cs: ChunkState) -> None:
+            if cs.downloaded >= cs.size:
+                return                    # finished before the stop
             worker_headers = dict(headers)
-            worker_headers["Range"] = f"bytes={cs.start}-{cs.end}"
+            worker_headers["Range"] = f"bytes={cs.start + cs.downloaded}-{cs.end}"
             timeout = httpx.Timeout(30.0, read=120.0)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=worker_headers) as w:
                 async with w.stream("GET", url) as resp:
@@ -461,8 +482,11 @@ class DownloadManager:
                         except Exception:
                             pass
                         raise RuntimeError(f"HTTP {resp.status_code} for range {cs.start}-{cs.end}: {body}")
-                    with open(job.temp_path, "r+b") as f:
-                        f.seek(cs.start)
+                    # Unbuffered, so a byte counted in the ranges file has reached the OS: a
+                    # stopped process loses nothing it claimed (a power cut still can, which is
+                    # what the SHA-256 check is for).
+                    with open(job.temp_path, "r+b", buffering=0) as f:
+                        f.seek(cs.start + cs.downloaded)
                         async for buf in resp.aiter_bytes(1024 * 1024):
                             if job._cancel.is_set():
                                 raise asyncio.CancelledError
@@ -480,10 +504,19 @@ class DownloadManager:
                         raise RuntimeError(
                             f"range {cs.start}-{cs.end}: got {cs.downloaded} of {cs.size} bytes")
 
+        async def keep_ranges() -> None:
+            while True:
+                await asyncio.sleep(2.0)
+                _save_ranges(job, total)
+
+        saver = asyncio.create_task(keep_ranges())
         tasks = [asyncio.create_task(worker(c)) for c in job.chunks]
         try:
             await asyncio.gather(*tasks)
+            saver.cancel()
+            _ranges_path(job).unlink(missing_ok=True)
         except BaseException:
+            saver.cancel()
             for t in tasks:
                 if not t.done():
                     t.cancel()
@@ -493,6 +526,7 @@ class DownloadManager:
                     await t
                 except BaseException:
                     pass
+            _save_ranges(job, total)
             raise
 
     async def _stream_single(self, job: DownloadJob, url: str, headers: dict[str, str]) -> None:
@@ -567,6 +601,52 @@ class DownloadManager:
                         raise RuntimeError(
                             f"stream ended at {job.downloaded_bytes} of {job.total_bytes} bytes")
                     return
+
+
+def _ranges_path(job: DownloadJob) -> Path:
+    return job.temp_path.with_name(job.temp_path.name + ".ranges")
+
+
+def _save_ranges(job: DownloadJob, total: int) -> None:
+    """What each range of a parallel download has received, beside its temp. Atomic."""
+    p = _ranges_path(job)
+    data = {"url": job.url, "total": total,
+            "ranges": [[c.start, c.end, c.downloaded] for c in job.chunks]}
+    try:
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _load_ranges(job: DownloadJob, total: int) -> list | None:
+    """The ranges file of a stopped parallel download of THIS file, or None. It must name the
+    same URL and size as now and sit beside a full-size temp, or it describes something else."""
+    try:
+        data = json.loads(_ranges_path(job).read_text(encoding="utf-8"))
+        if (data.get("url") != job.url or int(data.get("total") or 0) != total or not total
+                or job.temp_path.stat().st_size != total):
+            return None
+        ranges = [[int(s), int(e), int(d)] for s, e, d in data["ranges"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not ranges or ranges[0][0] != 0 or ranges[-1][1] != total - 1:
+        return None
+    if any(not (0 <= d <= e - s + 1) for s, e, d in ranges):
+        return None
+    return ranges
+
+
+def _discard_ranges(job: DownloadJob) -> None:
+    """A ranges file the single stream cannot use: its temp is sparse, not appendable, so both go."""
+    p = _ranges_path(job)
+    if p.exists():
+        for f in (p, job.temp_path):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _hash_prefix(hasher, path: Path, n: int, chunk: int = 8 * 1024 * 1024) -> None:
