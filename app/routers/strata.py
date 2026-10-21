@@ -42,6 +42,7 @@ def _strata_state() -> dict:
     return {
         "tiers": tiers,
         "installed": inst,
+        "downloaded": strata_models.downloaded_installs(set(inst)),
         "free": {t.install_tag for t in strata_models.free_slots(set(inst), tiers)},
         "selection": sel,
         "engine_up": bool(tiers),
@@ -222,7 +223,9 @@ async def strata_install(repo_id: str = Form(...), family: str = Form(...),
     # Recorded at QUEUE time, not on completion: the slot is spoken for from here on, and a
     # download that is interrupted still leaves files whose origin someone will need to know.
     strata_models.record_provenance(tier.install_tag, repo_id, family, model,
-                                   tier.canonical_repo)
+                                   tier.canonical_repo, subdir=subdir,
+                                   files=[f["dst"] for f in match.files]
+                                   + ([match.mmproj["dst"]] if match.mmproj else []))
 
     saved = plan["saved_bytes"]
     note = f", reusing {human_bytes(saved)} already on disk" if saved else ""
