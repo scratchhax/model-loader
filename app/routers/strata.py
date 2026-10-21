@@ -58,6 +58,8 @@ def _strata_state() -> dict:
         # Tuning applies to the model that will RUN next, which is the one the selection names -
         # not whatever happens to be loaded, because a change made now lands on the next start.
         "tuning_tag": _strata_selected_tag(sel),
+        "next_label": strata_models.install_label(
+            strata_models.describe_install(_strata_selected_tag(sel), prov)) if _strata_selected_tag(sel) else "",
         "tunables": strata_models.TUNABLES,
     }
 

@@ -737,6 +737,58 @@ def describe_install(install_tag: str, prov: dict[str, dict] | None = None) -> d
     }
 
 
+def install_label(about: dict) -> str:
+    """A person's name for an install: the repo's model name and the tier - Qwen3.8-Flash-Next-GSQ-RCO-
+    abliterated-IQ3_S - or "" when the install has no recorded source (then the slot name IS its name)."""
+    if not about.get("repo"):
+        return ""
+    title = about.get("title") or ""
+    for suffix in ("-GGUF", "-gguf", "_GGUF"):
+        if title.endswith(suffix):
+            title = title[: -len(suffix)]
+    tier = about.get("model") or ""
+    return f"{title}-{tier}" if tier and not title.lower().endswith(tier.lower()) else title
+
+
+_SERVED_TTL_S = 30.0
+_served_cache: tuple[float, dict] | None = None
+
+
+def served_labels(data_dir: str | None = None) -> dict[str, dict]:
+    """{model id Strata serves: {"tag", "repo", "owner", "label"}} for installs with a recorded source.
+
+    Strata names a model after the catalog slot it sits in (setup.py rebuilds model_name as
+    <family>-<tier> on every start - it is one of its SETUP_KEYS), and a community model can only
+    be installed by borrowing a slot. So SC117's abliterated IQ3_S, installed into the free Swift
+    slot, is served as "swift-1.5-iq3_s" - a name for a different model. On 0.1 the hand-edited
+    config kept "qwen3.8-flash-next-abliterated-iq3_s"; 0.2 rewrites it at every start. The
+    install's own record of where it came from is what tells the two apart, so every place this
+    app names a Strata model asks here first. Cached 30 s: the overview asks twice a second.
+    """
+    global _served_cache
+    now = time.time()
+    if data_dir is None and _served_cache and now - _served_cache[0] < _SERVED_TTL_S:
+        return _served_cache[1]
+    from pathlib import Path
+    prov = provenance()
+    out: dict[str, dict] = {}
+    for tag, d in installed(data_dir).items():
+        about = describe_install(tag, prov)
+        label = install_label(about)
+        if not label:
+            continue
+        try:
+            served = json.loads(Path(d["config"]).read_text(encoding="utf-8-sig")).get("model_name") or ""
+        except (OSError, ValueError):
+            continue
+        if served:
+            out[served] = {"tag": tag, "repo": about["repo"], "owner": about["owner"], "label": label,
+                           "borrowed": about["borrowed"]}
+    if data_dir is None:
+        _served_cache = (now, out)
+    return out
+
+
 # ---------------------------------------------------------------- whose format is it
 
 def strata_only(filename: str) -> bool:

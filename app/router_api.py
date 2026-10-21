@@ -258,6 +258,17 @@ async def _live_map() -> tuple[list[dict], dict[str, dict]]:
                 continue
             for m in b["models"]:
                 by_model.setdefault(m, b)      # first wins, and the list is ranked
+            if b["engine"] == "strata":
+                # A Strata model in a borrowed catalog slot is served under the slot's name
+                # (swift-1.5-iq3_s for SC117's abliterated IQ3_S). Its real name is offered and routed
+                # too; Strata serves its one model whatever name a request carries.
+                from . import strata_models
+                labels = strata_models.served_labels()
+                for m in list(b["models"]):
+                    alias = (labels.get(m) or {}).get("label")
+                    if alias:
+                        b.setdefault("aliases", []).append(alias)
+                        by_model.setdefault(alias, b)
     return bs, by_model
 
 
@@ -424,7 +435,7 @@ async def list_models() -> dict:
             data.append({"id": e, "object": "model", "created": now, "owned_by": "model-router"})
     seen: set[str] = set()
     for b in bs:
-        for m in b["models"]:
+        for m in b.get("aliases", []) + b["models"]:
             if m in seen:
                 continue              # several backends serve one models.ini; list each id once
             seen.add(m)
