@@ -59,8 +59,18 @@ def read(path: str | Path) -> dict[str, str]:
     return out
 
 
+_PLAIN_RE = re.compile(r"^[A-Za-z0-9_./:,=+@%-]*$")
+
+
 def _format(key: str, value: str) -> str:
-    return f'{key}="{value}"' if any(c.isspace() for c in value) or "#" in value else f"{key}={value}"
+    """KEY=value; "value" when only spaces need quoting (the file's own style); otherwise
+    single-quoted. The file is SOURCED by sh, so a value like $(...) or `...` would run unquoted
+    or in double quotes; inside single quotes sh expands nothing."""
+    if _PLAIN_RE.match(value):
+        return f"{key}={value}"
+    if _PLAIN_RE.match(value.replace(" ", "")):
+        return f'{key}="{value}"'
+    return f"{key}='" + value.replace("'", "'\\''") + "'"
 
 
 def update(path: str | Path, values: dict[str, str]) -> tuple[bool, str]:

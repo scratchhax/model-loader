@@ -619,6 +619,10 @@ def materialize_reuse(plan: dict) -> list[str]:
 # ---------------------------------------------------------------- which model the engine runs
 
 _SEL_KEYS = ("FAMILY", "MODEL", "GGUF_DIR")
+# What a selection may say. These reach strata.env from a form post, and that file is sourced by
+# sh at every start, so they are checked here as well as quoted by strata_env.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_GGUF_DIR_RE = re.compile(r"^(?:/(?:gguf-root|data)/)?[A-Za-z0-9][A-Za-z0-9_./-]*$")   # 0.1 used bare names
 
 
 def read_selection(env_path: str) -> dict[str, str]:
@@ -638,6 +642,10 @@ def set_selection(env_path: str, family: str, model: str, gguf_dir: str) -> tupl
     does for GPU/GPUS. Without that half, this function writes a value nothing reads.
     """
     from . import strata_env
+    if not (_NAME_RE.match(family) and _NAME_RE.match(model)):
+        return False, f"not a Strata family / tier: {family!r} / {model!r}"
+    if gguf_dir and not (_GGUF_DIR_RE.match(gguf_dir) and ".." not in gguf_dir):
+        return False, f"not a model folder Strata can see: {gguf_dir!r}"
     ok, why = strata_env.update(env_path, {"FAMILY": family, "MODEL": model, "GGUF_DIR": gguf_dir})
     if not ok:
         return False, why
@@ -669,7 +677,8 @@ def provenance() -> dict[str, dict]:
 
 
 def record_provenance(install_tag: str, repo_id: str, family: str, model: str,
-                      canonical_repo: str = "") -> None:
+                      canonical_repo: str = "", subdir: str = "",
+                      files: list[str] | None = None) -> None:
     """Remember which repo an install came from. Overwrites: a slot holds one thing at a time.
 
     `borrowed` is decided HERE, where the family's own repo is known from the catalog, and
@@ -682,7 +691,42 @@ def record_provenance(install_tag: str, repo_id: str, family: str, model: str,
     cur[install_tag] = {"repo": repo_id, "family": family, "model": model,
                         "at": int(time.time()),
                         "borrowed": bool(canonical_repo) and repo_id.lower() != canonical_repo.lower()}
+    if subdir:
+        # Where the files went and which they are, so a download Strata has not set up yet can
+        # be found, shown and selected (downloaded_installs).
+        cur[install_tag].update(dir=subdir, files=list(files or []))
     db.set_setting(_PROV_KEY, json.dumps(cur))
+
+
+def downloaded_installs(installed_tags: set[str], models_dir=None) -> dict[str, dict]:
+    """{install_tag: {...}} for models downloaded from HF search that Strata has not set up yet.
+
+    0.2 lists an install once its setup has written a run config, and setup only runs at a
+    start. A fresh download has neither, so it was listed nowhere and could not be chosen; and
+    a selection naming only FAMILY / MODEL left the entry point no folder (it finds one from a
+    run config, or 0.1's <family>-<MODEL> folder), so setup would have DOWNLOADED the family's
+    own model instead - tens of GB, over 16 connections. These are offered with the folder their
+    files are in, as Strata sees it, which "Use next start" writes as GGUF_DIR.
+    """
+    from pathlib import Path
+    from .config import settings
+    root = Path(models_dir) if models_dir else settings.models_dir
+    prov = provenance()
+    engine_root = _PATH_VIEWS[0][0]            # /gguf-root/: ./models, as the engine mounts it
+    out: dict[str, dict] = {}
+    for tag, p in prov.items():
+        sub = p.get("dir") or ""
+        if tag in installed_tags or not sub or ".." in sub:
+            continue
+        folder = root / sub
+        files = [f for f in (p.get("files") or []) if isinstance(f, str)]
+        present = sum(1 for f in files if (folder / f).is_file())
+        downloading = folder.is_dir() and any(folder.glob("*.download"))
+        out[tag] = {"about": describe_install(tag, prov), "family": p.get("family") or "",
+                    "model": p.get("model") or "", "gguf_dir": engine_root + sub,
+                    "files": len(files), "present": present,
+                    "complete": bool(files) and present == len(files) and not downloading}
+    return out
 
 
 def describe_install(install_tag: str, prov: dict[str, dict] | None = None) -> dict:

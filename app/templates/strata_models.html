@@ -106,6 +106,50 @@
 <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing prepared yet.</p>
 {% endif %}
 
+{# Downloaded from Hugging Face, not set up yet: Strata builds its pack at the first start that
+   names it. Offered with the folder its files are in, which "Use next start" passes as GGUF_DIR;
+   without it, setup would download the family's own model instead. #}
+{% if downloaded %}
+<h3 class="mt-5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Downloaded, not set up yet</h3>
+<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  <table class="w-full text-sm">
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    {% for tag, d in downloaded.items() %}
+      <tr>
+        <td class="px-3 py-2">
+          <div class="flex items-center gap-2.5">
+            {{ avatar(d.about.owner or '?', avatars.get(d.about.owner, ''), size=24) }}
+            <div class="min-w-0">
+              <a href="https://huggingface.co/{{ d.about.repo }}" target="_blank" rel="noopener"
+                 class="font-mono text-xs hover:underline">{{ d.about.repo }}</a>
+              <div class="text-[11px] text-slate-500 dark:text-slate-400">
+                {{ d.model }} · slot <span class="font-mono">{{ tag }}</span> · set up at its first start (Strata builds its pack from these files)
+              </div>
+            </div>
+          </div>
+        </td>
+        <td class="px-3 py-2 text-slate-500 dark:text-slate-400">
+          {{ d.present }} of {{ d.files }} file{{ 's' if d.files != 1 else '' }}{% if not d.complete %} · still downloading{% endif %}
+        </td>
+        <td class="px-3 py-2 text-right">
+          <form hx-post="/strata/select" hx-target="find .form-note" hx-swap="innerHTML" class="inline">
+            <input type="hidden" name="family" value="{{ d.family }}">
+            <input type="hidden" name="model" value="{{ d.model }}">
+            <input type="hidden" name="gguf_dir" value="{{ d.gguf_dir }}">
+            <button {% if not d.complete %}disabled title="Its files are still downloading"{% endif %}
+                    class="rounded-md border px-2 py-1 text-xs
+                           {% if not d.complete %}cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400
+                           {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700{% endif %}">Use next start</button>
+            <span class="form-note"></span>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <!-- tuning ---------------------------------------------------------------- -->
 {% if tuning_tag %}
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
