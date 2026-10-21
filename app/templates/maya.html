@@ -11,6 +11,10 @@
      class="text-sm text-slate-500 dark:text-slate-400 hover:underline">Maya's own dashboard {{ icon('external-link', 13) }}</a>
   {% endif %}
 </div>
+{# This engine's routing controls: the same row the Router tab shows for it. #}
+<div class="mt-4 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+  {% with e = 'maya', first = true %}{% include "_engine_row.html" %}{% endwith %}
+</div>
 
 <p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
   <a href="https://github.com/mw00/project-maya" target="_blank" rel="noopener" class="hover:underline">Project Maya</a>

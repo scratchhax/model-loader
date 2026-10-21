@@ -9,7 +9,7 @@ import time
 import pytest
 
 from app import db, downloader
-from app import main as app_main
+from app import engine_controls
 from app import router_api as ra
 from app import strata_models
 from app.config import settings
@@ -164,7 +164,7 @@ def test_strata_row_shows_the_next_start_not_a_stale_default(web, monkeypatch):
     db.set_setting("router.default.strata", "unsloth-ud-iq4_xs")
     monkeypatch.setattr(strata_models, "read_selection",
                         lambda path: {"FAMILY": "swift", "MODEL": "IQ3_S"})
-    monkeypatch.setattr(app_main, "_strata_choices",
+    monkeypatch.setattr(engine_controls, "strata_choices",
                         lambda: [("unsloth-ud-iq4_xs", "U"), ("swift-iq3_s", "S")])
     r = web.get("/router")
     assert '<option value="swift-iq3_s" selected' in r.text
