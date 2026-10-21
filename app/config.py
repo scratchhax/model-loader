@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     # Where the router surface listens, and the key it demands (empty = none, LAN testing only).
     router_port: int = 8086
     router_require_key: str = ""
-    max_concurrent_downloads: int = 2
     # RAM the OS, page cache and everything else on the box need. Subtracted before deciding
     # whether a model fits in system memory, because total RAM is never all yours: sizing
     # against it produces plans that swap or get OOM-killed. Raise it on a busy host.

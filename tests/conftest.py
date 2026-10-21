@@ -18,3 +18,12 @@ def ini_env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "models_dir", models)
     monkeypatch.setattr(settings, "models_ini_path", models / "models.ini")
     return models
+
+
+@pytest.fixture(autouse=True)
+def _fresh_router_discovery(monkeypatch):
+    """The router reuses one backend discovery for a couple of seconds. Tests swap the backends
+    between calls, so each sees a fresh one unless it is testing the reuse itself."""
+    from app import router_api
+    monkeypatch.setattr(router_api, "_LIVE_TTL_S", 0.0)
+    monkeypatch.setattr(router_api, "_live_cache", None)

@@ -7,9 +7,9 @@ import httpx
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
-from .. import autoconfig, hf
+from .. import autoconfig, db, downloader, hf
 from ..downloader import manager
-from ..web import templates, _blocked_chip, _QUEUED_CHIP
+from ..web import templates, _blocked_chip, _form_note, _QUEUED_CHIP
 
 router = APIRouter()
 
@@ -183,7 +183,23 @@ async def download_url(url: str = Form(...), filename: str = Form("")) -> HTMLRe
 
 @router.get("/downloads", response_class=HTMLResponse)
 def downloads_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("downloads.html", {"request": request, "jobs": manager.snapshot()})
+    return templates.TemplateResponse("downloads.html", {
+        "request": request, "jobs": manager.snapshot(),
+        "streams": downloader.streams_per_file(), "files": downloader.files_at_once(),
+        "max_streams": downloader.PARALLEL_CHUNKS, "max_files": downloader.MAX_FILES_AT_ONCE})
+
+
+@router.post("/downloads/limits", response_class=HTMLResponse)
+def downloads_limits(streams: int = Form(1), files: int = Form(1)) -> HTMLResponse:
+    """How hard downloads may pull: range streams per file, and files at once. Both default to
+    one; see downloader.STREAMS_KEY for why."""
+    s = max(1, min(streams, downloader.PARALLEL_CHUNKS))
+    f = max(1, min(files, downloader.MAX_FILES_AT_ONCE))
+    db.set_setting(downloader.STREAMS_KEY, str(s))
+    db.set_setting(downloader.FILES_KEY, str(f))
+    return _form_note(True, f"{s} stream{'s' if s > 1 else ''} per file, {f} file{'s' if f > 1 else ''} "
+                            f"at once; up to {s * f} connections",
+                      label=f"saved: up to {s * f} connection{'s' if s * f > 1 else ''}")
 
 
 @router.get("/downloads/rows", response_class=HTMLResponse)

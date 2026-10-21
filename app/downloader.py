@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -18,8 +19,32 @@ from .utils import human_bytes
 
 SPEED_SAMPLE_INTERVAL_S = 0.5
 SPEED_SAMPLE_MAX = 120  # ~60s of history
-PARALLEL_CHUNKS = 8       # parallel range requests per file
+PARALLEL_CHUNKS = 8       # the most parallel range requests per file it will open
 PARALLEL_MIN_SIZE = 32 * 1024 * 1024  # below this, use single stream (32 MB)
+MAX_FILES_AT_ONCE = 4
+
+# Both default to ONE. Two files of eight ranges each was sixteen connections to the CDN, and
+# that knocked this house's ISP onto its backup line (2026-10). One stream is also the only path
+# that resumes: a failed parallel temp is a sparse full-size file and is thrown away.
+STREAMS_KEY = "download.streams_per_file"
+FILES_KEY = "download.files_at_once"
+# Jobs not yet finished, so a deploy or restart picks them up again instead of dropping them.
+PENDING_KEY = "download.pending"
+
+
+def _clamped(key: str, hi: int) -> int:
+    try:
+        return max(1, min(int(db.get_setting(key, "1") or 1), hi))
+    except ValueError:
+        return 1
+
+
+def streams_per_file() -> int:
+    return _clamped(STREAMS_KEY, PARALLEL_CHUNKS)
+
+
+def files_at_once() -> int:
+    return _clamped(FILES_KEY, MAX_FILES_AT_ONCE)
 
 
 @dataclass
@@ -162,12 +187,45 @@ class DownloadJob:
 class DownloadManager:
     def __init__(self) -> None:
         self.jobs: dict[str, DownloadJob] = {}
-        self._sema: asyncio.Semaphore | None = None
 
-    def _semaphore(self) -> asyncio.Semaphore:
-        if self._sema is None:
-            self._sema = asyncio.Semaphore(settings.max_concurrent_downloads)
-        return self._sema
+    async def _wait_turn(self, job: DownloadJob) -> None:
+        """Hold a queued job until it is the oldest one waiting and a slot is free.
+
+        Read per check rather than fixed at start (it was a Semaphore sized once from config), so
+        changing "files at once" on the Downloads page applies to the queue already there.
+        """
+        while True:
+            active = sum(1 for j in self.jobs.values() if j.status == "downloading")
+            first = next((j for j in self.jobs.values() if j.status == "queued"), None)
+            if active < files_at_once() and first is job:
+                return
+            await asyncio.sleep(0.25)
+
+    # ------------------------------------------------------------ surviving a restart
+
+    def _save_pending(self) -> None:
+        rows = [{"repo_id": j.repo_id, "filename": j.filename, "url": j.url,
+                 "total_bytes": j.total_bytes}
+                for j in self.jobs.values() if j.status in ("queued", "downloading")]
+        try:
+            db.set_setting(PENDING_KEY, json.dumps(rows))
+        except Exception:  # noqa: BLE001 - losing the restart list must not fail a download
+            pass
+
+    def resume_pending(self) -> int:
+        """Queue again whatever was unfinished when the app last stopped. Called once at startup,
+        from the UI process only. A single-stream temp resumes from where it stopped."""
+        try:
+            rows = json.loads(db.get_setting(PENDING_KEY, "[]") or "[]")
+        except ValueError:
+            rows = []
+        for r in rows:
+            try:
+                self._make_job(repo_id=r["repo_id"], filename=r["filename"], url=r["url"],
+                               total_bytes=int(r.get("total_bytes") or 0))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return len(rows)
 
     def snapshot(self) -> list[DownloadJob]:
         # active first, then most recent
@@ -192,6 +250,7 @@ class DownloadManager:
         )
         self.jobs[job.id] = job
         job._task = asyncio.create_task(self._run(job))
+        self._save_pending()
         return job
 
     def enqueue(self, *, repo_id: str, hf_path: str, filename: str, total_bytes: int) -> DownloadJob:
@@ -221,13 +280,13 @@ class DownloadManager:
 
     async def _run(self, job: DownloadJob) -> None:
         try:
-            async with self._semaphore():
-                job.status = "downloading"
-                job.started_at = time.time()
-                await self._stream(job)
-                os.replace(job.temp_path, job.dest_path)
-                job.status = "done"
-                job.completed_at = time.time()
+            await self._wait_turn(job)
+            job.status = "downloading"
+            job.started_at = time.time()
+            await self._stream(job)
+            os.replace(job.temp_path, job.dest_path)
+            job.status = "done"
+            job.completed_at = time.time()
         except asyncio.CancelledError:
             job.status = "canceled"
             job.completed_at = time.time()
@@ -250,6 +309,7 @@ class DownloadManager:
                 except OSError:
                     pass
         finally:
+            self._save_pending()
             db.record_download(
                 repo_id=job.repo_id,
                 filename=job.filename,
@@ -299,12 +359,14 @@ class DownloadManager:
             job.total_bytes = total
 
         # Choose parallel vs single-stream
-        if accept_ranges and total >= PARALLEL_MIN_SIZE and PARALLEL_CHUNKS > 1:
-            await self._stream_parallel(job, resolved_url, headers, total)
+        streams = streams_per_file()
+        if accept_ranges and total >= PARALLEL_MIN_SIZE and streams > 1:
+            await self._stream_parallel(job, resolved_url, headers, total, streams)
         else:
             await self._stream_single(job, url, headers)
 
-    async def _stream_parallel(self, job: DownloadJob, url: str, headers: dict[str, str], total: int) -> None:
+    async def _stream_parallel(self, job: DownloadJob, url: str, headers: dict[str, str], total: int,
+                               n: int | None = None) -> None:
         # No resume here, and deliberately no "temp size == total means complete"
         # shortcut: the temp is preallocated to full size below, so that check was
         # true of every failed run's sparse leftover, and the retry promoted a
@@ -317,7 +379,7 @@ class DownloadManager:
         job._speed_samples.append((time.time(), 0))
         job.parallel = True
 
-        n = PARALLEL_CHUNKS
+        n = n or PARALLEL_CHUNKS
         chunk = total // n
         job.chunks = []
         for i in range(n):

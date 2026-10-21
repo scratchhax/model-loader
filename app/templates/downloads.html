@@ -6,6 +6,22 @@
 <div class="flex items-baseline justify-between">
   <h1 class="text-xl font-semibold tracking-tight">Downloads</h1>
   <div class="flex items-center gap-3 text-sm">
+    {# How hard downloads pull. One and one is the default because sixteen connections once
+       knocked the house onto its backup line; more than one stream also cannot resume. #}
+    <form hx-post="/downloads/limits" hx-target="find .form-note" hx-swap="innerHTML"
+          class="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400"
+          title="Each file over 32 MB is fetched in this many parallel ranges. One stream is the only kind that resumes after a restart.">
+      <select name="streams" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 py-0.5 text-xs">
+        {% for n in range(1, max_streams + 1) %}<option value="{{ n }}" {% if n == streams %}selected{% endif %}>{{ n }}</option>{% endfor %}
+      </select>
+      <span>stream{{ 's' if streams > 1 else '' }} per file,</span>
+      <select name="files" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 py-0.5 text-xs">
+        {% for n in range(1, max_files + 1) %}<option value="{{ n }}" {% if n == files %}selected{% endif %}>{{ n }}</option>{% endfor %}
+      </select>
+      <span>at once</span>
+      <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-0.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+      <span class="form-note"></span>
+    </form>
     <span class="text-xs text-slate-500 dark:text-slate-400">refreshes every 1s</span>
     <button hx-post="/downloads/clear" hx-target="#dl-rows" hx-swap="innerHTML"
             class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs">

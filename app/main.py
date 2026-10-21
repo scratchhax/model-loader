@@ -27,7 +27,7 @@ from .routers import settings as settings_router
 from .routers import strata as strata_router
 from .routers import maya as maya_router
 from .routers import updates as updates_router
-from .routers.strata import STRATA_DATA, STRATA_ENV_FILE
+from .routers.strata import STRATA_DATA, STRATA_ENV_FILE, _strata_selected_tag
 from .web import templates, _QUEUED_CHIP, _form_note, _toast
 
 app = FastAPI(title="Model Loader")
@@ -71,6 +71,8 @@ def _startup() -> None:
     router_api._init_db()
     router_api._init_rollup()
     db.seed_bench_prompts()
+    # Downloads a deploy or restart interrupted; a single-stream temp resumes where it stopped.
+    downloads_router.manager.resume_pending()
     hw.start_sampler()
     threading.Thread(target=_reconcile_strata_config, daemon=True, name="strata-config").start()
 
@@ -575,6 +577,11 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
         defaults["maya"] = maya_runs
     elif len(per_engine.get("maya", [])) == 1:
         defaults["maya"] = per_engine["maya"][0][0]
+    # Strata's row, likewise: the install strata.env names, which the Strata tab can also change.
+    # The stored router.default.strata went stale the first time it did.
+    strata_next = _strata_selected_tag(strata_models.read_selection(STRATA_ENV_FILE))
+    if strata_next:
+        defaults["strata"] = strata_next
     return templates.TemplateResponse("router.html", {
         "request": request,
         "engines": router_api.ENGINES,
