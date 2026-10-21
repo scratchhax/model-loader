@@ -623,20 +623,9 @@ _SEL_KEYS = ("FAMILY", "MODEL", "GGUF_DIR")
 
 def read_selection(env_path: str) -> dict[str, str]:
     """{FAMILY, MODEL, GGUF_DIR} as the pin file currently names them ("" when it does not)."""
-    out = {k: "" for k in _SEL_KEYS}
-    try:
-        text = open(env_path, encoding="utf-8").read()
-    except OSError:
-        return out
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("#"):
-            continue
-        key, _, val = line.partition("=")
-        key = key.replace("export", "").strip()
-        if key in out:
-            out[key] = val.strip().strip('"').strip("'")
-    return out
+    from . import strata_env
+    env = strata_env.read(env_path)
+    return {k: env.get(k, "") for k in _SEL_KEYS}
 
 
 def set_selection(env_path: str, family: str, model: str, gguf_dir: str) -> tuple[bool, str]:
@@ -648,34 +637,10 @@ def set_selection(env_path: str, family: str, model: str, gguf_dir: str) -> tupl
     service's entry point must re-source this file AND export these three the way it already
     does for GPU/GPUS. Without that half, this function writes a value nothing reads.
     """
-    from pathlib import Path
-    p = Path(env_path)
-    try:
-        text = p.read_text(encoding="utf-8")
-    except OSError as e:
-        return False, f"cannot read {p}: {e}"
-
-    want = {"FAMILY": family, "MODEL": model, "GGUF_DIR": gguf_dir}
-    seen: set[str] = set()
-    out: list[str] = []
-    for line in text.splitlines():
-        key = line.split("=", 1)[0].replace("export", "").strip()
-        if key in want and not line.strip().startswith("#"):
-            if key not in seen:
-                out.append(f"{key}={want[key]}")
-                seen.add(key)
-            continue
-        out.append(line)
-    for k in _SEL_KEYS:
-        if k not in seen:
-            out.append(f"{k}={want[k]}")
-    # Atomic, like set_pin and write_env_setting: the entry point sources this file at start,
-    # and a plain write_text during a start can be read half-done.
-    from . import fileio
-    try:
-        fileio.atomic_replace(p, "\n".join(out) + "\n")
-    except OSError as e:
-        return False, f"cannot write {p}: {e}"
+    from . import strata_env
+    ok, why = strata_env.update(env_path, {"FAMILY": family, "MODEL": model, "GGUF_DIR": gguf_dir})
+    if not ok:
+        return False, why
     return True, f"next start: {family} / {model}" + (f" from {gguf_dir}" if gguf_dir else "")
 
 
@@ -894,76 +859,33 @@ def _layout_02(data_dir: str | None) -> bool:
     return strata_engine.layout(root) == "0.2"
 
 
-def _env_lines(env_path: str) -> list[str]:
-    try:
-        return open(env_path, encoding="utf-8").read().splitlines()
-    except OSError:
-        return []
-
-
-def _env_key(line: str) -> str:
-    t = line.strip()
-    if t.startswith("#") or "=" not in t:
-        return ""
-    return t.partition("=")[0].replace("export", "").strip()
-
-
 def env_settings(env_path: str) -> dict[str, str]:
     """{tunable: value} as the pin file sets it: PARALLEL, and the flags in STRATA_SET."""
+    from . import strata_env
+    env = strata_env.read(env_path)
     out: dict[str, str] = {}
-    for line in _env_lines(env_path):
-        key = _env_key(line)
-        if not key:
-            continue
-        val = line.strip().partition("=")[2].strip().strip('"').strip("'")
-        if key == "STRATA_SET":
-            for tok in val.split():
-                k, _, v = tok.partition("=")
-                if k and v:
-                    out[k] = v
-        else:
-            for name, env in _ENV_OF.items():
-                if key == env and val:
-                    out[name] = val
+    for tok in env.get("STRATA_SET", "").split():
+        k, _, v = tok.partition("=")
+        if k and v:
+            out[k] = v
+    for name, var in _ENV_OF.items():
+        if env.get(var):
+            out[name] = env[var]
     return out
 
 
 def write_env_setting(env_path: str, flag: str, value: str) -> tuple[bool, str]:
     """Set one tunable in the pin file, keeping every other line (comments included) as it is."""
-    from pathlib import Path
-    from . import fileio
-    lines = _env_lines(env_path)
-    if not lines:
-        return False, f"cannot read {env_path}"
-    out: list[str] = []
-    done = False
+    from . import strata_env
     if flag in _ENV_OF:
-        key = _ENV_OF[flag]
-        for line in lines:
-            if _env_key(line) == key:
-                if not done:
-                    out.append(f"{key}={value}")
-                    done = True
-                continue
-            out.append(line)
-        if not done:
-            out.append(f"{key}={value}")
+        values = {_ENV_OF[flag]: value}
     else:
-        for line in lines:
-            if _env_key(line) == "STRATA_SET":
-                cur = line.strip().partition("=")[2].strip().strip('"').strip("'").split()
-                toks = [x for x in cur if x.partition("=")[0] != flag] + [f"{flag}={value}"]
-                if not done:
-                    out.append('STRATA_SET="' + " ".join(toks) + '"')
-                    done = True
-                continue
-            out.append(line)
-        if not done:
-            out.append(f'STRATA_SET="{flag}={value}"')
-    try:
-        fileio.atomic_replace(Path(env_path), "\n".join(out) + "\n")
-    except OSError as e:
-        return False, f"cannot write {env_path}: {e}"
+        cur = strata_env.read(env_path).get("STRATA_SET", "").split()
+        values = {"STRATA_SET": " ".join([t for t in cur if t.partition("=")[0] != flag]
+                                         + [f"{flag}={value}"])}
+    ok, why = strata_env.update(env_path, values)
+    if not ok:
+        return False, why
     return True, f"{TUNABLES[flag]['label']} set to {value}; applies on the next restart"
 
 
