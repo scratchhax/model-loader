@@ -12,12 +12,12 @@
       </div>
       <div class="flex items-center gap-2 shrink-0">
         <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
-          {% if j.status == 'downloading' %}bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300
+          {% if j.status in ('downloading', 'verifying') %}bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300
           {% elif j.status == 'done' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
           {% elif j.status == 'error' %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300
           {% elif j.status == 'canceled' %}bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300
           {% else %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300{% endif %}">
-          {{ j.status }}
+          {{ j.status }}{% if j.status == 'done' and j.verified %} &middot; sha256 ok{% endif %}
         </span>
         {% if j.status in ('queued', 'downloading') %}
         <button hx-post="/downloads/{{ j.id }}/cancel" hx-swap="none"

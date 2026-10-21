@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -45,6 +47,35 @@ def streams_per_file() -> int:
 
 def files_at_once() -> int:
     return _clamped(FILES_KEY, MAX_FILES_AT_ONCE)
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def published_sha256(responses) -> str:
+    """The file's SHA-256 from a resolve URL's answers, or "".
+
+    huggingface.co answers with `x-linked-etag` (the sha256 of the bytes) and then redirects to a
+    CDN whose answer carries only `etag`, a different 64-hex value that matches nothing on disk
+    (strata_models.fetch_etags explains the cost of mixing them up). So only x-linked-etag counts,
+    from whichever response in the redirect chain has it.
+    """
+    for r in responses:
+        v = (r.headers.get("x-linked-etag") or "").strip().strip('"').lower()
+        if _SHA256_RE.match(v):
+            return v
+    return ""
+
+
+def sha256_file(path: Path, chunk: int = 8 * 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            buf = f.read(chunk)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
 
 
 @dataclass
@@ -98,12 +129,17 @@ class DownloadJob:
     temp_path: Path
     total_bytes: int
     downloaded_bytes: int = 0
-    status: str = "queued"       # queued | downloading | done | error | canceled
+    status: str = "queued"       # queued | downloading | verifying | done | error | canceled
     error: str | None = None
     started_at: float | None = None
     completed_at: float | None = None
     chunks: list[ChunkState] = field(default_factory=list)
     parallel: bool = False
+    # The file's SHA-256 as Hugging Face publishes it ("" when the server gave none), and whether
+    # the bytes on disk were checked against it.
+    expected_sha256: str = ""
+    verified: bool = False
+    _hasher: object = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _speed_samples: list[tuple[float, int]] = field(default_factory=list, repr=False)
@@ -206,7 +242,7 @@ class DownloadManager:
     def _save_pending(self) -> None:
         rows = [{"repo_id": j.repo_id, "filename": j.filename, "url": j.url,
                  "total_bytes": j.total_bytes}
-                for j in self.jobs.values() if j.status in ("queued", "downloading")]
+                for j in self.jobs.values() if j.status in ("queued", "downloading", "verifying")]
         try:
             db.set_setting(PENDING_KEY, json.dumps(rows))
         except Exception:  # noqa: BLE001 - losing the restart list must not fail a download
@@ -284,6 +320,7 @@ class DownloadManager:
             job.status = "downloading"
             job.started_at = time.time()
             await self._stream(job)
+            await self._verify(job)
             os.replace(job.temp_path, job.dest_path)
             job.status = "done"
             job.completed_at = time.time()
@@ -321,6 +358,26 @@ class DownloadManager:
                 completed_at=job.completed_at,
             )
 
+    async def _verify(self, job: DownloadJob) -> None:
+        """Check the finished temp against the published SHA-256 before it becomes the model.
+
+        A single stream hashes as it writes, so only a parallel download (whose ranges land out of
+        order) reads the file back. A mismatch deletes the temp: those bytes are not the file, and
+        a resume from them would only build on the damage.
+        """
+        if not job.expected_sha256:
+            return
+        job.status = "verifying"   # off the network, so the next queued file may start
+        if job._hasher is not None and not job.parallel:
+            got = job._hasher.hexdigest()
+        else:
+            got = await asyncio.to_thread(sha256_file, job.temp_path)
+        if got != job.expected_sha256:
+            job.temp_path.unlink(missing_ok=True)
+            raise RuntimeError(f"SHA-256 mismatch: got {got[:12]}..., Hugging Face publishes "
+                               f"{job.expected_sha256[:12]}...; the download was discarded")
+        job.verified = True
+
     def _auth_headers(self, url: str) -> dict[str, str]:
         headers: dict[str, str] = {}
         tok = hf.get_token()
@@ -352,6 +409,7 @@ class DownloadManager:
                     total = int(h.headers.get("content-length") or 0)
                     accept_ranges = h.headers.get("accept-ranges", "").lower() == "bytes"
                     resolved_url = str(h.url)
+                    job.expected_sha256 = published_sha256([*h.history, h])
         except httpx.HTTPError:
             pass  # fall through and try single-stream
 
@@ -445,6 +503,16 @@ class DownloadManager:
             start = 0
             if job.temp_path.exists():
                 start = job.temp_path.stat().st_size
+            # Hash as it writes, so verifying a single stream costs no second read. A resumed
+            # temp's existing bytes are hashed first (once, in a thread).
+            job._hasher = hashlib.sha256()
+            if start and job.expected_sha256:
+                await asyncio.to_thread(_hash_prefix, job._hasher, job.temp_path, start)
+            if start and job.total_bytes and start == job.total_bytes:
+                # Already whole (stopped between the last byte and the rename). Asking for bytes
+                # past the end gets a 416, which read as "oversized" and threw the file away.
+                job.downloaded_bytes = start
+                return
             req_headers = {**headers, "Range": f"bytes={start}-"} if start > 0 else dict(headers)
             job.downloaded_bytes = start
             if attempt == 0:
@@ -476,6 +544,7 @@ class DownloadManager:
                     if start > 0 and resp.status_code == 200:
                         start = 0
                         job.downloaded_bytes = 0
+                        job._hasher = hashlib.sha256()
 
                     if not job.total_bytes:
                         if "content-range" in resp.headers:
@@ -489,6 +558,7 @@ class DownloadManager:
                             if job._cancel.is_set():
                                 raise asyncio.CancelledError
                             f.write(buf)
+                            job._hasher.update(buf)
                             self._note_progress(job, len(buf))
 
                     # A stream that ends without error has not said it sent everything:
@@ -497,6 +567,17 @@ class DownloadManager:
                         raise RuntimeError(
                             f"stream ended at {job.downloaded_bytes} of {job.total_bytes} bytes")
                     return
+
+
+def _hash_prefix(hasher, path: Path, n: int, chunk: int = 8 * 1024 * 1024) -> None:
+    with open(path, "rb") as f:
+        left = n
+        while left > 0:
+            buf = f.read(min(chunk, left))
+            if not buf:
+                break
+            hasher.update(buf)
+            left -= len(buf)
 
 
 manager = DownloadManager()
