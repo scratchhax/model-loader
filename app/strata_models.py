@@ -669,8 +669,11 @@ def set_selection(env_path: str, family: str, model: str, gguf_dir: str) -> tupl
     for k in _SEL_KEYS:
         if k not in seen:
             out.append(f"{k}={want[k]}")
+    # Atomic, like set_pin and write_env_setting: the entry point sources this file at start,
+    # and a plain write_text during a start can be read half-done.
+    from . import strata as strata_engine
     try:
-        p.write_text("\n".join(out) + "\n", encoding="utf-8")
+        strata_engine._atomic_replace(p, "\n".join(out) + "\n")
     except OSError as e:
         return False, f"cannot write {p}: {e}"
     return True, f"next start: {family} / {model}" + (f" from {gguf_dir}" if gguf_dir else "")

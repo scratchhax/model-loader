@@ -176,11 +176,29 @@ def _backends(include_stopped: bool = False) -> list[dict]:
             # endpoint but /health). Carried on the backend so every request below sends it.
             key = services.api_key_of(c.attrs)
             out.append({"name": c.name, "engine": engine, "running": running,
+                        "cpu_only": engine == "llama" and _cpu_only(c.attrs),
                         "url": f"http://{c.name}:{port}" if port else "", "models": [],
-                        "headers": {"Authorization": f"Bearer {key}"} if key else {}})
+                        "headers": {"Authorization": f"Bearer {key}"} if key else {},
+                        "started_at": str((c.attrs.get("State") or {}).get("StartedAt") or "")})
     except Exception:  # noqa: BLE001 - a docker hiccup is "nothing found", never a 500
         return []
     return out
+
+
+_GPU_IMAGE_MARKERS = ("rocm", "cuda", "vulkan", "sycl", "musa", "intel")
+
+
+def _cpu_only(attrs: dict) -> bool:
+    """A llama container with no GPU: an image built without a GPU backend and no GPU device
+    passed in. ggml-org's plain `:server` is CPU only; `:server-rocm` and friends are not."""
+    image = ((attrs.get("Config") or {}).get("Image") or "").lower()
+    if any(m in image for m in _GPU_IMAGE_MARKERS):
+        return False
+    host = attrs.get("HostConfig") or {}
+    devices = [str((d or {}).get("PathOnHost") or "") for d in host.get("Devices") or []]
+    if any(d.startswith(("/dev/kfd", "/dev/dri", "/dev/nvidia")) for d in devices):
+        return False
+    return not host.get("DeviceRequests")
 
 
 async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
@@ -240,6 +258,38 @@ def _rank(b: dict) -> tuple:
     return (("cpu" in name), any(k in name for k in ("voice", "asr", "embed")), name)
 
 
+# {container name: the StartedAt it was last seen serving under}. A container that is up and not
+# serving is either parked (it served since this start) or still starting (it has not). Only the
+# second must hold off an automatic switch; see starting_backends().
+_seen_ready: dict[str, str] = {}
+
+
+def _started_epoch(started_at: str) -> float:
+    """docker's RFC 3339 StartedAt (nanoseconds, Z) as epoch seconds; 0.0 when unparseable."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(started_at.split(".")[0].rstrip("Z") + "+00:00").timestamp()
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def starting_backends(bs: list[dict], now: float | None = None) -> list[dict]:
+    """Running backends that are coming up: started inside their engine's ready timeout, not
+    serving, and not seen serving since that start (which is what a parked Strata has been)."""
+    now = time.time() if now is None else now
+    out = []
+    for b in bs:
+        if b.get("ready") or not b.get("running", True):
+            continue
+        started = b.get("started_at", "")
+        if not started or _seen_ready.get(b["name"]) == started:
+            continue
+        window = services.engines.READY_TIMEOUT_S.get(b["engine"], services.engines._READY_TIMEOUT_DEFAULT_S)
+        if now - _started_epoch(started) < window:
+            out.append(b)
+    return out
+
+
 async def _live_map() -> tuple[list[dict], dict[str, dict]]:
     """(backends with their models and readiness, {model_id: the PREFERRED READY backend}).
 
@@ -250,13 +300,21 @@ async def _live_map() -> tuple[list[dict], dict[str, dict]]:
     """
     bs = sorted(_backends(), key=_rank)
     by_model: dict[str, dict] = {}
+    gpu_only = ini.gpu_sections() if any(b.get("cpu_only") for b in bs) else set()
     async with httpx.AsyncClient() as client:
         for b in bs:
             b["models"] = await _models_of(client, b)
             b["ready"] = await _ready(client, b)
             if not b["ready"]:
                 continue
+            _seen_ready[b["name"]] = b.get("started_at", "")
+            if b.get("cpu_only"):
+                # Still LISTED (it is a real model of the llama engine, and a dropdown should not
+                # lose it whenever the GPU router is down) but never routed here; resolve() says why.
+                b["gpu_only"] = [m for m in b["models"] if m in gpu_only]
             for m in b["models"]:
+                if m in b.get("gpu_only", ()):
+                    continue
                 by_model.setdefault(m, b)      # first wins, and the list is ranked
             if b["engine"] == "strata":
                 # A Strata model in a borrowed catalog slot is served under the slot's name
@@ -368,10 +426,12 @@ async def resolve(asked: str) -> tuple[dict, str]:
             # default to be configured first turned the first use of the alias into an error
             # message instead of an answer.
             want, src = last_model_for("llama"), "last-used"
-        if want and want in b["models"]:
+        if want and want in b["models"] and want not in b.get("gpu_only", ()):
             return b, want            # honour the pin: ask THIS backend for the default
         if want and want in by_model:
             return by_model[want], want
+        if want and want in b.get("gpu_only", ()):
+            raise Unresolved(_cpu_refusal(want, b["name"]))
         if want:
             raise Unresolved(f"the {src} llama model {want!r} is not offered by {b['name']}")
         if len(b["models"]) == 1:
@@ -381,7 +441,15 @@ async def resolve(asked: str) -> tuple[dict, str]:
 
     if asked in by_model:
         return by_model[asked], asked
+    cpu = [b["name"] for b in bs if b.get("ready") and asked in b.get("gpu_only", ())]
+    if cpu:
+        raise Unresolved(_cpu_refusal(asked, cpu[0]))
     raise Unresolved(f"no running backend serves {asked!r}")
+
+
+def _cpu_refusal(model: str, backend: str) -> str:
+    return (f"{model} is set up for the GPUs, and the only llama backend running is {backend}, "
+            f"which is CPU only. Switch to llama in Model Loader to run it on the cards.")
 
 
 # --------------------------------------------------------------------------- endpoints
@@ -572,7 +640,6 @@ def strip_narration_blocks(body: dict) -> int:
             continue
 
         kept: list = []
-        changed = False
         for block in content:
             if not isinstance(block, dict) or \
                     str(block.get("type", "")).lower() not in _NARRATION_BLOCKS:
@@ -580,7 +647,6 @@ def strip_narration_blocks(body: dict) -> int:
                 continue
             text = _block_text(block)
             lines = text.splitlines()
-            changed = True
             # Every reasoning chunk becomes a text chunk, not just the ones carrying narration.
             # The template's objection is to the chunk type, so leaving one untouched leaves the
             # whole conversation unrenderable - which is the per-model chase this exists to end.
@@ -1044,6 +1110,15 @@ async def may_autoswitch(target: str) -> tuple[bool, str]:
         who = ", ".join(f"{e} ({n} in flight)" for e, n in busy)
         return False, (f"not taking the cards from {who} mid-request. "
                        f"Try again when it is idle.")
+
+    # A start this app did not make (docker restart, a compose recreate) is invisible to the
+    # switch state and the in-flight count, and switching under it is how a Maya pick once
+    # collided with a hand-started Strata: both came up for the same cards.
+    bs, _ = await _live_map()
+    coming = [b["name"] for b in starting_backends(bs) if b["engine"] != target]
+    if coming:
+        return False, (f"{', '.join(coming)} is starting up outside Model Loader. "
+                       f"Try again once it is serving.")
     return True, ""
 
 

@@ -336,6 +336,27 @@ def section_names() -> list[str]:
     return read_ini().sections()
 
 
+_NGL_KEYS = ("ngl", "n-gpu-layers", "gpu-layers")
+_GPU_PLACEMENT_KEYS = ("split-mode", "tensor-split", "main-gpu", "device")
+
+
+def gpu_sections(cp: configparser.ConfigParser | None = None) -> set[str]:
+    """Sections written for the GPUs: any layers offloaded, or a GPU placement key.
+
+    Every llama backend reads the whole of models.ini, so a CPU-only server offers these too.
+    Run there they either fail (a tensor split with no devices) or load a 27B model into RAM and
+    evict the small one that backend is for, so the router does not send them to one.
+    """
+    cp = cp or read_ini()
+    out: set[str] = set()
+    for name in cp.sections():
+        vals = dict(cp.items(name))
+        ngl = next((vals[k].strip().lower() for k in _NGL_KEYS if k in vals), "")
+        if any(k in vals for k in _GPU_PLACEMENT_KEYS) or (ngl and ngl not in ("0", "-0")):
+            out.add(name)
+    return out
+
+
 _TRUTHY = {"true", "on", "yes", "1"}
 _FALSY = {"false", "off", "no", "0"}
 

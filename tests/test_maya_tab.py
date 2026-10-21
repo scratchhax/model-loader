@@ -141,7 +141,7 @@ class TestPage:
 
     def test_post_writes_and_answers(self, web, conf):
         r = web.post("/maya/tuning", data={"name": "slots", "value": "16", "config": CFG})
-        assert r.status_code == 200 and "Saved" in r.text
+        assert r.status_code == 200 and "saved" in r.text and "Failed" not in r.text
         assert _cfg(conf)["env"]["MAYA_GLM_SLOTS"] == "16"
 
     def test_nav_has_maya(self, web):

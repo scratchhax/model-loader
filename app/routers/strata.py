@@ -11,7 +11,7 @@ from .. import hf, services, strata_models
 from ..config import settings
 from ..downloader import manager
 from ..utils import human_bytes
-from ..web import templates, _blocked_chip, _QUEUED_CHIP
+from ..web import templates, _blocked_chip, _form_note, _QUEUED_CHIP
 
 router = APIRouter()
 
@@ -77,9 +77,7 @@ def _strata_selected_tag(sel: dict) -> str:
 def strata_tuning(install_tag: str = Form(...), flag: str = Form(...),
                   value: str = Form(...)) -> HTMLResponse:
     ok, msg = strata_models.set_tunable(install_tag, flag, value, STRATA_CONTAINER, STRATA_DATA)
-    if not ok:
-        return _blocked_chip(msg)
-    return HTMLResponse(_QUEUED_CHIP.format(label="Saved", title=msg))
+    return _form_note(ok, msg, label="saved, applies on next start")
 
 
 @router.get("/strata/models", response_class=HTMLResponse)
@@ -177,6 +175,9 @@ def _strata_refusal(files: list[dict]) -> str:
     return "GSQ-RCO, but no complete shard set for a quant tier this engine lists"
 
 
+_CANT_INSTALL = "Can&rsquo;t install"
+
+
 @router.post("/strata/install", response_class=HTMLResponse)
 async def strata_install(repo_id: str = Form(...), family: str = Form(...),
                          model: str = Form(...)) -> HTMLResponse:
@@ -184,18 +185,18 @@ async def strata_install(repo_id: str = Form(...), family: str = Form(...),
     st = _strata_state()
     tier = next((t for t in st["tiers"] if t.family == family and t.model == model), None)
     if tier is None:
-        return _blocked_chip("that family/tier is not in the engine's catalog")
+        return _blocked_chip("that family/tier is not in the engine's catalog", _CANT_INSTALL)
     if tier.install_tag in st["installed"]:
-        return _blocked_chip(f"{tier.install_tag} is already installed — remove it first")
+        return _blocked_chip(f"{tier.install_tag} is already installed; remove it first", _CANT_INSTALL)
 
     try:
         detail = await hf.repo_detail(repo_id)
     except httpx.HTTPError as e:
-        return _blocked_chip(f"cannot read {repo_id}: {e}")
+        return _blocked_chip(f"cannot read {repo_id}: {e}", _CANT_INSTALL)
     files = [{"path": f.path, "size": f.size} for f in detail.files]
     match = next((m for m in strata_models.classify_repo(files, [tier])), None)
     if match is None:
-        return _blocked_chip("this repo no longer matches that tier")
+        return _blocked_chip("this repo no longer matches that tier", _CANT_INSTALL)
 
     # Content hashes first: without them every reuse check degrades to "same size", which is
     # not good enough to act on (see plan_install).
@@ -233,5 +234,7 @@ def strata_select(family: str = Form(...), model: str = Form(...),
     """Point the next Strata start at an installed pair. Takes effect on restart, not now."""
     ok, msg = strata_models.set_selection(STRATA_ENV_FILE, family, model, gguf_dir)
     if not ok:
-        return _blocked_chip(msg)
-    return HTMLResponse(_QUEUED_CHIP.format(label="Saved", title=msg + " — restart Strata to apply"))
+        return _form_note(False, msg)
+    resp = _form_note(True, msg + "; restart Strata to apply", label="saved, applies on next start")
+    resp.headers["HX-Refresh"] = "true"
+    return resp

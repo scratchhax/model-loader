@@ -60,7 +60,7 @@
     {# Stopped backends are listed too - see the note in _backends(). Pinning to one is allowed
        and takes effect when it next runs; a request meanwhile is refused by name rather than
        sent somewhere else. #}
-    <form hx-post="/router/backend" hx-swap="outerHTML" class="flex items-center gap-1">
+    <form hx-post="/router/backend" hx-target="find .form-note" hx-swap="innerHTML" class="flex items-center gap-1">
       <input type="hidden" name="engine" value="{{ e }}">
       <select name="backend" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
         <option value="">auto</option>
@@ -69,11 +69,16 @@
         {% endfor %}
       </select>
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Pin</button>
+      <span class="form-note"></span>
     </form>
     {% endif %}
-    <form hx-post="/router/default" hx-swap="outerHTML" class="flex items-center gap-2">
+    {# Maya starts the config its compose command names, so a choice here would be recorded and
+       never read. It is shown, so the row matches the other engines, and not offered. #}
+    {% set fixed = e == 'maya' %}
+    <form hx-post="/router/default" hx-target="find .form-note" hx-swap="innerHTML" class="flex items-center gap-2"
+          {% if fixed %}title="Maya starts the model its compose command names (--config {{ maya_run_config or '?' }}); it is not chosen here."{% endif %}>
       <input type="hidden" name="engine" value="{{ e }}">
-      <select name="model" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
+      <select name="model" {% if fixed %}disabled{% endif %} class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
         <option value="">(none)</option>
         {# (value, label): for llama both are the model id; for Strata the value is the INSTALL
            TAG, because the choosable unit there is an installed pack rather than the one model
@@ -83,7 +88,10 @@
                 {% if val in unloaded %}title="In models.ini but no running llama backend serves it — that backend was started before this section existed. Restart it (Containers page) to load."{% endif %}>{{ label }}{% if val in unloaded %} (not loaded){% endif %}</option>
         {% endfor %}
       </select>
+      {% if not fixed %}
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+      {% endif %}
+      <span class="form-note"></span>
     </form>
     {# The one control on this page that moves hardware by itself, so it is labelled as what it
        does rather than as a feature name, and it sits last - after you have said which server
@@ -104,15 +112,7 @@
       nothing
     {% endfor %}
   </div>
-  <form hx-post="/router/recording" hx-swap="outerHTML" class="flex shrink-0 items-center gap-2">
-    {# Routing and bookkeeping are separable on purpose: if accounting ever misbehaves, taking it
-       out of the path should not mean taking inference down with it. #}
-    <input type="hidden" name="on" value="{{ '0' if recording else '1' }}">
-    <span class="text-xs text-slate-500 dark:text-slate-400">recording {{ 'on' if recording else 'off' }}</span>
-    <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">
-      turn {{ 'off' if recording else 'on' }}
-    </button>
-  </form>
+  {% include "_recording_toggle.html" %}
 </div>
 
 <!-- range + totals -------------------------------------------------------- -->

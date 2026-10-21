@@ -1469,7 +1469,7 @@ def analyze(*,
     # overhead starts dominating.
     n_sessions = max(1, min(int(n_sessions or 1), 8))
     g = model_geometry(summary)
-    arch, m, layers, heads, embed = g["arch"], g["m"], g["layers"], g["heads"], g["embed"]
+    arch, m, layers = g["arch"], g["m"], g["layers"]
     head_dim, kv_heads, native_ctx = g["head_dim"], g["kv_heads"], g["native_ctx"]
     experts = g["experts"]
     # explicit K/V lengths + hybrid markers (Qwen 3.5, Zamba, etc.)
