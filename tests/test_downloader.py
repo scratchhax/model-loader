@@ -129,3 +129,35 @@ class TestDownloadManager:
         mgr.jobs["c"] = job(id="c", status="downloading")
         assert mgr.clear_finished() == 2
         assert list(mgr.jobs) == ["c"]
+
+
+class TestInjectable:
+    """Where files land and what auth a URL gets are passed in (review item 19)."""
+
+    def test_defaults_are_the_models_dir_and_the_hf_token_for_hf_only(self, mgr, monkeypatch, tmp_path):
+        monkeypatch.setattr(hf, "get_token", lambda: "tok")
+        assert mgr._auth_headers("https://huggingface.co/o/r/resolve/main/f") == {"Authorization": "Bearer tok"}
+        assert mgr._auth_headers("https://example.com/f.gguf") == {}
+
+        async def scenario():
+            j = mgr.enqueue_url(url="https://example.com/a/b.gguf", filename="sub/b.gguf")
+            j._task.cancel()
+            return j
+        assert asyncio.run(scenario()).dest_path == tmp_path / "sub" / "b.gguf"
+
+    def test_a_manager_for_somewhere_else(self, tmp_path, monkeypatch):
+        async def noop(self, j):
+            pass
+        monkeypatch.setattr(DownloadManager, "_run", noop)
+        monkeypatch.setattr(db, "_DB_PATH", tmp_path / "d.db")
+        db.init()
+        m = DownloadManager(dest_root=lambda: tmp_path / "elsewhere",
+                            auth=lambda url: {"X-Key": "k"})
+
+        async def scenario():
+            j = m.enqueue_url(url="https://mirror.example/f.bin", filename="f.bin")
+            j._task.cancel()
+            return j
+        j = asyncio.run(scenario())
+        assert j.dest_path == tmp_path / "elsewhere" / "f.bin"
+        assert m._auth_headers(j.url) == {"X-Key": "k"}

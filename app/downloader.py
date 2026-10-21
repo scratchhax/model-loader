@@ -220,9 +220,29 @@ class DownloadJob:
         )
 
 
+def _models_root() -> Path:
+    return settings.models_dir
+
+
+def _hf_auth(url: str) -> dict[str, str]:
+    """The Hugging Face token, for huggingface.co URLs only: a URL import from anywhere else must
+    never be handed it."""
+    tok = hf.get_token()
+    return {"Authorization": f"Bearer {tok}"} if tok and "huggingface.co" in url else {}
+
+
 class DownloadManager:
-    def __init__(self) -> None:
+    """Queued, resumable, verified downloads into one directory.
+
+    Where files land and what auth a URL gets are passed in, so the manager is not tied to the
+    models directory or to Hugging Face; this app's one instance (`manager`, below) uses both.
+    `filename` is always relative to `dest_root()`.
+    """
+
+    def __init__(self, dest_root=_models_root, auth=_hf_auth) -> None:
         self.jobs: dict[str, DownloadJob] = {}
+        self._dest_root = dest_root
+        self._auth = auth
 
     async def _wait_turn(self, job: DownloadJob) -> None:
         """Hold a queued job until it is the oldest one waiting and a slot is free.
@@ -271,7 +291,7 @@ class DownloadManager:
         return sorted(self.jobs.values(), key=sort_key)
 
     def _make_job(self, *, repo_id: str, filename: str, url: str, total_bytes: int) -> DownloadJob:
-        dest = settings.models_dir / filename
+        dest = self._dest_root() / filename
         for j in self.jobs.values():
             if j.dest_path == dest and j.status in ("queued", "downloading"):
                 return j
@@ -389,11 +409,7 @@ class DownloadManager:
         job.verified = True
 
     def _auth_headers(self, url: str) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        tok = hf.get_token()
-        if tok and "huggingface.co" in url:
-            headers["Authorization"] = f"Bearer {tok}"
-        return headers
+        return dict(self._auth(url))
 
     def _note_progress(self, job: DownloadJob, delta: int) -> None:
         job.downloaded_bytes += delta
