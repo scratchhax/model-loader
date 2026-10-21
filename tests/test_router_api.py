@@ -123,7 +123,8 @@ class TestBackends:
                                             labels={"ai-lab.engine": "strata"})])
         bs = ra._backends()
         assert bs == [{"name": "strata", "engine": "strata", "running": True,
-                       "url": "http://strata:8080", "models": [], "headers": {}}]
+                       "cpu_only": False, "url": "http://strata:8080", "models": [], "headers": {},
+                       "started_at": ""}]
 
     def test_llamacpp_image_fallback(self, monkeypatch, rdb):
         _docker(monkeypatch, [FakeContainer("rtr", "ghcr.io/ggml-org/llama.cpp:server")])

@@ -28,7 +28,7 @@ from .routers import strata as strata_router
 from .routers import maya as maya_router
 from .routers import updates as updates_router
 from .routers.strata import STRATA_DATA, STRATA_ENV_FILE
-from .web import templates, _blocked_chip, _QUEUED_CHIP, _toast
+from .web import templates, _QUEUED_CHIP, _form_note, _toast
 
 app = FastAPI(title="Model Loader")
 
@@ -566,9 +566,14 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
     if maya_choices:
         per_engine["maya"] = maya_choices
     defaults = {e: router_api.default_for(e) for e in router_api.ENGINES}
-    if not defaults.get("maya") and len(per_engine.get("maya", [])) == 1:
-        # Nothing chosen and one model installed: that model IS what `maya` serves, so the
-        # dropdown says so instead of "(none)".
+    # Maya's row shows what it WILL serve: the model of the config its compose command names.
+    # router.default.maya was never read by anything, so a choice there was a no-op.
+    maya_run_config = maya_engine.run_config_name(services._docker_client())
+    maya_runs = next((r["model"] for r in maya_engine.installed(services._docker_client())
+                      if r["file"] == maya_run_config), "")
+    if maya_runs:
+        defaults["maya"] = maya_runs
+    elif len(per_engine.get("maya", [])) == 1:
         defaults["maya"] = per_engine["maya"][0][0]
     return templates.TemplateResponse("router.html", {
         "request": request,
@@ -576,6 +581,7 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
         "per_engine": per_engine,
         "unloaded": unloaded,
         "defaults": defaults,
+        "maya_run_config": maya_run_config,
         "pins": {e: router_api.pinned_backend(e) for e in router_api.ENGINES},
         "autoswitch": {e: router_api.autoswitch_enabled(e) for e in router_api.ENGINES},
         "autoswitch_dwell": int(router_api.dwell_s()),
@@ -603,7 +609,9 @@ async def router_page(request: Request, range: str = "7d") -> HTMLResponse:
 @app.post("/router/default", response_class=HTMLResponse)
 def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLResponse:
     if engine not in router_api.ENGINES:
-        return _blocked_chip(f"unknown engine {engine!r}")
+        return _form_note(False, f"unknown engine {engine!r}")
+    if engine == "maya":
+        return _form_note(False, "Maya starts the model its compose command names; it is not set here")
     db.set_setting(f"router.default.{engine}", model.strip())
     if engine == "strata" and model.strip():
         # For Strata the value is an INSTALL TAG, because that is the unit you can choose - the
@@ -618,33 +626,28 @@ def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLRe
                 break
         mdl = tag[len(fam) + 1:].upper() if fam != "qwen" else tag.upper()
         if settings.router_readonly:
-            return HTMLResponse(_QUEUED_CHIP.format(
-                label="Noted", title=f"{tag} recorded as the Strata default. This instance is "
-                                     f"read-only, so apply it from the live Model Loader's "
-                                     f"Strata tab ({fam} / {mdl})"))
+            return _form_note(True, f"{tag} recorded as the Strata default. This instance is "
+                                    f"read-only, so apply it from the live Model Loader's "
+                                    f"Strata tab ({fam} / {mdl})", label="noted, not applied")
         ok, msg = strata_models.set_selection(STRATA_ENV_FILE, fam, mdl, "")
-        return HTMLResponse(_QUEUED_CHIP.format(
-            label="Saved" if ok else "Failed",
-            title=msg + (" — restart Strata to apply" if ok else "")))
-    return HTMLResponse(_QUEUED_CHIP.format(
-        label="Saved", title=f"{engine} now defaults to {model or '(none)'}"))
+        return _form_note(ok, msg + ("; restart Strata to apply" if ok else ""),
+                          label="saved, applies on next start")
+    return _form_note(True, f"{engine} now defaults to {model or '(none)'}")
 
 
 @app.post("/router/backend", response_class=HTMLResponse)
 def router_set_backend(engine: str = Form(...), backend: str = Form("")) -> HTMLResponse:
     """Pin an engine's traffic to one container, or clear it back to automatic."""
     if engine not in router_api.ENGINES:
-        return _blocked_chip(f"unknown engine {engine!r}")
+        return _form_note(False, f"unknown engine {engine!r}")
     db.set_setting(f"router.backend.{engine}", backend.strip())
-    return HTMLResponse(_QUEUED_CHIP.format(
-        label="Saved",
-        title=f"{engine} pinned to {backend}" if backend.strip()
-              else f"{engine} back to automatic (CPU last, purpose-named servers after the "
-                   f"general router)"))
+    return _form_note(True, f"{engine} pinned to {backend}" if backend.strip()
+                      else f"{engine} back to automatic (CPU last, purpose-named servers after the "
+                           f"general router)")
 
 
 @app.post("/router/recording", response_class=HTMLResponse)
-def router_set_recording(on: str = Form("1")) -> HTMLResponse:
+def router_set_recording(request: Request, on: str = Form("1")) -> HTMLResponse:
     """The kill switch. Off, the router still routes but writes nothing.
 
     It exists so that if accounting ever misbehaves - a lock, a slow write, a bad migration -
@@ -652,8 +655,8 @@ def router_set_recording(on: str = Form("1")) -> HTMLResponse:
     inference keeps working.
     """
     db.set_setting("router.record", "1" if on == "1" else "0")
-    return HTMLResponse(_QUEUED_CHIP.format(
-        label="Saved", title="recording on" if on == "1" else "recording off — routing continues"))
+    return templates.TemplateResponse("_recording_toggle.html", {
+        "request": request, "recording": db.get_setting("router.record", "1") != "0"})
 
 
 @app.post("/router/autoswitch", response_class=HTMLResponse)

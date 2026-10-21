@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse
 
 from .. import maya as maya_engine
 from .. import services
-from ..web import templates, _blocked_chip, _QUEUED_CHIP
+from ..web import templates, _form_note
 
 router = APIRouter()
 
@@ -45,6 +45,4 @@ def maya_page(request: Request) -> HTMLResponse:
 @router.post("/maya/tuning", response_class=HTMLResponse)
 def maya_tuning(name: str = Form(...), value: str = Form(""), config: str = Form(...)) -> HTMLResponse:
     ok, msg = maya_engine.set_tunable(name, value, config)
-    if not ok:
-        return _blocked_chip(msg)
-    return HTMLResponse(_QUEUED_CHIP.format(label="Saved", title=msg))
+    return _form_note(ok, msg, label="saved, applies on next start")

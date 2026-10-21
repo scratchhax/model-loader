@@ -280,11 +280,30 @@ def packs_dir(root: Path) -> Path:
 
 
 _live_dir: tuple[float, Path] | None = None
+_last_known_dir: Path | None = None
+STRATA_ROOT = Path("/strata")
+
+
+def _guess_data_dir(base: Path | None = None) -> Path:
+    """Where the engine's /data most likely is when docker cannot say.
+
+    The volume this app last saw it use, else the one 0.2-layout directory under /strata, else
+    /strata/data. Falling straight back to /strata/data listed 0.1's installs as current after
+    the move to 0.2, whenever docker was briefly unreachable.
+    """
+    if _last_known_dir is not None:
+        return _last_known_dir
+    base = base or STRATA_ROOT
+    try:
+        new = [p for p in sorted(base.iterdir()) if p.is_dir() and layout(p) == "0.2"]
+    except OSError:
+        new = []
+    return new[0] if len(new) == 1 else base / "data"
 
 
 def live_data_dir(container: str = "strata") -> Path:
-    """data_dir() of the running deployment, cached 30 s; /strata/data when it cannot be told."""
-    global _live_dir
+    """data_dir() of the running deployment, cached 30 s; _guess_data_dir() when it cannot be told."""
+    global _live_dir, _last_known_dir
     if _live_dir and time.time() - _live_dir[0] < 30.0:
         return _live_dir[1]
     found = None
@@ -293,9 +312,11 @@ def live_data_dir(container: str = "strata") -> Path:
         client = services._docker_client()
         if client is not None:
             found = data_dir(client.containers.get(container).attrs or {}, services.strata_own_attrs(client))
-    except Exception:  # noqa: BLE001 - an unreachable docker is "the default", never an error page
+    except Exception:  # noqa: BLE001 - an unreachable docker falls back to a guess, never an error page
         found = None
-    root = found or Path("/strata/data")
+    if found is not None:
+        _last_known_dir = found
+    root = found or _guess_data_dir()
     _live_dir = (time.time(), root)
     return root
 

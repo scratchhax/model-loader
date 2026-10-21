@@ -74,13 +74,17 @@
         </td>
         <td class="px-3 py-2 text-right">
           {% set parts = tag.split('-') %}
-          <form hx-post="/strata/select" hx-swap="outerHTML" class="inline">
+          {# The selection changes three things on this page (the next-start line, which install
+             the tuning below is for, and this row), so success reloads it; a failure lands in
+             the note and the button stays. #}
+          <form hx-post="/strata/select" hx-target="find .form-note" hx-swap="innerHTML" class="inline">
             <input type="hidden" name="family" value="{{ 'unsloth' if tag.startswith('unsloth-') else ('swift' if tag.startswith('swift-') else ('coder' if tag.startswith('coder-') else 'qwen')) }}">
             <input type="hidden" name="model" value="{{ tag.split('-', 1)[1]|upper if '-' in tag else tag|upper }}">
             <button {% if d.missing %}disabled title="Its source files are missing, so this would fail to start"{% endif %}
                     class="rounded-md border px-2 py-1 text-xs
                            {% if d.missing %}cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400
                            {% else %}border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700{% endif %}">Use next start</button>
+            <span class="form-note"></span>
           </form>
         </td>
       </tr>
@@ -110,7 +114,7 @@
       <div class="text-sm font-medium">{{ spec.label }}</div>
       <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ spec.about }}</p>
     </div>
-    <form hx-post="/strata/tuning" hx-swap="outerHTML" class="flex shrink-0 items-center gap-2">
+    <form hx-post="/strata/tuning" hx-target="find .form-note" hx-swap="innerHTML" class="flex shrink-0 items-center gap-2">
       <input type="hidden" name="install_tag" value="{{ tuning_tag }}">
       <input type="hidden" name="flag" value="{{ flag }}">
       <select name="value"
@@ -120,6 +124,7 @@
         {% endfor %}
       </select>
       <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700">Set</button>
+      <span class="form-note"></span>
     </form>
   </div>
   {% endfor %}

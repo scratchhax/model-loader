@@ -36,12 +36,31 @@ def _fmt_ts(v) -> str:
 templates.env.filters["ts"] = _fmt_ts
 
 
-def _blocked_chip(reason: str) -> HTMLResponse:
-    """What a refused download button turns into. The reason rides in the tooltip."""
+def _blocked_chip(reason: str, label: str = "Blocked: llama.cpp can&rsquo;t load this") -> HTMLResponse:
+    """What a refused action button turns into. The reason rides in the tooltip.
+
+    The default label is the download refusal it was written for; anything else passes its own,
+    because a Strata install that fails is not llama.cpp refusing a file.
+    """
     return HTMLResponse(
         '<span class="shrink-0 inline-flex items-center rounded-md bg-red-100 dark:bg-red-950 '
         'text-red-800 dark:text-red-300 px-3 py-1.5 text-xs font-medium" '
-        f'title="{html.escape(reason)}">Blocked: llama.cpp can&rsquo;t load this</span>')
+        f'title="{html.escape(reason)}">{label}</span>')
+
+
+def _form_note(ok: bool, msg: str, label: str = "saved") -> HTMLResponse:
+    """The result of a settings form, swapped into the form's own `.form-note` span.
+
+    Settings forms used to swap themselves for a "Saved" chip, so the control was gone until a
+    reload. They now target `find .form-note` instead: the select keeps the value just saved,
+    and this says whether it took. A failure shows its reason, not just a tooltip.
+    """
+    if ok:
+        return HTMLResponse(f'<span class="text-[11px] text-emerald-700 dark:text-emerald-400" '
+                            f'title="{html.escape(msg)}">&check; {html.escape(label)}</span>')
+    return HTMLResponse(f'<span class="inline-block max-w-[18rem] truncate align-middle text-[11px] '
+                        f'text-red-700 dark:text-red-400" title="{html.escape(msg)}">'
+                        f'Failed: {html.escape(msg)}</span>')
 
 
 def _toast(ok: bool, msg: str) -> HTMLResponse:
