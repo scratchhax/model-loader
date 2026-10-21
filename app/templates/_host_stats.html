@@ -26,7 +26,7 @@
    a model download; a line of 240 identical samples would be decoration. #}
 {% macro spark(points, crit, warn) -%}
 <svg viewBox="0 0 100 20" class="mt-2 block h-6 w-full
-            {% if crit %}text-red-400{% elif warn %}text-amber-400{% else %}text-emerald-400/80{% endif %}"
+            {% if crit %}text-red-600 dark:text-red-400{% elif warn %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400/80{% endif %}"
      preserveAspectRatio="none">
   <polyline fill="none" stroke="currentColor" stroke-width="1.5"
             vector-effect="non-scaling-stroke" points="{{ points }}"/>
@@ -37,7 +37,7 @@
 {# Clamped here rather than inline: an unclamped width silently renders a bar wider than its
    track, and a load over 100% of cores is a normal reading, not an error. #}
 {% set w = 0 if pct is none else (100 if pct > 100 else (0 if pct < 0 else pct)) %}
-<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
   <div class="h-full rounded-full transition-[width] duration-700 ease-out
               {% if crit %}bg-red-400{% elif warn %}bg-amber-400{% else %}bg-emerald-400/80{% endif %}"
        style="width: {{ '%.1f' % w }}%"></div>
@@ -46,9 +46,9 @@
 
 {% macro shell(crit, warn) -%}
 rounded-xl border px-4 py-3 transition-colors duration-500
-{% if crit %}border-red-500/50 bg-red-950/30
-{% elif warn %}border-amber-500/40 bg-amber-950/20
-{% else %}border-slate-800 bg-slate-950/95{% endif %}
+{% if crit %}border-red-500/50 bg-red-50 dark:bg-red-950/30
+{% elif warn %}border-amber-500/40 bg-amber-50 dark:bg-amber-950/20
+{% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/95{% endif %}
 {%- endmacro %}
 
 <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -57,10 +57,10 @@ rounded-xl border px-4 py-3 transition-colors duration-500
   <div class="{{ shell(host.load_crit, host.load_warn) }}">
     <div class="flex items-baseline gap-2">
       <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.load_crit %}text-red-300{% elif host.load_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</span>
+                   {% if host.load_crit %}text-red-700 dark:text-red-300{% elif host.load_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</span>
       <span class="text-xs text-slate-500">load</span>
-      {% if host.load_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">saturated</span>
-      {% elif host.load_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">busy</span>{% endif %}
+      {% if host.load_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">saturated</span>
+      {% elif host.load_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">busy</span>{% endif %}
     </div>
     {% if host.load_spark %}{{ spark(host.load_spark, host.load_crit, host.load_warn) }}{% else %}{{ bar(host.load.pct, host.load_crit, host.load_warn) }}{% endif %}
     <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
@@ -73,10 +73,10 @@ rounded-xl border px-4 py-3 transition-colors duration-500
   <div class="{{ shell(host.ram_crit, host.ram_warn) }}">
     <div class="flex items-baseline gap-2">
       <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.ram_crit %}text-red-300{% elif host.ram_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % host.ram_avail }}</span>
+                   {% if host.ram_crit %}text-red-700 dark:text-red-300{% elif host.ram_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % host.ram_avail }}</span>
       <span class="text-xs text-slate-500">GB RAM free</span>
-      {% if host.ram_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">no headroom</span>
-      {% elif host.ram_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">tight</span>{% endif %}
+      {% if host.ram_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">no headroom</span>
+      {% elif host.ram_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">tight</span>{% endif %}
     </div>
     {% if host.ram_spark %}{{ spark(host.ram_spark, host.ram_crit, host.ram_warn) }}{% else %}{{ bar(host.ram_used_pct, host.ram_crit, host.ram_warn) }}{% endif %}
     <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
@@ -92,13 +92,13 @@ rounded-xl border px-4 py-3 transition-colors duration-500
   <div class="{{ shell(false, host.swap_warn) }}">
     <div class="flex items-baseline gap-2">
       {% if host.swap_total <= 0 %}
-      <span class="font-mono text-3xl font-semibold tabular-nums leading-none text-slate-100">none</span>
+      <span class="font-mono text-3xl font-semibold tabular-nums leading-none text-slate-900 dark:text-slate-100">none</span>
       <span class="text-xs text-slate-500">swap</span>
       {% else %}
       <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.swap_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % host.swap_used }}</span>
+                   {% if host.swap_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % host.swap_used }}</span>
       <span class="text-xs text-slate-500">GB swap used</span>
-      {% if host.swap_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">swapping</span>{% endif %}
+      {% if host.swap_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">swapping</span>{% endif %}
       {% endif %}
     </div>
     {% if host.swap_total > 0 %}
@@ -109,7 +109,7 @@ rounded-xl border px-4 py-3 transition-colors duration-500
       </div>
     {% else %}
       {# No bar: there is nothing to fill. The line says what the absence means instead. #}
-      <div class="mt-2 h-1.5 w-full rounded-full bg-slate-800/50"></div>
+      <div class="mt-2 h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800/50"></div>
       <div class="mt-1.5 text-[10px] text-slate-500"
            title="With no swap the kernel has no slack. A model sized past available RAM is an OOM kill, not a slow run.">
         no overflow, so oversizing RAM is an OOM kill
@@ -121,10 +121,10 @@ rounded-xl border px-4 py-3 transition-colors duration-500
   <div class="{{ shell(host.disk_crit, host.disk_warn) }}">
     <div class="flex items-baseline gap-2">
       <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.disk_crit %}text-red-300{% elif host.disk_warn %}text-amber-300{% else %}text-slate-100{% endif %}">{{ '%.0f' % host.disk_free }}</span>
+                   {% if host.disk_crit %}text-red-700 dark:text-red-300{% elif host.disk_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % host.disk_free }}</span>
       <span class="text-xs text-slate-500">GB free</span>
-      {% if host.disk_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300">low</span>
-      {% elif host.disk_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">filling</span>{% endif %}
+      {% if host.disk_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">low</span>
+      {% elif host.disk_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">filling</span>{% endif %}
     </div>
     {{ bar(host.disk_used_pct, host.disk_crit, host.disk_warn) }}
     <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
