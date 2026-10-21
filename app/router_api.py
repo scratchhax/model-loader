@@ -37,20 +37,16 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import db, ini, narrate, services
+from . import db, engine_registry, ini, narrate, services
 from .utils import docker_client
 
 app = FastAPI(title="Model Router")
 
-# The engines this router knows how to address, in the order /v1/models lists them. Maya goes
-# last so ENGINES[0] - the default for a request that names no model, and the first /props
-# answer - stays what it was before it arrived.
-ENGINES = ("strata", "llama", "maya")
-
-# Engines that serve exactly one model and ignore the name they are asked for. For these the
-# loaded model IS the answer to the alias; only llama's router picks by name. Maya runs one
-# model per container (GLM-5.3-Flash or DeepSeek-V4.1-Flash), the same shape as Strata.
-SINGLE_MODEL = frozenset({"strata", "maya"})
+# The engines this router knows how to address, in the order /v1/models lists them, and the ones
+# that serve exactly one model and ignore the name they are asked for (the loaded model IS the
+# answer to the alias; only llama's router picks by name). Both declared in engine_registry.
+ENGINES = engine_registry.NAMES
+SINGLE_MODEL = frozenset(n for n, e in engine_registry.ENGINES.items() if e.single_model)
 
 # Long on purpose. A 200K-token prompt takes 60-90 s to read on this box before a single token
 # comes back, and a default-length client timeout would turn the engine's slowest legitimate
@@ -223,14 +219,10 @@ async def _ready(client: httpx.AsyncClient, b: dict) -> bool:
     """
     if b["engine"] not in SINGLE_MODEL:
         return bool(b["models"])
+    spec = engine_registry.get(b["engine"])
     try:
-        r = await client.get(f"{b['url']}/health", timeout=5.0, headers=b.get("headers") or {})
-        if r.status_code != 200:
-            return False
-        h = r.json()
-        if b["engine"] == "maya":
-            return str(h.get("status") or "") == "ok"
-        return bool(h.get("loaded"))
+        r = await client.get(f"{b['url']}{spec.ready_path}", timeout=5.0, headers=b.get("headers") or {})
+        return engine_registry.serving(b["engine"], r.status_code, r.json() if r.status_code == 200 else None)
     except (httpx.HTTPError, ValueError, AttributeError):
         return False
 

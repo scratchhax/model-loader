@@ -671,9 +671,9 @@ def set_selection(env_path: str, family: str, model: str, gguf_dir: str) -> tupl
             out.append(f"{k}={want[k]}")
     # Atomic, like set_pin and write_env_setting: the entry point sources this file at start,
     # and a plain write_text during a start can be read half-done.
-    from . import strata as strata_engine
+    from . import fileio
     try:
-        strata_engine._atomic_replace(p, "\n".join(out) + "\n")
+        fileio.atomic_replace(p, "\n".join(out) + "\n")
     except OSError as e:
         return False, f"cannot write {p}: {e}"
     return True, f"next start: {family} / {model}" + (f" from {gguf_dir}" if gguf_dir else "")
@@ -931,7 +931,7 @@ def env_settings(env_path: str) -> dict[str, str]:
 def write_env_setting(env_path: str, flag: str, value: str) -> tuple[bool, str]:
     """Set one tunable in the pin file, keeping every other line (comments included) as it is."""
     from pathlib import Path
-    from . import strata as strata_engine
+    from . import fileio
     lines = _env_lines(env_path)
     if not lines:
         return False, f"cannot read {env_path}"
@@ -961,7 +961,7 @@ def write_env_setting(env_path: str, flag: str, value: str) -> tuple[bool, str]:
         if not done:
             out.append(f'STRATA_SET="{flag}={value}"')
     try:
-        strata_engine._atomic_replace(Path(env_path), "\n".join(out) + "\n")
+        fileio.atomic_replace(Path(env_path), "\n".join(out) + "\n")
     except OSError as e:
         return False, f"cannot write {env_path}: {e}"
     return True, f"{TUNABLES[flag]['label']} set to {value}; applies on the next restart"

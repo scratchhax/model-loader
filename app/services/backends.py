@@ -11,6 +11,7 @@ import httpx
 from docker.errors import DockerException, NotFound
 
 from ..config import settings
+from ..utils import container_env
 
 from .dockerbase import _docker_client
 from .hotpath import _http
@@ -432,15 +433,7 @@ _KEY_ENV = ("API_KEY", "STRATA_API_KEY")
 
 def api_key_of(attrs: dict | None) -> str:
     """A container's API key, from its own environment (compose env_file lands there). "" if none."""
-    try:
-        env = ((attrs or {}).get("Config") or {}).get("Env") or []
-    except AttributeError:
-        return ""
-    vals = {}
-    for e in env:
-        if isinstance(e, str) and "=" in e:
-            k, _, v = e.partition("=")
-            vals[k] = v.strip()
+    vals = container_env(attrs)
     return next((vals[k] for k in _KEY_ENV if vals.get(k)), "")
 
 
