@@ -9,9 +9,19 @@ from ..web import templates, _form_note
 
 router = APIRouter()
 
-# The port compose publishes Maya's own dashboard on (its Monitor and Chat), for the link. The
-# page cannot learn it from inside: from here the container is maya:8080.
-DASHBOARD_PORT = 8087
+def host_port(attrs: dict | None, container_port: str = "8080/tcp") -> str:
+    """The host port compose publishes a container port on, for a link a browser can follow.
+
+    From inside this app Maya is maya:8080, which a browser cannot reach; docker inspect has the
+    binding (NetworkSettings while running, HostConfig.PortBindings either way). "" if unpublished.
+    """
+    attrs = attrs or {}
+    for ports in ((attrs.get("NetworkSettings") or {}).get("Ports") or {},
+                  (attrs.get("HostConfig") or {}).get("PortBindings") or {}):
+        for b in ports.get(container_port) or []:
+            if (b or {}).get("HostPort"):
+                return str(b["HostPort"])
+    return ""
 
 
 def _maya_state() -> dict:
@@ -20,9 +30,10 @@ def _maya_state() -> dict:
     cfg = maya_engine.read_config(run_cfg) if run_cfg else None
     metrics = services.strata_metrics(maya_engine.CONTAINER)    # Maya serves Strata's /metrics
     try:
-        status = client.containers.get(maya_engine.CONTAINER).status if client else ""
+        c = client.containers.get(maya_engine.CONTAINER) if client else None
+        status, attrs = (c.status, c.attrs) if c else ("", {})
     except Exception:  # noqa: BLE001 - no container is a state the page explains, not an error
-        status = ""
+        status, attrs = "", {}
     return {
         "status": status,
         "health": maya_engine.health(client) if client else None,
@@ -33,7 +44,7 @@ def _maya_state() -> dict:
         "tunables": maya_engine.TUNABLES,
         "tuning": maya_engine.tuning_state(cfg, metrics) if cfg else {},
         "engine_running": metrics is not None,
-        "dashboard_port": DASHBOARD_PORT,
+        "dashboard_port": host_port(attrs),
     }
 
 

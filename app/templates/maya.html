@@ -6,7 +6,7 @@
 
 <div class="flex items-baseline justify-between gap-3">
   <h1 class="text-xl font-semibold tracking-tight">Maya</h1>
-  {% if health %}
+  {% if health and dashboard_port %}
   <a href="http://{{ request.url.hostname }}:{{ dashboard_port }}/" target="_blank" rel="noopener"
      class="text-sm text-slate-500 dark:text-slate-400 hover:underline">Maya's own dashboard {{ icon('external-link', 13) }}</a>
   {% endif %}
