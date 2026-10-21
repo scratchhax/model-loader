@@ -982,21 +982,15 @@ async def inference_speed(container_name: str, internal_port: int | None,
     live_slots = generating + prefilling
     ctx_used = sum(sl.ctx_used for sl in live_slots or slots)
     ctx_cached = sum(sl.ctx_cached for sl in live_slots or slots)
+    # The whole pool: every slot's window, summed, because the numerator sums the slots too.
+    # Strata included. Its slots each report the full context as n_ctx, which was once read as
+    # "one 262k pool the slots share" and the slot count dropped, so a sum of conversations was
+    # measured against one conversation's window ("617.8k of 262k window", 2026-10-21). Each
+    # slot really has its own window: Strata checks every request against max_context, and its
+    # /slots gives each slot the tokens IT holds (slots 0-2 held 204,510 + 189,900 + 223,405 at
+    # once, 4 x 262,144 batch slots). llama's n_ctx is already a per-slot share; same formula.
     per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
-    if _engine == "strata":
-        # Every Strata slot reports the whole engine context as its n_ctx (context 262144,
-        # batch_slots 4, every slot n_ctx 262144), not the per-slot share llama-server derives
-        # from --ctx-size / parallel, so the slot count must not multiply it ("of 1048k window").
-        # And each slot really can fill that window: on 0.2, 2026-10-21, slots 0 and 1 held
-        # 204,510 and 189,900 tokens at once. So a SUM of slots is not comparable with it either:
-        # it read "617.8k of 262k window". The fullest conversation against its window is, and
-        # it is what the tile's tooltip promises.
-        ctx_total = per_slot_ctx
-        fullest = max(live_slots or slots, key=lambda sl: sl.ctx_used, default=None)
-        if fullest is not None:
-            ctx_used, ctx_cached = fullest.ctx_used, fullest.ctx_cached
-    else:
-        ctx_total = per_slot_ctx * len(slots)
+    ctx_total = per_slot_ctx * len(slots)
     if solo is not None and solo.state in ("prefill", "generating"):
         # The headline follows the LIVE conversation, which is what the tile's own tooltip
         # promises ("the live conversation closest to its ceiling") and what ns.fill does.

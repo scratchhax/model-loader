@@ -172,8 +172,9 @@ class TestSoloContextInUse:
         assert out.cache_known is False  # Strata cannot answer the cache question live
         assert out.solo is not None and out.solo.ctx_used == 1050
         assert out.ctx_used == 1050
-        # Strata slots share one pool: the denominator is the pool, not per-slot x count.
-        assert out.ctx_total == 4096
+        # Each Strata slot has its own window (n_ctx is per slot, every request is checked
+        # against max_context), so the pool is per-slot x count, like llama's.
+        assert out.ctx_total == 4 * 4096
         assert sp._ctx_history["c"][-1][1] == 1050.0
 
     def test_solo_generation_excludes_idle_slot_context(self, monkeypatch):
@@ -210,10 +211,9 @@ class TestSoloContextInUse:
         assert out.ctx_used == 83278
         assert out.prompt_tokens == 83278  # the working slot's prompt, not the parked
 
-    def test_idle_headline_is_the_fullest_slot(self, monkeypatch):
-        # Nothing working: the fullest parked conversation against its window. Every Strata
-        # slot can fill the whole window (0.2 held 204,510 and 189,900 at once), so the SUM it
-        # used to show read "617.8k of 262k window" - more than full, and meaning nothing.
+    def test_idle_headline_still_shows_resident_slot_sum(self, monkeypatch):
+        # Nothing working: the remembered figures are the honest "how full the
+        # window has been" answer, parked conversations and all.
         raw = [{"id": 0, "n_ctx": 262144, "is_processing": False,
                 "n_prompt_tokens": 139632},
                {"id": 1, "n_ctx": 262144, "is_processing": False,
@@ -224,15 +224,18 @@ class TestSoloContextInUse:
                 "n_prompt_tokens": 0}]
         sp, out = self._speed(monkeypatch, {"open_task": None, "newest": ""}, raw)
         assert out.state == "idle"
-        assert out.ctx_used == 139632 and out.ctx_total == 262144
+        assert out.ctx_used == 139632 + 30415
 
-    def test_two_long_conversations_never_overfill_the_bar(self, monkeypatch):
+    def test_the_pool_is_every_slots_window(self, monkeypatch):
+        # Live on 0.2, 2026-10-21: three conversations parked at once, summed against ONE
+        # slot's window, read "617.8k of 262k window". Against the pool it fits.
         raw = [{"id": 0, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 204510},
                {"id": 1, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 189900},
                {"id": 2, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 223405},
                {"id": 3, "n_ctx": 262144, "is_processing": False, "n_prompt_tokens": 0}]
         sp, out = self._speed(monkeypatch, {"open_task": None, "newest": ""}, raw)
-        assert out.ctx_used == 223405 <= out.ctx_total
+        assert out.ctx_used == 204510 + 189900 + 223405
+        assert out.ctx_total == 4 * 262144 and out.ctx_used <= out.ctx_total
 
     def test_idle_solo_row_is_history_not_pool_context(self, monkeypatch):
         import time as _time
