@@ -197,7 +197,7 @@ def palette() -> dict:
     return {"items": items}
 
 
-# ---------- Mission control (v2 overview) ----------
+# ---------- Overview ----------
 
 app.include_router(overview_router.router)
 
@@ -207,7 +207,7 @@ app.include_router(overview_router.router)
 app.include_router(power_router.router)
 
 
-# ---------- Models directory ----------
+# ---------- Models ----------
 
 app.include_router(models_router.router)
 
