@@ -23,10 +23,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import tempfile
 import time
 from pathlib import Path
+
+from . import fileio
+from .utils import container_env
 
 # The engine name a container declares in its `ai-lab.engine` label.
 ENGINE = "strata"
@@ -46,32 +47,8 @@ _PINS_RE = re.compile(r"^(?:export\s+)?GPUS\s*=\s*(\d+(?:\s*,\s*\d+)*)\s*$")
 _PIN_ANY_RE = re.compile(r"^(?:export\s+)?GPUS?\s*=")
 
 
-def _atomic_replace(path: Path, data: str) -> None:
-    """tmp + fsync + os.replace, preserving the target's mode.
-
-    Both files this module writes are READ BY OTHER PROCESSES at start: the strata
-    entry point sources strata.env, and the server loads its run config. A truncated
-    write (plain write_text) leaves them a half file; mkstemp alone would fix the
-    truncation but land on mode 0600, so the original mode is carried over.
-    """
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = 0o644
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+# Shared with Maya and strata_models; kept under these names for this module's callers.
+_atomic_replace = fileio.atomic_replace
 
 
 def read_pin(path: Path | None = None) -> str:
@@ -202,13 +179,7 @@ def card_count(exec_candidates=()) -> int:
 BACKUPS_TO_KEEP = 5
 
 
-def _env_of(attrs: dict | None) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for entry in ((attrs or {}).get("Config") or {}).get("Env") or []:
-        if isinstance(entry, str) and "=" in entry:
-            k, _, v = entry.partition("=")
-            env[k.strip()] = v.strip()
-    return env
+_env_of = container_env
 
 
 def config_tag(attrs: dict | None) -> str:
@@ -340,26 +311,7 @@ def run_config_path(attrs: dict | None, own_attrs: dict | None = None) -> Path |
 
 
 def _backup(path: Path) -> None:
-    """One rolling backup per write, the ini.py discipline: timestamped, pruned, best-effort."""
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    backup = path.with_name(path.name + f".bak-{ts}")
-    n = 1
-    while backup.exists():
-        backup = path.with_name(path.name + f".bak-{ts}-{n}")
-        n += 1
-    try:
-        shutil.copy(path, backup)
-    except OSError:
-        pass
-    try:
-        backups = sorted(path.parent.glob(path.name + ".bak-*"), reverse=True)
-        for old in backups[BACKUPS_TO_KEEP:]:
-            try:
-                old.unlink()
-            except OSError:
-                continue
-    except OSError:
-        pass
+    fileio.backup(path, BACKUPS_TO_KEEP)
 
 
 def merge_run_config(path: Path, keys: dict) -> tuple[bool, str]:

@@ -31,7 +31,7 @@ import time
 
 import httpx
 
-from . import db
+from . import db, engine_registry
 
 CHECK_EVERY_S = 6 * 3600.0
 _KEY = "updates.state"
@@ -39,16 +39,12 @@ _HTTP_TIMEOUT = httpx.Timeout(10.0)
 
 # The engines and where their upstreams and runbooks are. `image` is the local repository the
 # release tags live in; `live_tag` the one compose runs.
-ENGINES = [
-    {"engine": "strata", "label": "Strata", "repo": "Niko1221/Strata", "kind": "tags",
-     "image": "ai-lab/strata", "live_tag": "rocm7", "container": "strata",
-     "runbook": "~/ai-lab/strata/UPGRADING.md"},
-    {"engine": "maya", "label": "Maya", "repo": "mw00/project-maya", "kind": "tags",
-     "image": "ai-lab/maya", "live_tag": "rocm7", "container": "maya",
-     "runbook": "~/ai-lab/maya/UPGRADING.md"},
-    {"engine": "llama", "label": "llama.cpp", "repo": "ggml-org/llama.cpp", "kind": "release",
-     "image": "ghcr.io/ggml-org/llama.cpp", "runbook": "docker compose pull <service>, then recreate it"},
-]
+# Built from engine_registry; the locally built engines first, the pulled one last, as the card
+# has always listed them.
+ENGINES = sorted(
+    ({"engine": e.name, "label": e.label, **e.updates, "runbook": e.runbook}
+     for e in engine_registry.ENGINES.values() if e.updates),
+    key=lambda d: d["kind"] != "tags")
 
 _VER_RE = re.compile(r"^v?(\d+(?:\.\d+)+)$")
 _LOCAL_TAG_RE = re.compile(r"-v(\d+(?:\.\d+)+)$")

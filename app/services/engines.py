@@ -7,6 +7,7 @@ import httpx
 from docker.errors import APIError, DockerException, NotFound
 
 
+from .. import engine_registry
 from .dockerbase import _docker_client
 from .backends import (_effective_container_names, _extract_ports, _restart_errors, auth_headers,
                      _restart_errors_lock, engine_for)
@@ -80,12 +81,10 @@ def _vram_held_gb(exclude: set[str]) -> float:
         return 0.0
 
 
-# How long each engine gets to answer after `docker start`. Maya's is the long one: measured
-# 2026-10-20, a start from a cold page cache took ~5 min (GLM-5.3-Flash Maya-S warms 43 + 46 GB
-# of expert tiers before its port opens, one card at 0.17 GB/s), so 420 s would report a healthy
-# start as slow with a minute to spare at best. router_api._NARRATE_MAX_S is sized past this.
-READY_TIMEOUT_S = {"maya": 900.0}
-_READY_TIMEOUT_DEFAULT_S = 420.0
+# How long each engine gets to answer after `docker start` (engine_registry; Maya's is the long
+# one). router_api._NARRATE_MAX_S is sized past the longest.
+READY_TIMEOUT_S = {n: e.ready_timeout_s for n, e in engine_registry.ENGINES.items()}
+_READY_TIMEOUT_DEFAULT_S = engine_registry.DEFAULT_READY_TIMEOUT_S
 
 
 def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
@@ -122,22 +121,17 @@ def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
     if timeout is None:
         timeout = READY_TIMEOUT_S.get(engine, _READY_TIMEOUT_DEFAULT_S)
     strata = engine == "strata"
-    health = engine in ("strata", "maya")
-    url = f"http://{name}:{port}/{'health' if health else 'v1/models'}"
+    spec = engine_registry.get(engine)
+    url = f"http://{name}:{port}{spec.ready_path if spec else '/v1/models'}"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
                 r = c.get(url, headers=auth_headers(name))
-                if r.status_code == 200:
-                    if strata:
-                        if bool(r.json().get("loaded")):
-                            return True, ""
-                    elif engine == "maya":
-                        if str(r.json().get("status") or "") == "ok":
-                            return True, ""
-                    else:
-                        return True, ""
+                if engine_registry.serving(engine, r.status_code,
+                                           r.json() if r.status_code == 200 and spec and spec.single_model
+                                           else None):
+                    return True, ""
         except (httpx.HTTPError, ValueError, AttributeError):
             pass
         _switch_state.update(phase="loading",

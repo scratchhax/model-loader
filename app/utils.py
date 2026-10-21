@@ -22,6 +22,21 @@ def human_bytes(n: float) -> str:
 _SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})(?=\.[^.]+$)")
 
 
+def container_env(attrs: dict | None) -> dict[str, str]:
+    """A container's environment as a dict, from docker inspect's Config.Env ("K=V" strings).
+    {} for anything that is not an inspect result. Values are stripped; a key with no "=" is skipped."""
+    env: dict[str, str] = {}
+    try:
+        entries = ((attrs or {}).get("Config") or {}).get("Env") or []
+    except AttributeError:
+        return env
+    for entry in entries:
+        if isinstance(entry, str) and "=" in entry:
+            k, _, v = entry.partition("=")
+            env[k.strip()] = v.strip()
+    return env
+
+
 def shard_key(filename: str) -> tuple[str, int | None, int | None]:
     """Return (base_name_without_shard_suffix, part_index, part_total) or (name, None, None)."""
     m = _SHARD_RE.search(filename)

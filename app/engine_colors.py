@@ -14,11 +14,9 @@ as nothing.
 
 from __future__ import annotations
 
-ENGINE_COLORS: dict[str, tuple[str, str]] = {
-    "strata": ("indigo", "99,102,241"),
-    "llama": ("orange", "249,115,22"),
-    "maya": ("fuchsia", "217,70,239"),
-}
+from . import engine_registry
+
+ENGINE_COLORS: dict[str, tuple[str, str]] = {n: e.color for n, e in engine_registry.ENGINES.items()}
 
 
 def engine_tint(engine: str | None) -> dict | None:

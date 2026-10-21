@@ -259,11 +259,11 @@ def set_tunable(name: str, value: str, config: str, conf_dir: Path | None = None
     """Write one setting into `config` for the next start. (ok, message).
 
     Re-reads the file, changes only the named keys, and replaces it atomically with a rolling
-    backup - Strata's run-config discipline (strata._atomic_replace / _backup), because this
+    backup (fileio.atomic_replace / backup, the discipline Strata's run configs get), because this
     file is read by another program at start and a half-written one is a container that will
     not come up.
     """
-    from . import strata as _st   # the atomic writer and backup rotation, shared
+    from . import fileio
     if name not in TUNABLES:
         return False, f"not a Maya setting: {name}"
     spec = TUNABLES[name]
@@ -303,9 +303,9 @@ def set_tunable(name: str, value: str, config: str, conf_dir: Path | None = None
                 env.pop(k, None)
         cfg["env"] = env
 
-    _st._backup(path)
+    fileio.backup(path)
     try:
-        _st._atomic_replace(path, json.dumps(cfg, indent=1))
+        fileio.atomic_replace(path, json.dumps(cfg, indent=1))
     except OSError as e:
         return False, f"cannot write {config}: {e}"
     with _lock:

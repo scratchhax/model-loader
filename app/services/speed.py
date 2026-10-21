@@ -10,6 +10,7 @@ from docker.errors import DockerException, NotFound
 
 
 from .backends import _extract_ports, _probe_loaded_model, auth_headers, engine_for
+from .. import engine_registry
 from .dockerbase import _docker_client
 from .hotpath import _http
 from .logs import container_logs
@@ -647,7 +648,7 @@ def _outside_slots(engine: str, r: dict) -> bool:
 # "reading"/"generating", live.tok_s, live.generated, live.prompt_tokens, requests newest-first
 # with decode_tok_s / output_tokens / prompt_ms / hit_rate, totals.requests. So both are read the
 # one way, and the log scrapers stay for engines that only speak in log lines.
-_METRICS_ENGINES = frozenset({"strata", "maya"})
+_METRICS_ENGINES = frozenset(n for n, e in engine_registry.ENGINES.items() if e.strata_metrics)
 
 
 def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:

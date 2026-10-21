@@ -7,6 +7,7 @@ from docker.errors import APIError, DockerException, NotFound
 from .. import ini
 from .. import strata as strata_engine
 from ..config import settings
+from ..utils import container_env
 
 from .backends import discover_llama_containers
 from .dockerbase import _docker_client
@@ -133,9 +134,7 @@ def openwebui_state() -> dict:
             continue
         if (labels.get("ai-lab.openwebui") or "").strip().lower() not in ("1", "true", "yes", "on"):
             continue
-        port = next((e.split("=", 1)[1] for e in
-                     ((c.attrs.get("Config") or {}).get("Env") or [])
-                     if e.startswith("PORT=")), "8080") or "8080"
+        port = container_env(c.attrs).get("PORT") or "8080"
         candidate_urls = [f"http://{c.name}:{port}/v1"]
         svc = _compose_service_of(client, c.name)
         if svc:

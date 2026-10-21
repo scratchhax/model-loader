@@ -118,3 +118,10 @@ class TestDockerClient:
 
         fresh_docker.setattr(utils.docker, "from_env", boom)
         assert utils.docker_client() is None
+
+
+def test_container_env_parses_inspect_env():
+    from app.utils import container_env
+    attrs = {"Config": {"Env": ["A=1", "B= two ", "C=x=y", "NOEQ", 5]}}
+    assert container_env(attrs) == {"A": "1", "B": "two", "C": "x=y"}
+    assert container_env(None) == {} and container_env({"Config": None}) == {}

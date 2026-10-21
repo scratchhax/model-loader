@@ -11,6 +11,7 @@ import pytest
 
 from app import db, ini
 from app import router_api as ra
+from app import fileio
 from app import strata as strata_engine
 from app import strata_models
 from app.web import _blocked_chip, _form_note
@@ -67,8 +68,8 @@ def test_selection_write_is_atomic_and_keeps_the_mode(tmp_path, monkeypatch):
     env.write_text("# why\nGPU=1\nFAMILY=qwen\nMODEL=IQ3_S\n", encoding="utf-8")
     os.chmod(env, 0o640)
     used = []
-    real = strata_engine._atomic_replace
-    monkeypatch.setattr(strata_engine, "_atomic_replace", lambda p, d: (used.append(p), real(p, d)))
+    real = fileio.atomic_replace
+    monkeypatch.setattr(fileio, "atomic_replace", lambda p, d: (used.append(p), real(p, d)))
     ok, _ = strata_models.set_selection(str(env), "swift", "IQ3_S", "")
     assert ok and used == [env]
     text = env.read_text(encoding="utf-8")
