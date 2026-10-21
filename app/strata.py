@@ -26,7 +26,7 @@ import re
 import time
 from pathlib import Path
 
-from . import fileio
+from . import fileio, strata_env
 from .utils import container_env
 
 # The engine name a container declares in its `ai-lab.engine` label.
@@ -36,15 +36,9 @@ ENGINE = "strata"
 # directory read-only at /strata-pin; this app is the only writer.
 ENV_PATH = Path(os.environ.get("STRATA_ENV_PATH") or "/strata/strata.env")
 
-# A pin line. Strata takes ONE card as --gpu N (GPU=) and several as --gpus N,M (GPUS=), and
-# the two are separate switches upstream, so the file carries whichever applies and not both.
-# Anchored so a GPU= inside a comment is not mistaken for the setting - the file is mostly
-# comments explaining itself.
-_PIN_RE = re.compile(r"^(?:export\s+)?GPU\s*=\s*(\d+)\s*$")
-_PINS_RE = re.compile(r"^(?:export\s+)?GPUS\s*=\s*(\d+(?:\s*,\s*\d+)*)\s*$")
-# Any pin line, set or cleared - the cleared kind (GPUS= with nothing after it) matters:
-# see set_pin.
-_PIN_ANY_RE = re.compile(r"^(?:export\s+)?GPUS?\s*=")
+# The pin: Strata takes ONE card as --gpu N (GPU=) and several as --gpus N,M (GPUS=), and the
+# two are separate switches upstream, so the file sets whichever applies and clears the other.
+# strata_env reads and writes it (and the model selection and tunables in the same file).
 
 
 # Shared with Maya and strata_models; kept under these names for this module's callers.
@@ -62,21 +56,12 @@ def read_pin(path: Path | None = None) -> str:
     GPUS wins when both are somehow present, matching the entry point, which passes --gpus
     after --gpu and lets the later flag stand.
     """
-    p = path or ENV_PATH
-    try:
-        text = p.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    single = ""
-    for line in text.splitlines():
-        line = line.strip()
-        m = _PINS_RE.match(line)
-        if m:
-            return ",".join(part.strip() for part in m.group(1).split(","))
-        m = _PIN_RE.match(line)
-        if m:
-            single = m.group(1)
-    return single
+    env = strata_env.read(path or ENV_PATH)
+    gpus = env.get("GPUS", "").replace(" ", "")
+    if re.fullmatch(r"\d+(?:,\d+)*", gpus):
+        return gpus
+    gpu = env.get("GPU", "").strip()
+    return gpu if gpu.isdigit() else ""
 
 
 def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
@@ -100,34 +85,12 @@ def set_pin(selection: str, path: Path | None = None) -> tuple[bool, str]:
         return False, f"not a card selection: {selection!r}"
     if len(set(cards)) != len(cards):
         return False, "the same card twice"
-    p = path or ENV_PATH
-    try:
-        text = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False, f"{p} is missing — is ./strata mounted into this container?"
-    except OSError as e:
-        return False, f"cannot read {p}: {e}"
-
     single = len(cards) == 1
-    want = f"GPU={cards[0]}" if single else "GPUS=" + ",".join(cards)
-    clear = "GPUS=" if single else "GPU="
-    out: list[str] = []
-    placed = False
-    for line in text.splitlines():
-        if _PIN_ANY_RE.match(line.strip()):
-            if not placed:          # the first pin line becomes the new one; any other is dropped
-                out.append(want)
-                placed = True
-            continue
-        out.append(line)
-    if not placed:
-        out.append(want)
-    out.append(clear)   # always: sourcing must beat whatever compose baked in
-
-    try:
-        _atomic_replace(p, "\n".join(out) + "\n")
-    except OSError as e:
-        return False, f"cannot write {p}: {e}"
+    # Both always named, the other one CLEARED (see above; strata_env writes the empty value).
+    values = {"GPU": cards[0], "GPUS": ""} if single else {"GPUS": ",".join(cards), "GPU": ""}
+    ok, why = strata_env.update(path or ENV_PATH, values)
+    if not ok:
+        return False, why
     if single:
         return True, f"pinned to card {cards[0]}"
     # Upstream publishes figures showing a split LOSING (4K prompts 1,776 -> 1,244 tok/s,

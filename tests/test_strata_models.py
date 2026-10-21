@@ -300,14 +300,14 @@ class TestSelection:
         assert sel == {"FAMILY": "qwen", "MODEL": "Qwen3.8-Flash-Next-IQ3_S",
                        "GGUF_DIR": "IQ3_S"}
 
-    def test_inline_comments_are_not_stripped_latent_quirk(self, tmp_path):
-        # Pinned as-is: a shell would drop the trailing comment, this reader keeps it
-        # inside the value - and its quote-strip then eats only the leading quote.
-        # Harmless for files this app writes (set_selection writes bare KEY=value),
-        # surprising for hand-edited ones.
+    def test_inline_comments_are_dropped_like_a_shell_does(self, tmp_path):
+        # This used to be pinned as a latent quirk: the reader kept a trailing comment inside
+        # the value and ate only the leading quote ('M"   # note'). strata_env reads the file
+        # the way the entry point's sh does.
         p = tmp_path / "strata.env"
-        p.write_text('MODEL="M"   # note\n')
-        assert sm.read_selection(str(p))["MODEL"] == 'M"   # note'
+        p.write_text('MODEL="M"   # note\nFAMILY=swift # the slot\n')
+        assert sm.read_selection(str(p))["MODEL"] == "M"
+        assert sm.read_selection(str(p))["FAMILY"] == "swift"
 
     def test_read_missing_file_is_all_empty(self, tmp_path):
         assert sm.read_selection(str(tmp_path / "nope")) == {
