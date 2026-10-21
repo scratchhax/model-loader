@@ -1030,7 +1030,7 @@ async def test_prompt(container_name: str, prompt: str, max_tokens: int = 256) -
     internal_port: int | None = None
     if client is not None:
         try:
-            c = client.containers.get(container_name)
+            c = await asyncio.to_thread(client.containers.get, container_name)
             _, internal_port = _extract_ports(c.attrs or {})
         except (NotFound, DockerException):
             pass
