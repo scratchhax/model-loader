@@ -567,8 +567,11 @@ def _client_of(request: Request) -> str:
 # What gets removed is the router's own lines and nothing else, by shape, because narrate.py
 # already records what it said. Deleting a reasoning model's actual thinking would be the easy
 # version and the wrong one: it arrives through the same channel and is worth more than the crash.
+# A message with none of those lines in it is left exactly as it arrived. Rewriting it anyway
+# changed the prompt the engine renders (its prefix cache missed from that turn on), and on an
+# Anthropic-shaped turn the flattening threw away the tool_use blocks the next turn answers.
 #
-# What survives is re-emitted as a TEXT block. That is the part that makes both halves work - the
+# In a message that did carry narration, what survives is re-emitted as a TEXT block. That is the part that makes both halves work - the
 # template's objection is to the chunk type, not to the words, so a reasoning model's thinking
 # reaches the prompt intact while the assistant turn stays something a strict template can render.
 # A turn left with no text at all keeps a single space rather than becoming empty, because the same
@@ -603,9 +606,13 @@ def _block_text(block: dict) -> str:
 # narration streams in the same field.
 
 
+def _is_reasoning_block(block) -> bool:
+    return isinstance(block, dict) and str(block.get("type", "")).lower() in _NARRATION_BLOCKS
+
+
 def strip_narration_blocks(body: dict) -> int:
-    """Remove lines this router emitted, from assistant turns, in place. Returns the number of
-    messages changed.
+    """Remove lines this router emitted, from assistant turns, in place, and change nothing else.
+    Returns the number of messages changed.
 
     Line-level rather than block-level on purpose. A reasoning block is where Open WebUI parks
     both this router's status text and a reasoning model's actual thinking, and the two can share
@@ -617,53 +624,56 @@ def strip_narration_blocks(body: dict) -> int:
     if not isinstance(msgs, list):
         return 0
     said = narrate.said()
+    if not said:
+        return 0
+
+    def ours(text: str) -> bool:
+        return any(narrate.shape_of(ln) in said for ln in text.splitlines())
+
+    def without_ours(text: str) -> str:
+        return "\n".join(ln for ln in text.splitlines() if narrate.shape_of(ln) not in said).strip()
 
     touched = 0
     for msg in msgs:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
+        changed = False
         # The narration streams in the reasoning field, so a client that hands reasoning back
         # (Open WebUI does) hands the router's own status lines back with it. Those lines go;
         # the model's thinking around them stays.
         reasoning = msg.get("reasoning_content")
-        if isinstance(reasoning, str) and reasoning:
-            lines = reasoning.splitlines()
-            kept_lines = [ln for ln in lines if narrate.shape_of(ln) not in said]
-            if len(kept_lines) != len(lines):
-                rest = "\n".join(kept_lines).strip()
-                if rest:
-                    msg["reasoning_content"] = rest
-                else:
-                    del msg["reasoning_content"]
-                touched += 1
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-
-        kept: list = []
-        for block in content:
-            if not isinstance(block, dict) or \
-                    str(block.get("type", "")).lower() not in _NARRATION_BLOCKS:
-                kept.append(block)
-                continue
-            text = _block_text(block)
-            lines = text.splitlines()
-            # Every reasoning chunk becomes a text chunk, not just the ones carrying narration.
-            # The template's objection is to the chunk type, so leaving one untouched leaves the
-            # whole conversation unrenderable - which is the per-model chase this exists to end.
-            # Tool blocks are deliberately NOT touched: they are load-bearing for a round trip,
-            # and a client that puts them in assistant content is a different problem than this.
-            rest = "\n".join(ln for ln in lines if narrate.shape_of(ln) not in said).strip()
+        if isinstance(reasoning, str) and ours(reasoning):
+            rest = without_ours(reasoning)
             if rest:
-                # Downgraded to text, not deleted. The template objects to the chunk type; the
-                # words are fine, and they are the model's own.
-                kept.append({"type": "text", "text": rest})
-        # Belt and braces: an assistant turn leaves this function as a plain string, whatever
-        # arrived. A list of text chunks renders fine in python jinja; whether every minja build
-        # agrees is not something worth discovering by being the test case.
-        content = kept if kept else [" "]
-        msg["content"] = "\n".join(_block_text(b) for b in content if isinstance(b, dict)) or " "
-        touched += 1
+                msg["reasoning_content"] = rest
+            else:
+                del msg["reasoning_content"]
+            changed = True
+
+        content = msg.get("content")
+        if isinstance(content, list) and any(_is_reasoning_block(b) and ours(_block_text(b))
+                                             for b in content):
+            kept: list = []
+            for block in content:
+                if not _is_reasoning_block(block):
+                    # Text, tool and image blocks pass through as they arrived.
+                    kept.append(block)
+                    continue
+                # Every reasoning chunk in this message becomes a text chunk, not just the ones
+                # carrying narration: the template's objection is to the chunk type, so leaving
+                # one leaves the turn unrenderable. Downgraded, not deleted; the words are the
+                # model's own.
+                rest = without_ours(_block_text(block))
+                if rest:
+                    kept.append({"type": "text", "text": rest})
+            if all(isinstance(b, dict) and b.get("type") == "text" for b in kept):
+                # All text: a plain string, which every template renders. A turn left with no
+                # text keeps a single space, since strict templates reject an empty assistant turn.
+                msg["content"] = "\n".join(_block_text(b) for b in kept) or " "
+            else:
+                msg["content"] = kept
+            changed = True
+        touched += changed
     return touched
 
 
