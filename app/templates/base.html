@@ -49,12 +49,6 @@
     })();
   </script>
   <style>
-    /* The nav scrolls rather than the page (see the comment on <nav>), but a visible scrollbar
-       inside a 56px header is worse than the overflow it replaces: it eats the links' row and
-       appears and disappears as the window resizes. Hidden in both engines; the nav stays
-       scrollable by wheel, trackpad, touch and keyboard regardless. */
-    .nav-scroll { scrollbar-width: none; -ms-overflow-style: none; }
-    .nav-scroll::-webkit-scrollbar { display: none; }
     :root {
       --ml-radius: 12px;
     }
@@ -134,42 +128,65 @@
 <body class="h-full font-sans bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
   <header class="sticky top-0 z-30 border-b border-slate-200/70 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 backdrop-blur">
     {% from "_icons.html" import icon %}
-    <div class="mx-auto max-w-6xl px-6 h-14 flex items-center justify-between gap-6">
-      <a href="/" class="shrink-0 flex items-center gap-2 font-semibold tracking-tight">
+    {# Full width, not max-w-6xl like the page body: twelve tabs need about 1250px, and capped at
+       1152 the header had less than that on any screen - on a 4K monitor too, where the tabs sat
+       squeezed into the middle beside empty margins. #}
+    <div class="px-4 sm:px-6 h-14 flex items-center justify-between gap-3 sm:gap-6">
+      <a href="/" class="shrink-0 flex items-center gap-2 font-semibold tracking-tight" aria-label="Model Loader">
         <span class="inline-flex w-6 h-6 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-card">
           {{ icon('layers-3', 14) }}
         </span>
-        <span>Model Loader</span>
+        <span class="hidden sm:inline">Model Loader</span>
       </a>
-      {# min-w-0 is load-bearing, not tidiness. A flex item defaults to min-width:auto, so this
-         nav refused to shrink below the width of its links: with twelve of them they stopped
-         fitting in max-w-6xl, pushed the controls on the right out of the container, and took
-         the whole document to 1531px in a 1425px viewport - a horizontal scrollbar on every
-         page, from the header alone. min-w-0 lets it shrink; overflow-x-auto gives the links
-         somewhere to go when it does, so the nav scrolls instead of the page. #}
-      <nav class="flex-1 min-w-0 overflow-x-auto nav-scroll flex items-center gap-0.5 text-sm">
-        {% set active = active_nav | default('') %}
-        {% macro navlink(href, key, label, ic, enabled=True) %}
-          {% if enabled %}
-            <a href="{{ href }}" class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
-              {% if active == key %}bg-slate-100 dark:bg-slate-800 font-medium text-slate-900 dark:text-slate-100
-              {% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800{% endif %}">{{ icon(ic, 14) }}{{ label }}</a>
-          {% else %}
-            <span class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-slate-400 dark:text-slate-600 cursor-not-allowed" title="coming soon">{{ icon(ic, 14) }}{{ label }}</span>
-          {% endif %}
-        {% endmacro %}
-        {{ navlink('/', 'dashboard', 'Overview', 'gauge') }}
-        {{ navlink('/models', 'models', 'Models', 'layers-3') }}
-        {{ navlink('/search', 'search', 'Search HF', 'search') }}
-        {{ navlink('/strata/models', 'strata', 'Strata', 'cpu') }}
-        {{ navlink('/maya', 'maya', 'Maya', 'sparkles') }}
-        {{ navlink('/router', 'router', 'Router', 'zap') }}
-        {{ navlink('/downloads', 'downloads', 'Downloads', 'download') }}
-        {{ navlink('/config', 'config', 'models.ini', 'file-cog') }}
-        {{ navlink('/containers', 'containers', 'Containers', 'server') }}
-        {{ navlink('/prompts', 'prompts', 'Prompts', 'message-square-quote') }}
-        {{ navlink('/benchmark', 'benchmark', 'Benchmark', 'gauge') }}
-        {{ navlink('/settings', 'settings', 'Settings', 'settings') }}
+      {# Every tab stays one click away at any width: the tabs that fit show in the row, and the
+         rest move into a More menu, re-measured whenever the header changes size (the script
+         below). The row used to scroll sideways with its scrollbar hidden, and a mouse wheel
+         scrolls vertically, so with twelve tabs in max-w-6xl the last five (Containers among
+         them) sat clipped behind the search button at every window size, with no way to reach
+         them. On a wide window they all fit and the menu never shows. min-w-0 is still load-bearing: a flex item defaults to min-width:auto, and without
+         it the nav refuses to shrink below its tabs and pushes the page wider than the window. #}
+      {% set active = active_nav | default('') %}
+      {% set nav_items = [
+        ('/', 'dashboard', 'Overview', 'gauge'),
+        ('/models', 'models', 'Models', 'layers-3'),
+        ('/search', 'search', 'Search HF', 'search'),
+        ('/strata/models', 'strata', 'Strata', 'cpu'),
+        ('/maya', 'maya', 'Maya', 'sparkles'),
+        ('/router', 'router', 'Router', 'zap'),
+        ('/downloads', 'downloads', 'Downloads', 'download'),
+        ('/config', 'config', 'models.ini', 'file-cog'),
+        ('/containers', 'containers', 'Containers', 'server'),
+        ('/prompts', 'prompts', 'Prompts', 'message-square-quote'),
+        ('/benchmark', 'benchmark', 'Benchmark', 'gauge'),
+        ('/settings', 'settings', 'Settings', 'settings'),
+      ] %}
+      <nav id="main-nav" aria-label="Main" class="flex-1 min-w-0 flex items-center gap-0.5 text-sm">
+        <div data-nav-row class="min-w-0 flex items-center gap-0.5 overflow-hidden">
+          {% for href, key, label, ic in nav_items %}
+            <a href="{{ href }}" data-nav-key="{{ key }}"{% if active == key %} aria-current="page"{% endif %}
+               class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+               {% if active == key %}bg-slate-100 dark:bg-slate-800 font-medium text-slate-900 dark:text-slate-100
+               {% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800{% endif %}">{{ icon(ic, 14) }}{{ label }}</a>
+          {% endfor %}
+        </div>
+        <div data-nav-more class="relative shrink-0" style="display: none">
+          {# Wears the active style when the current page's tab is the one in the menu. #}
+          <button type="button" aria-haspopup="true" aria-expanded="false" aria-controls="nav-more-menu"
+                  class="whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800
+                         aria-expanded:bg-slate-100 dark:aria-expanded:bg-slate-800
+                         data-[active=true]:bg-slate-100 dark:data-[active=true]:bg-slate-800 data-[active=true]:font-medium data-[active=true]:text-slate-900 dark:data-[active=true]:text-slate-100">
+            {{ icon('menu', 14) }}<span data-nav-more-label>More</span>{{ icon('chevron-down', 14) }}
+          </button>
+          <div id="nav-more-menu" data-nav-menu hidden
+               class="absolute right-0 top-full mt-1 min-w-[12rem] rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-card-lg py-1 z-40">
+            {% for href, key, label, ic in nav_items %}
+              <a href="{{ href }}" data-nav-key="{{ key }}" style="display: none"{% if active == key %} aria-current="page"{% endif %}
+                 class="flex items-center gap-2 px-3 py-1.5 whitespace-nowrap
+                 {% if active == key %}bg-slate-100 dark:bg-slate-800 font-medium text-slate-900 dark:text-slate-100
+                 {% else %}text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800{% endif %}">{{ icon(ic, 14) }}{{ label }}</a>
+            {% endfor %}
+          </div>
+        </div>
       </nav>
       <div class="shrink-0 flex items-center gap-1">
         <button onclick="window.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true}))"
@@ -187,6 +204,68 @@
       </div>
     </div>
   </header>
+  <script>
+    // The header's More menu (see the comment on <nav>). Inline and right after the header so
+    // the first layout happens before the page paints, and so a whole-body htmx swap that brings
+    // a new header runs it again.
+    (function () {
+      const nav = document.getElementById('main-nav');
+      if (!nav) return;
+      const row = nav.querySelector('[data-nav-row]');
+      const more = nav.querySelector('[data-nav-more]');
+      const btn = more.querySelector('button');
+      const label = more.querySelector('[data-nav-more-label]');
+      const menu = more.querySelector('[data-nav-menu]');
+      const tabs = [...row.children];
+      const items = new Map([...menu.children].map((a) => [a.dataset.navKey, a]));
+      const GAP = 2;  // gap-0.5
+
+      function close() {
+        menu.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
+      }
+
+      function layout() {
+        tabs.forEach((a) => { a.style.display = ''; });
+        more.style.display = 'none';
+        if (row.scrollWidth <= nav.clientWidth) {
+          items.forEach((a) => { a.style.display = 'none'; });
+          btn.dataset.active = 'false';
+          close();
+          return;
+        }
+        more.style.display = '';
+        const room = nav.clientWidth - more.offsetWidth - GAP;
+        let used = -GAP, shown = 0, activeInMenu = false;
+        // In order, so the menu holds the LAST tabs and the row never reshuffles: once one
+        // tab misses, every tab after it goes to the menu too.
+        for (const a of tabs) {
+          used += GAP + a.offsetWidth;
+          const fits = used <= room;
+          a.style.display = fits ? '' : 'none';
+          items.get(a.dataset.navKey).style.display = fits ? 'none' : '';
+          if (fits) shown += 1;
+          else if (a.hasAttribute('aria-current')) activeInMenu = true;
+        }
+        btn.dataset.active = String(activeInMenu);
+        label.textContent = shown ? 'More' : 'Menu';
+      }
+
+      btn.addEventListener('click', () => {
+        const opening = menu.hidden;
+        menu.hidden = !opening;
+        btn.setAttribute('aria-expanded', String(opening));
+      });
+      document.addEventListener('click', (e) => { if (!more.contains(e.target)) close(); });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !menu.hidden) { close(); btn.focus(); }
+      });
+      new ResizeObserver(layout).observe(nav);
+      // Inter arrives after first paint and is wider than the fallback font.
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
+      layout();
+    })();
+  </script>
   {# A benchmark run makes the whole box behave strangely - models evicted mid-conversation,
      requests stalling - and it keeps running server-side after the tab that started it is
      closed. Saying so on every page is the difference between "the machine is broken" and

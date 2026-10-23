@@ -8,7 +8,11 @@
    Expects: e, first, and engine_controls.rows_context()'s keys. #}
   {% set live = e in live_engines %}
   <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3 {% if not first %}border-t border-slate-200 dark:border-slate-700{% endif %}">
-    <div class="min-w-0">
+    {# Description and controls share the line when both fit (the description takes what is
+       left), and the controls drop under it when they do not. They used to be shrink-0, which
+       pinned them at their one-line width (about 720px) inside a card that clips: below a
+       desktop window the model picker, Set and Auto-switch ran off the card's edge. #}
+    <div class="min-w-0 flex-1 basis-80">
       <div class="flex items-center gap-2">
         <span class="font-mono text-sm">{{ e }}</span>
         {% if live %}
@@ -36,7 +40,7 @@
         {% endif %}
       </p>
     </div>
-    <div class="flex shrink-0 flex-wrap items-center gap-2">
+    <div class="flex min-w-0 max-w-full flex-wrap items-center gap-2">
     {# Pinning is separate from the default because they answer different questions: WHICH
        SERVER handles this engine, and WHICH MODEL it should load. Automatic ranking is a guess
        from container names; this is where you say what you meant. #}
@@ -44,9 +48,9 @@
     {# Stopped backends are listed too - see the note in _backends(). Pinning to one is allowed
        and takes effect when it next runs; a request meanwhile is refused by name rather than
        sent somewhere else. #}
-    <form hx-post="/router/backend" hx-target="find .form-note" hx-swap="innerHTML" class="flex items-center gap-1">
+    <form hx-post="/router/backend" hx-target="find .form-note" hx-swap="innerHTML" class="flex min-w-0 max-w-full items-center gap-1">
       <input type="hidden" name="engine" value="{{ e }}">
-      <select name="backend" class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
+      <select name="backend" class="min-w-0 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs">
         <option value="">auto</option>
         {% for n, running in backends_by_engine.get(e, []) %}
         <option value="{{ n }}" {% if pins.get(e) == n %}selected{% endif %}>{{ n }}{% if not running %} (stopped){% endif %}</option>
@@ -59,10 +63,10 @@
     {# Maya starts the config its compose command names, so a choice here would be recorded and
        never read. It is shown, so the row matches the other engines, and not offered. #}
     {% set fixed = e == 'maya' %}
-    <form hx-post="/router/default" hx-target="find .form-note" hx-swap="innerHTML" class="flex items-center gap-2"
+    <form hx-post="/router/default" hx-target="find .form-note" hx-swap="innerHTML" class="flex min-w-0 max-w-full items-center gap-2"
           {% if fixed %}title="Maya starts the model its compose command names (--config {{ maya_run_config or '?' }}); it is not chosen here."{% endif %}>
       <input type="hidden" name="engine" value="{{ e }}">
-      <select name="model" {% if fixed %}disabled{% endif %} class="rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
+      <select name="model" {% if fixed %}disabled{% endif %} class="min-w-0 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
         <option value="">(none)</option>
         {# (value, label): for llama both are the model id; for Strata the value is the INSTALL
            TAG, because the choosable unit there is an installed pack rather than the one model

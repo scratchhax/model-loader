@@ -5,7 +5,7 @@
 {% block title %}Strata · Model Loader{% endblock %}
 {% block content %}
 
-<div class="flex items-baseline justify-between">
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
   <h1 class="text-xl font-semibold tracking-tight">Strata</h1>
   <a href="/search" class="text-sm text-slate-500 dark:text-slate-400 hover:underline">llama.cpp search {{ icon('chevron-right', 13) }}</a>
 </div>
@@ -38,7 +38,7 @@
   <a href="/search?engine=strata" class="text-xs text-slate-500 dark:text-slate-400 hover:underline">add from Hugging Face →</a>
 </div>
 {% if installed %}
-<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+<div class="mt-2 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
     {% for tag, d in installed.items() %}
@@ -111,7 +111,7 @@
    without it, setup would download the family's own model instead. #}
 {% if downloaded %}
 <h3 class="mt-5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Not set up yet</h3>
-<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+<div class="mt-2 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
     {% for tag, d in downloaded.items() %}
@@ -197,7 +197,7 @@
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
   Catalog <span class="font-normal normal-case">— read from the running engine, so it tracks the image</span>
 </h2>
-<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+<div class="mt-2 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
     <thead class="bg-slate-50 dark:bg-slate-800/60 text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
       <tr>
