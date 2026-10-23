@@ -592,54 +592,15 @@ def _block_text(block: dict) -> str:
     return ""
 
 
-# THE OTHER HALF OF THE SAME BUG, and the one that took four attempts to see.
-#
-# strip_narration_blocks() defends `content`. This is about the field sitting BESIDE it.
-#
-# What llama.cpp does with an assistant turn's `reasoning_content` is not "ignore it unless
-# asked": the chat parser folds it into the turn as a reasoning chunk BEFORE the chat template
-# runs, so a template written for plain strings is handed a chunk list it never expected.
-# Templates then split into two camps. A reasoning model's renders the chunk. Devstral's raises
-#     "Only text chunks are supported in assistant message contents."
-# from inside its embedded template, and the resulting 500 carries no hint that the field to
-# blame is one the client put beside `content` rather than in it - which is why a fix aimed at
-# `content` provably changed nothing and the crash walked back exactly as it was.
-#
-# `--reasoning-preserve` is llama.cpp's own opt-in for carrying thinking across turns, so a
-# model's `reasoning-preserve` setting is the honest thing to consult rather than a per-model
-# exception list: a model that asked for its thinking back keeps it, everyone else has it taken
-# off the request. For those the field was already headed for the bin - the only difference is
-# whether the template lives long enough to notice.
-_REASONING_FIELD = "reasoning_content"
-_ON_VALUES = frozenset({"1", "on", "true", "yes"})
-
-
-def wants_reasoning_replay(model: str) -> bool:
-    """Does `model` ask to be handed its own previous thinking? (`reasoning-preserve = on`.)"""
-    try:
-        sec = ini.get_section(model) or {}
-    except Exception:  # noqa: BLE001 - a config read must never take a chat turn down
-        return False
-    return str(sec.get("reasoning-preserve") or "").strip().lower() in _ON_VALUES
-
-
-def drop_replayed_reasoning(body: dict, model: str) -> int:
-    """Take `reasoning_content` off assistant turns unless `model` asked for it back.
-
-    In place. Returns how many turns were changed, which is the only part worth logging: the
-    field's CONTENT is somebody's chain of thought and has no business in a log line.
-    """
-    if wants_reasoning_replay(model):
-        return 0
-    msgs = body.get("messages")
-    if not isinstance(msgs, list):
-        return 0
-    dropped = 0
-    for msg in msgs:
-        if isinstance(msg, dict) and msg.get("role") == "assistant" and _REASONING_FIELD in msg:
-            del msg[_REASONING_FIELD]
-            dropped += 1
-    return dropped
+# A turn's `reasoning_content` is passed through. Whether a model sees its earlier thinking is
+# the engine's own option, not the router's: llama.cpp's per-section `reasoning-preserve` (in the
+# models.ini editor), and Strata's and Maya's chat templates, which keep it by default (GLM's
+# `clear_thinking` defaults to false) and take `chat_template_kwargs` per request, so a client
+# such as Open WebUI can set it per model. Stripping it here was a workaround for one llama
+# template that crashed on replayed reasoning, applied to every engine; it took GLM's own thinking
+# away in every agent loop and left each earlier turn looking like thinking was switched off.
+# The router removes only what it wrote itself (strip_narration_blocks), since its swap
+# narration streams in the same field.
 
 
 def strip_narration_blocks(body: dict) -> int:
@@ -661,6 +622,20 @@ def strip_narration_blocks(body: dict) -> int:
     for msg in msgs:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
+        # The narration streams in the reasoning field, so a client that hands reasoning back
+        # (Open WebUI does) hands the router's own status lines back with it. Those lines go;
+        # the model's thinking around them stays.
+        reasoning = msg.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            lines = reasoning.splitlines()
+            kept_lines = [ln for ln in lines if narrate.shape_of(ln) not in said]
+            if len(kept_lines) != len(lines):
+                rest = "\n".join(kept_lines).strip()
+                if rest:
+                    msg["reasoning_content"] = rest
+                else:
+                    del msg["reasoning_content"]
+                touched += 1
         content = msg.get("content")
         if not isinstance(content, list):
             continue
@@ -761,11 +736,6 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
 
     out = dict(body)
     out["model"] = model          # llama picks by name; Strata ignores it
-
-    # Only now can this be decided, because only now is the model known: an engine alias does
-    # not have settings, the model behind it does.
-    if drop_replayed_reasoning(out, model):
-        print(f"router: dropped replayed reasoning from assistant turns for {model}", flush=True)
 
     if streaming:
         return await _forward_stream(out, backend, model, path, shape, conv, client_id, asked, t0)
@@ -1247,8 +1217,6 @@ async def narrated_stream(out: dict, path: str, shape: str, conv: str, client_id
 
     sent = dict(out)
     sent["model"] = model
-    # Same reason as in _forward(), which this path skipped by resolving for itself.
-    drop_replayed_reasoning(sent, model)
 
     # Close the status off before the model speaks. Both the narration and most of these models'
     # own thinking land in the SAME delta field, so without an explicit terminator the two run
