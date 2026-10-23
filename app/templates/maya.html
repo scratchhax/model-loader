@@ -4,7 +4,7 @@
 {% block title %}Maya · Model Loader{% endblock %}
 {% block content %}
 
-<div class="flex items-baseline justify-between gap-3">
+<div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
   <h1 class="text-xl font-semibold tracking-tight">Maya</h1>
   {% if health and dashboard_port %}
   <a href="http://{{ request.url.hostname }}:{{ dashboard_port }}/" target="_blank" rel="noopener"
@@ -53,7 +53,7 @@
 <!-- installed ------------------------------------------------------------ -->
 <h2 class="mt-7 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Installed</h2>
 {% if installed %}
-<div class="mt-2 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+<div class="mt-2 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
     {% for m in installed %}

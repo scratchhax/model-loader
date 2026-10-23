@@ -51,7 +51,9 @@ rounded-xl border px-4 py-3 transition-colors duration-500
 {% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/95{% endif %}
 {%- endmacro %}
 
-<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+{# grid-cols-1 on a phone, not the implicit column: an implicit track sizes to its widest card, so
+   one long models path widened all four cards past the screen. #}
+<div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
 
   {# ---------------- CPU load ---------------- #}
   <div class="{{ shell(host.load_crit, host.load_warn) }}">
@@ -128,8 +130,9 @@ rounded-xl border px-4 py-3 transition-colors duration-500
     </div>
     {{ bar(host.disk_used_pct, host.disk_crit, host.disk_warn) }}
     <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
-      <span>{{ '%.0f' % host.disk_total }} GB total</span>
-      <span class="truncate pl-2 font-mono" title="{{ host.disk_path }}">{{ host.disk_path }}</span>
+      <span class="shrink-0">{{ '%.0f' % host.disk_total }} GB total</span>
+      {# min-w-0, or a flex item never shrinks below its text and truncate has nothing to cut. #}
+      <span class="min-w-0 truncate pl-2 font-mono" title="{{ host.disk_path }}">{{ host.disk_path }}</span>
     </div>
   </div>
 </div>
