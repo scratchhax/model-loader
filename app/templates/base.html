@@ -128,10 +128,11 @@
 <body class="h-full font-sans bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
   <header class="sticky top-0 z-30 border-b border-slate-200/70 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 backdrop-blur">
     {% from "_icons.html" import icon %}
-    {# Full width, not max-w-6xl like the page body: twelve tabs need about 1250px, and capped at
-       1152 the header had less than that on any screen - on a 4K monitor too, where the tabs sat
-       squeezed into the middle beside empty margins. #}
-    <div class="px-4 sm:px-6 h-14 flex items-center justify-between gap-3 sm:gap-6">
+    {# The header and <main> share one centred container, so the logo lines up with the page's
+       left edge at every width. 100rem because the logo, twelve tabs and the controls need about
+       1580px: at the old max-w-6xl (1152) the tabs could not fit on any screen, and a full-width
+       header fixed that but sat left-justified over a centred body on a wide monitor. #}
+    <div class="mx-auto max-w-[100rem] px-4 sm:px-6 h-14 flex items-center justify-between gap-3 sm:gap-6">
       <a href="/" class="shrink-0 flex items-center gap-2 font-semibold tracking-tight" aria-label="Model Loader">
         <span class="inline-flex w-6 h-6 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-card">
           {{ icon('layers-3', 14) }}
@@ -143,7 +144,7 @@
          below). The row used to scroll sideways with its scrollbar hidden, and a mouse wheel
          scrolls vertically, so with twelve tabs in max-w-6xl the last five (Containers among
          them) sat clipped behind the search button at every window size, with no way to reach
-         them. On a wide window they all fit and the menu never shows. min-w-0 is still load-bearing: a flex item defaults to min-width:auto, and without
+         them. In a window 1600px or wider they all fit and the menu never shows. min-w-0 is still load-bearing: a flex item defaults to min-width:auto, and without
          it the nav refuses to shrink below its tabs and pushes the page wider than the window. #}
       {% set active = active_nav | default('') %}
       {% set nav_items = [
@@ -261,6 +262,11 @@
         if (e.key === 'Escape' && !menu.hidden) { close(); btn.focus(); }
       });
       new ResizeObserver(layout).observe(nav);
+      // A tab the browser is not rendering gets no ResizeObserver callbacks, so a page loaded or
+      // resized in the background kept the old width's layout. These cover that case.
+      window.addEventListener('resize', layout);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) layout(); });
+      window.addEventListener('pageshow', layout);
       // Inter arrives after first paint and is wider than the fallback font.
       if (document.fonts && document.fonts.ready) document.fonts.ready.then(layout);
       layout();
@@ -272,7 +278,7 @@
      "something I started is still going". Polls only while a run is active. #}
   <div id="bench-banner" hx-get="/benchmark/banner" hx-trigger="load, every 5s" hx-swap="outerHTML"></div>
 
-  <main class="mx-auto max-w-6xl px-6 py-8">
+  <main class="mx-auto max-w-[100rem] px-4 sm:px-6 py-8">
     {% block content %}{% endblock %}
   </main>
 
