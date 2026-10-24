@@ -5,7 +5,7 @@ import os
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-from .. import db, hw
+from .. import db, hw, power_cap
 from ..config import settings
 from ..web import templates
 
@@ -54,6 +54,7 @@ def _power_context() -> dict:
         "temp_warn_c": cfg["temp_warn_c"], "temp_crit_c": cfg["temp_crit_c"],
         "power_spark": hw.sparkline(watts, cfg["power_crit_w"]) if len(watts) > 2 else "",
         "temp_spark": hw.sparkline(temps, cfg["temp_crit_c"]) if len(temps) > 2 else "",
+        "gpu_cap": power_cap.status(),
     }
 
 
@@ -137,11 +138,36 @@ def host_stats_partial(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("_host_stats.html", ctx)
 
 
-def _power_settings_context(saved: bool = False) -> dict:
+def _power_settings_context(saved: bool = False, cap_note: str = "", cap_ok: bool = False) -> dict:
     cfg = _power_settings()
     return {"power_warn_w": cfg["power_warn_w"], "power_crit_w": cfg["power_crit_w"],
             "baseline_w": cfg["power_baseline_w"], "temp_warn_c": cfg["temp_warn_c"],
-            "temp_crit_c": cfg["temp_crit_c"], "saved": saved, "reopen": saved}
+            "temp_crit_c": cfg["temp_crit_c"], "saved": saved, "reopen": saved or bool(cap_note),
+            "gpu_cap": power_cap.status(), "cap_note": cap_note, "cap_ok": cap_ok}
+
+
+@router.post("/power/cap", response_class=HTMLResponse)
+async def power_cap_save(request: Request) -> HTMLResponse:
+    """Ask the host for a new GPU board-power cap (see power_cap.py for how it gets applied).
+
+    Only a whole number inside the range every card accepts is written: the host script would
+    clamp anything else, and a cap that silently became a different number is the confusion the
+    Overview warning exists to end.
+    """
+    form = await request.form()
+    lo, hi = power_cap.allowed(power_cap.cards())
+    raw = str(form.get("cap_w") or "").strip()
+    ok = False
+    if not lo or not hi:
+        note = "No card reports a power cap range, so nothing was changed."
+    elif not raw.isdigit() or not lo <= int(raw) <= hi:
+        note = f"The cards take {lo}-{hi} W. Nothing was changed."
+    else:
+        power_cap.set_desired(int(raw))
+        note, ok = f"Asked for {int(raw)} W. The host applies it within a few seconds.", True
+    ctx = {"request": request}
+    ctx.update(_power_settings_context(cap_note=note, cap_ok=ok))
+    return templates.TemplateResponse("_power_settings.html", ctx)
 
 
 @router.post("/power/settings", response_class=HTMLResponse)
