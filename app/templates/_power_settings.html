@@ -27,4 +27,27 @@
       <button class="w-full rounded bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-900 hover:bg-white">Save</button>
     </div>
   </form>
+  {# The cards' board-power cap. Unlike the thresholds above this one changes hardware: it is
+     written to /data/power-cap.env and the host's amd-power-cap.path applies it (power_cap.py). #}
+  {% if gpu_cap and gpu_cap.cards %}
+  {% set lo, hi = gpu_cap.range %}
+  <form hx-post="/power/cap" hx-target="closest details" hx-swap="outerHTML"
+        class="mt-3 flex flex-wrap items-end gap-x-3 gap-y-1 text-[11px]">
+    <label class="block">
+      <span class="block text-[10px] text-slate-500"
+            title="Each card's board-power limit, applied by the host at every boot and within a few seconds of a change here. Generation draws about 145 W a card here, so a low cap mostly costs prompt reading.">GPU power cap W</span>
+      <input type="number" name="cap_w" step="1" value="{{ gpu_cap.want }}"
+             {% if lo %}min="{{ lo }}"{% endif %} {% if hi %}max="{{ hi }}"{% endif %}
+             class="mt-0.5 w-24 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-200">
+    </label>
+    <button class="rounded bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-900 hover:bg-white">Apply</button>
+    <span class="pb-1 text-[10px] tabular-nums text-slate-500">
+      {% if lo and hi %}each card takes {{ lo }}-{{ hi }} W · {% endif %}now
+      {% for c in gpu_cap.cards %}{{ c.cap_w }} W{% if not loop.last %} / {% endif %}{% endfor %}
+    </span>
+    {% if cap_note %}
+    <span class="w-full text-[10px] {% if cap_ok %}text-emerald-400{% else %}text-amber-400{% endif %}">{{ cap_note }}</span>
+    {% endif %}
+  </form>
+  {% endif %}
 </details>

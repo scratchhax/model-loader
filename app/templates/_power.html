@@ -49,6 +49,21 @@
     {% else %}
     <div class="mt-2 flex h-9 items-center text-[10px] text-slate-600">collecting…</div>
     {% endif %}
+    {# A card not holding the cap that was asked for (power_cap.py). Red when a card is ABOVE it,
+       because that is the case that trips the UPS; amber when it is merely different. #}
+    {% if gpu_cap and gpu_cap.off %}
+    {% set over = gpu_cap.off | selectattr('cap_w', 'gt', gpu_cap.want) | list %}
+    <div class="mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] leading-snug
+                {% if over %}bg-red-500/15 text-red-700 dark:text-red-300{% else %}bg-amber-500/15 text-amber-700 dark:text-amber-300{% endif %}"
+         title="amd-power-cap.service applies the cap at boot and whenever it is changed in the power settings below. On the host: systemctl status amd-power-cap; journalctl -t amd-power-cap -b">
+      <span class="mt-px">{{ icon('alert-triangle', 12) }}</span>
+      <span>GPU power cap not held:
+        {% for c in gpu_cap.off %}card {{ gpu_cap.cards.index(c) }} at {{ c.cap_w }} W{% if not loop.last %}, {% endif %}{% endfor %},
+        set to {{ gpu_cap.want }} W. Check <span class="font-mono">systemctl status amd-power-cap</span> on the host.</span>
+    </div>
+    {% elif gpu_cap and gpu_cap.settling %}
+    <div class="mt-2 text-[10px] text-slate-500">applying the {{ gpu_cap.want }} W GPU cap…</div>
+    {% endif %}
   </div>
 
   {# ---------------- thermals ---------------- #}
