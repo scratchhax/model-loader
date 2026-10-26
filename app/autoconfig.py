@@ -2183,22 +2183,21 @@ def analyze(*,
     # (gemma-4-31B-Q6_K across two R9700s: ~230 GB/s effective against ~640 GB/s per card).
     # Tensor split has both cards reading their own shard at once.
     #
-    # A speculative head is dropped wherever tensor is chosen, deliberately: under tensor split
-    # llama.cpp falls back to a CPU sampler for the MTP draft and aborts inside the
-    # flash-attention kernel once the KV cache is long (fattn.cu, after a ~15k-token prefill).
-    # A second card's bandwidth is worth more than the ~2.1 tokens per pass speculation bought.
+    # The speculative profile chosen in the panel is kept under tensor split. It used to be
+    # wiped here, because earlier llama.cpp builds fell back to a CPU sampler for the MTP draft
+    # and then aborted inside the flash-attention kernel once the KV cache was long (fattn.cu,
+    # after a ~15k-token prefill). Build 11804 still logs the CPU-sampler fallback, but held on
+    # 2026-10-26: Qwen3.8-27B-UD-Q8_K_XL, 262K context, both R9700s, draft-mtp, through 60,831-
+    # and 128,031-token prompts with no abort, decoding 38-45 tok/s against 25.6 without the
+    # draft (27-30 tok/s at those depths). Wiping it also made a choice in the panel silently
+    # not stick, which is how that section ended up at 25 tok/s.
     #
     # Single-GPU and CPU backends never reach here, so they keep whatever the baseline gives
-    # them and may still use a spec head; SPLIT_MODE_TENSOR on a CPU-only build is a fatal load.
+    # them; SPLIT_MODE_TENSOR on a CPU-only build is a fatal load.
     if recommended:
         _rb = next((b for b in backends if b["name"] == recommended.name), None)
         if int((_rb or {}).get("gpu_count", 1)) > 1:
             values["split-mode"] = "tensor"
-            # Written empty rather than omitted, for the reason the spec block above gives:
-            # Fill writes exactly `values`, so a key that is not present is left at whatever
-            # the previous save put there.
-            for _k in ("spec-type", "spec-draft-model", "spec-draft-ngl", *SPEC_PROFILE_KEYS):
-                values[_k] = ""
 
     # baseline-redundant: any key that matches the recommended backend's baseline
     baseline_redundant: dict[str, str] = {}
