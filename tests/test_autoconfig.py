@@ -282,6 +282,24 @@ class TestAnalyzeGolden:
         assert r.recommended_ctx == 131072
         assert r.values["split-mode"] == "tensor"
 
+    def test_tensor_split_keeps_the_chosen_mtp_profile(self):
+        # Under tensor split the draft used to be wiped (an old fattn abort with long KV). On
+        # build 11804 it held through 128K-token prompts at 38-45 tok/s against 25.6 without it.
+        r = ac.analyze(
+            summary=dense_summary(nextn_predict_layers=1), file_size=30 * GiB,
+            backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]),
+            section_name="Qwen-Q8", spec_profile="balanced")
+        assert r.values["split-mode"] == "tensor"
+        assert r.values["spec-type"] == "draft-mtp"
+        assert r.values["spec-draft-n-max"] == "4" and r.values["spec-draft-p-min"] == "0.25"
+
+    def test_tensor_split_with_speculation_off_stays_off(self):
+        r = ac.analyze(
+            summary=dense_summary(nextn_predict_layers=1), file_size=30 * GiB,
+            backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]),
+            section_name="Qwen-Q8", spec_profile="off")
+        assert r.values["split-mode"] == "tensor" and r.values["spec-type"] == ""
+
     def test_sessions_scale_total_ctx_and_parallel(self):
         r = ac.analyze(summary=dense_summary(context_length=8192),
                        file_size=4 * GiB, backends=backend(), n_sessions=4)
