@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app import autoconfig as ac
@@ -281,6 +283,12 @@ class TestAnalyzeGolden:
             backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]))
         assert r.recommended_ctx == 131072
         assert r.values["split-mode"] == "tensor"
+
+    def test_reasoning_effort_defaults_to_high(self):
+        s = dense_summary()
+        s["chat_template_features"] = {"accepts_reasoning_effort": True}
+        r = ac.analyze(summary=s, file_size=4 * GiB, backends=backend())
+        assert json.loads(r.values["chat-template-kwargs"]) == {"reasoning_effort": "high"}
 
     def test_tensor_split_keeps_the_chosen_mtp_profile(self):
         # Under tensor split the draft used to be wiped (an old fattn abort with long KV). On

@@ -2099,7 +2099,11 @@ def analyze(*,
         # chat-template-kwargs is deprecated in recent llama.cpp builds.
         values["reasoning"] = "on"
     if features.get("accepts_reasoning_effort"):
-        tpl_kwargs["reasoning_effort"] = "medium"
+        # The fallback for a request that names no effort; a per-request reasoning_effort (top
+        # level or in chat_template_kwargs) still wins, measured on llama.cpp 11804. "high", not
+        # "medium": these models are run here for hard work, and medium was a default nobody
+        # chose. high is the top level Qwen's template knows (xhigh renders the same prompt).
+        tpl_kwargs["reasoning_effort"] = "high"
     if tpl_kwargs:
         import json as _json
         values["chat-template-kwargs"] = _json.dumps(tpl_kwargs)
