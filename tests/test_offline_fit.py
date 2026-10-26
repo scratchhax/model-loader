@@ -108,10 +108,23 @@ class TestBackendListOffline:
         # The strata-held zeroing is skipped offline: the plan is for after the switch.
         assert 0.0 not in b["card_vram_gb"]
 
-    def test_running_backend_with_dead_probe_is_still_dropped(self, offline_env, monkeypatch):
-        # Machine facts may not describe a running CPU build's devices; unchanged behavior.
+    def test_running_cpu_build_with_dead_probe_is_still_dropped(self, offline_env, monkeypatch):
+        # Machine facts may not describe a running CPU build's devices.
+        from app import services
         monkeypatch.setattr(offline_env, "_container_status", lambda n: "running")
+        monkeypatch.setattr(services, "_docker_client",
+                            lambda: FakeClient(FakeContainer(["ghcr.io/x/llama.cpp:server"], status="running")))
         assert offline_env._backend_list() == []
+
+    def test_running_gpu_backend_not_probed_yet_gets_both_cards(self, offline_env, monkeypatch):
+        # 2026-10-26: dropped here, the panel had no multi-GPU backend, the section kept
+        # split-mode = layer, and a 27B Q8 ran on the two cards in sequence at 15 tok/s.
+        from app import services
+        monkeypatch.setattr(offline_env, "_container_status", lambda n: "running")
+        monkeypatch.setattr(services, "_docker_client",
+                            lambda: FakeClient(FakeContainer(["ghcr.io/x/llama.cpp:server-rocm"], status="running")))
+        [b] = offline_env._backend_list()
+        assert b["gpu_count"] == 2 and b["card_vram_gb"] == [31.9, 31.9] and b["offline"] is True
 
     def test_no_sysfs_facts_still_hard_stops(self, offline_env, monkeypatch):
         monkeypatch.setattr(hw, "sysfs_card_vram_gb", lambda: [])

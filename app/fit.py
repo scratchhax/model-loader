@@ -114,16 +114,32 @@ def _container_status(name: str) -> str:
         return ""
 
 
+def _gpu_image(name: str) -> bool:
+    """True when the container runs a GPU build of llama.cpp (rocm / cuda / vulkan image tag)."""
+    try:
+        client = services._docker_client()
+        if client is None:
+            return False
+        tags = client.containers.get(name).image.tags or []
+    except Exception:  # noqa: BLE001
+        return False
+    return any(v in t.lower() for t in tags for v in ("rocm", "cuda", "vulkan"))
+
+
 def _backend_list() -> list[dict]:
     """Backend descriptors for autoconfig, from the env whitelist or auto-discovery.
 
     Shared so the benchmark results page asks for the same fit estimate the autoconfig panel
     shows rather than growing a second copy.
 
-    A STOPPED discovered GPU backend is offered with the sysfs card facts and an `offline` flag
-    the panel discloses: the card totals are a property of the machine, and the plan being sized
-    describes the state after the engine switch. A running container whose probe still reads 0
-    (CPU build, unreadable SMI) is dropped, since the machine facts may not describe its devices.
+    A discovered GPU backend whose probe reads 0 is offered with the sysfs card facts and an
+    `offline` flag the panel discloses: the card totals are a property of the machine. That
+    covers a STOPPED backend (the plan describes the state after the engine switch) and a
+    RUNNING GPU-image backend the sampler has not probed yet. The second used to be dropped,
+    and then the panel had no multi-GPU backend to size against: a section saved from it kept
+    the `split-mode = layer` every new section starts with, and on 2026-10-26 Qwen3.8-27B-Q8 ran
+    on both R9700s in sequence at 15 tok/s instead of in parallel. A running CPU build is still
+    dropped, since the machine's cards do not describe its devices.
     """
     out = []
     for bn in services._effective_container_names():
@@ -140,8 +156,10 @@ def _backend_list() -> list[dict]:
         cards: list[float] = []
         if vram <= 0:
             cards = hw.sysfs_card_vram_gb()
-            if not cards or _container_status(bn) == "running":
-                continue  # CPU backends have no VRAM budget; autoconfig can't do KV math on them yet
+            if not cards:
+                continue
+            if _container_status(bn) == "running" and not _gpu_image(bn):
+                continue  # a running CPU build has no VRAM budget; autoconfig can't do KV math on it
             offline = True
             vram = sum(cards)
         # detect vendor via hw sampler cache (or docker inspect image)

@@ -19,13 +19,13 @@
             class="text-xs text-slate-500 hover:text-slate-900 dark:hover:text-slate-100">dismiss</button>
   </div>
   {% if rec.offline_fit %}
-  {# Sized while the backend is stopped: the card totals came from the machine's own sysfs,
-     not a probe of the container, and the strata-held zeroing was skipped because the plan
-     describes the state after the engine switch. Say so — these numbers describe the box. #}
+  {# Sized without a live probe (backend stopped, or running but not probed yet): the card
+     totals came from the machine's own sysfs, and the strata-held zeroing was skipped because
+     the plan describes the state after the engine switch. Say so — these numbers describe the box. #}
   <p class="mt-1 mb-2 text-xs text-sky-700 dark:text-sky-400">
-    Sized against the machine&#39;s GPU facts — the llama backend is stopped, so this is the
-    box&#39;s own card totals, not a live probe, and the cards are assumed free after the
-    engine switch.
+    Sized against the machine&#39;s GPU facts — the llama backend is stopped or not probed yet,
+    so this is the box&#39;s own card totals, not a live probe, and the cards are assumed free
+    after the engine switch.
   </p>
   {% endif %}
 
