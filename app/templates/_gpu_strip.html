@@ -195,7 +195,7 @@
             <span class="text-slate-600" title="per-process compute occupancy is not readable here">&mdash;</span>
           {%- elif t.working -%}
             <span class="text-emerald-700 dark:text-emerald-300"
-                  title="{{ t.cu_peak }} of card {{ t.cu_card }}'s {{ t.cu_total }} compute units - the busiest reading in the last 3 seconds. Sampled at 20 Hz: the kernel reports occupancy instantaneously, so a short burst falls between samples easily and this is a peak, never an average.">{{ t.cu_pct }}<span class="text-emerald-500/70">%</span></span>
+                  title="{% if t.util_src == 'sm' %}{{ t.cu_pct }}% of card {{ t.cu_card }}'s streaming multiprocessors, from nvidia-smi pmon on the host, sampled every 2 seconds.{% else %}{{ t.cu_peak }} of card {{ t.cu_card }}'s {{ t.cu_total }} compute units - the busiest reading in the last 3 seconds. Sampled at 20 Hz: the kernel reports occupancy instantaneously, so a short burst falls between samples easily and this is a peak, never an average.{% endif %}">{{ t.cu_pct }}<span class="text-emerald-500/70">%</span></span>
           {%- else -%}
             <span class="text-slate-600" title="holding VRAM but running nothing in the last 3 seconds">idle</span>
           {%- endif -%}

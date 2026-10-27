@@ -325,10 +325,10 @@
           <span class="shrink-0 tabular-nums text-violet-200/80">{{ '%.1f' % f.gb }} GB</span>
           {% if f.cu_total %}
           <span class="shrink-0 w-16 overflow-hidden rounded-full bg-violet-950/60"
-                title="{{ f.cu_peak }} of this card's {{ f.cu_total }} compute units, the busiest reading in the last 3 seconds. Sampled at 20 Hz because the kernel reports occupancy instantaneously - a short burst is easy to miss between samples, so this is a peak and not an average.">
+                title="{% if f.util_src == 'sm' %}{{ f.cu_pct }}% of this card's streaming multiprocessors, from nvidia-smi pmon on the host, sampled every 2 seconds.{% else %}{{ f.cu_peak }} of this card's {{ f.cu_total }} compute units, the busiest reading in the last 3 seconds. Sampled at 20 Hz because the kernel reports occupancy instantaneously - a short burst is easy to miss between samples, so this is a peak and not an average.{% endif %}">
             <span class="block h-1 bg-violet-400" style="width: {{ f.cu_pct }}%"></span>
           </span>
-          <span class="shrink-0 w-14 text-right tabular-nums text-violet-200/70">{{ f.cu_peak }}/{{ f.cu_total }} CU</span>
+          <span class="shrink-0 w-14 text-right tabular-nums text-violet-200/70">{% if f.util_src == 'sm' %}{{ f.cu_pct }}% SM{% else %}{{ f.cu_peak }}/{{ f.cu_total }} CU{% endif %}</span>
           {% endif %}
         </div>
         {% endfor %}

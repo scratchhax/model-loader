@@ -35,6 +35,9 @@ class GpuCard:
     power_cap_w: float = 0.0
     fan_pct: float = 0.0     # 0 when the card does not report a fan, or reports it as stopped
     fan_rpm: float = 0.0
+    # PCI bus id, on NVIDIA. A container given one card numbers it 0 whichever card it is, so
+    # the bus is the only thing that says which of the HOST's cards this reading describes.
+    bus: str = ""
 
     @property
     def vram_free_gb(self) -> float:
@@ -156,7 +159,7 @@ def _read_nvidia(container) -> GpuStats | None:
     """
     cmd = (
         "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,"
-        "temperature.gpu,power.draw,name,fan.speed,power.limit "
+        "temperature.gpu,power.draw,name,fan.speed,power.limit,pci.bus_id "
         "--format=csv,noheader,nounits"
     )
     try:
@@ -198,7 +201,7 @@ def _read_nvidia(container) -> GpuStats | None:
                 vram_used_gb=round(mems_used[-1] / 1024.0, 2),
                 vram_total_gb=round(mems_total[-1] / 1024.0, 2),
                 temp_c=temps[-1], power_w=powers[-1], power_cap_w=power_cap,
-                fan_pct=fan_pct,
+                fan_pct=fan_pct, bus=parts[8] if len(parts) > 8 else "",
             ))
         if not utils:
             return None
@@ -915,6 +918,31 @@ def host_sensors() -> dict:
     if ts and (time.time() - ts) > _HOST_SENSORS_MAX_AGE_S:
         return {"stale": True, "age_s": round(time.time() - ts, 1)}
     return raw
+
+
+def host_nvidia_cards() -> list[GpuCard]:
+    """Every NVIDIA card on the host, from host-sensors.service. [] without it, or on AMD.
+
+    A llama container sees only the cards it was given, so on a box that pins one container per
+    card the backends between them describe a subset - and the card an image generator has to
+    itself is in nobody's view at all. The host publisher sees them all.
+    """
+    nv = host_sensors().get("nvidia") or {}
+    out: list[GpuCard] = []
+    for g in nv.get("gpus") or []:
+        try:
+            out.append(GpuCard(
+                index=int(g["index"]), name=str(g.get("name") or "GPU"),
+                util_pct=float(g.get("util_pct") or 0),
+                vram_used_gb=round(float(g.get("mem_used_mib") or 0) / 1024.0, 2),
+                vram_total_gb=round(float(g.get("mem_total_mib") or 0) / 1024.0, 2),
+                temp_c=float(g.get("temp_c") or 0), power_w=float(g.get("power_w") or 0),
+                power_cap_w=float(g.get("power_cap_w") or 0),
+                fan_pct=float(g.get("fan_pct") or 0), bus=str(g.get("bus") or "")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    out.sort(key=lambda c: c.index)
+    return out
 
 
 def power_rollup(baseline_w: float, psu_efficiency: float) -> dict:

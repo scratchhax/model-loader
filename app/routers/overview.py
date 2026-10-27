@@ -33,6 +33,9 @@ def _host_line() -> str:
             for c in st.gpu.cards:
                 if "gfx" in (c.name or "") and not isa:
                     isa = c.name.split("(")[-1].rstrip(")")
+    # A backend sees only the cards it was given; on a box with one container per card the
+    # host's own list is the whole of it.
+    total_vram = max(total_vram, sum(c.vram_total_gb for c in hw.host_nvidia_cards()))
     if total_vram:
         bits.append(f"{total_vram:.0f} GB VRAM")
     if isa:
@@ -122,7 +125,7 @@ def _hero_foreign_only() -> list[dict]:
     """
     try:
         return [{"label": t.label, "cu_pct": t.cu_pct, "cu_peak": t.cu_peak,
-                 "cu_total": t.cu_total, "gb": round(t.total_gb, 1),
+                 "cu_total": t.cu_total, "util_src": t.util_src, "gb": round(t.total_gb, 1),
                  "card": (max(t.cu_by_card, key=t.cu_by_card.get) if t.cu_by_card else None)}
                 for t in _gpu_tenants() if t.foreign and t.working]
     except Exception:  # noqa: BLE001
@@ -250,7 +253,7 @@ async def _hero_context() -> dict:
             if t.foreign and t.working:
                 hero_foreign.append({
                     "label": t.label, "cu_pct": t.cu_pct, "cu_peak": t.cu_peak,
-                    "cu_total": t.cu_total, "gb": round(t.total_gb, 1),
+                    "cu_total": t.cu_total, "util_src": t.util_src, "gb": round(t.total_gb, 1),
                     "card": (max(t.cu_by_card, key=t.cu_by_card.get) if t.cu_by_card else None),
                 })
     except Exception:  # noqa: BLE001 - a box without KFD simply has no tenants
@@ -361,11 +364,21 @@ def _gpu_strip_context() -> dict:
     tenants = _gpu_tenants()
     foreign_cards = gpu_procs.foreign_by_card(tenants)
     foreign_pool = [(t.label, t.total_gb) for t in tenants if t.foreign and t.total_gb > 0.005]
+    host_cards = hw.host_nvidia_cards()
+    to_host: dict[int, int] = {}
     for name in services._effective_container_names():
         st = hw.stats_for(name)
         if not (st.ok and st.gpu and st.gpu.cards):
             continue
         cards = st.gpu.cards
+        to_host = _host_index_map(cards, host_cards)
+        # Tenants are numbered by the host; the backend's meter by its own view. Hand the meter
+        # the tenants on ITS cards under ITS numbers, or a container pinned to the host's second
+        # card would be told about whatever sits on the first.
+        if to_host:
+            foreign_cards_local = {i: foreign_cards.get(h, []) for i, h in to_host.items()}
+        else:
+            foreign_cards_local = foreign_cards
         if name == solo:
             # The pooled meter is kept as well as the per-card ones. A per-card row has no
             # room for a legend, so it collapses weights, KV and compute into one apportioned
@@ -376,7 +389,7 @@ def _gpu_strip_context() -> dict:
             pooled_vb = vram_live.breakdown(name, st.gpu,
                                             frozenset(services.last_loaded_ids(name)),
                                             foreign=foreign_pool)
-            card_breakdowns = vram_live.per_card(pooled_vb, cards, foreign_cards)
+            card_breakdowns = vram_live.per_card(pooled_vb, cards, foreign_cards_local)
         pts = hw.history_for(name)
         if pts:
             span_s = (pts[-1].ts - pts[0].ts) if len(pts) > 1 else 0.0
@@ -393,11 +406,24 @@ def _gpu_strip_context() -> dict:
                     "vram": hw.sparkline(vram, c.vram_total_gb or None) if vram else "",
                 }
         break
-    # The estimate-based meter is all-or-nothing on the backend's model and says None whenever
-    # it cannot size one - idle router, sleeping model, no telemetry. A foreign tenant's VRAM
-    # is measured, not estimated, so it should not disappear with it. Fall back to drawing what
-    # IS known rather than an anonymous fill.
-    if not card_breakdowns and foreign_cards and cards:
+    # Widen to the host's cards when the backends between them see fewer. Everything keyed by
+    # the backend's numbering is re-keyed by the host's, so the strip, the tenant table and the
+    # foreign tenants all count cards the same way. A card no backend meters gets the
+    # measurement-only meter below.
+    if len(host_cards) > len(cards):
+        if to_host:
+            card_breakdowns = {to_host[i]: v for i, v in card_breakdowns.items() if i in to_host}
+            history = {to_host[i]: v for i, v in history.items() if i in to_host}
+        elif cards:
+            card_breakdowns, history = {}, {}
+        cards = host_cards
+        unmetered = [c for c in cards if c.index not in card_breakdowns]
+        card_breakdowns.update(vram_live.tenants_only_per_card(unmetered, foreign_cards))
+    elif not card_breakdowns and foreign_cards and cards:
+        # The estimate-based meter is all-or-nothing on the backend's model and says None
+        # whenever it cannot size one - idle router, sleeping model, no telemetry. A foreign
+        # tenant's VRAM is measured, not estimated, so it should not disappear with it. Fall
+        # back to drawing what IS known rather than an anonymous fill.
         card_breakdowns = vram_live.tenants_only_per_card(cards, foreign_cards)
     live = {t.container: t.total_gb for t in tenants if t.foreign and t.container}
     free_gb = sum(max(0.0, c.vram_total_gb - c.vram_used_gb) for c in cards) if cards else 0.0
@@ -430,6 +456,13 @@ def _gpu_strip_context() -> dict:
             "tenants": _tenant_rows(tenants, cards), "ejectable": ejectable,
             "engines": engines, "engine_switch": services.engine_switch_state(),
             "share": _share_options(engines, cards)}
+
+
+def _host_index_map(cards: list, host_cards: list) -> dict[int, int]:
+    """{backend's card index: host's card index}, matched by PCI bus. {} when nothing matches -
+    on AMD, where both number the cards the same way, or without host-sensors' NVIDIA table."""
+    by_bus = {c.bus: c.index for c in host_cards if c.bus}
+    return {c.index: by_bus[c.bus] for c in cards if getattr(c, "bus", "") in by_bus}
 
 
 def _share_options(engines: list, cards: list) -> dict[str, str]:
@@ -499,6 +532,7 @@ def _tenant_rows(tenants: list, cards: list) -> list[dict]:
             "cu_peak": t.cu_peak,
             "cu_total": t.cu_total,
             "cu_pct": t.cu_pct,
+            "util_src": t.util_src,
             "cu_card": (max(t.cu_by_card, key=t.cu_by_card.get) if t.cu_by_card else None),
         })
     return rows

@@ -30,12 +30,14 @@ container the app already talks to. Topology is fixed for the life of the kernel
 one exec per process, not one per poll - and handing this container the GPU just to read two
 integers buys nothing the socket it already holds does not.
 
-AMD only, deliberately rather than by oversight. This is a KFD interface; the NVIDIA
-equivalent is `nvidia-smi --query-compute-apps=pid,used_gpu_memory,gpu_uuid`, which is a
-different shape (one row per process per device, keyed by uuid, and it reports nothing at all
-for a process in a container it cannot see into). Nothing here has been tested against it, so
-rather than ship a plausible-looking untested path this probe returns nothing on a box with no
-KFD, and every caller is written to degrade to the behaviour it had before.
+NVIDIA has no KFD and no world-readable equivalent. nvidia-smi inside a container lists only
+that container's processes, under its own pids, on the cards it was given - measured on a box
+with one llama container per card: the llama container saw itself and nothing on the other
+card, ComfyUI's saw itself as pid 1, and a container given every card with only the utility
+capability saw no processes at all. Run on the HOST it sees everything under host pids, so
+on NVIDIA the table comes from host-sensors.service (contrib/host-sensors.py), which already
+runs as root there. Without that service an NVIDIA box gets an empty list, and every caller is
+written to degrade to the behaviour it had before.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ from pathlib import Path
 
 from docker.errors import DockerException
 
+from .hw import host_sensors
 from .utils import docker_client, timed_shell
 
 _KFD_PROC = Path("/sys/class/kfd/kfd/proc")
@@ -82,6 +85,9 @@ class Tenant:
     # Milliseconds this process's memory has spent evicted, summed over cards. Climbs only when
     # something else took the VRAM, so a rising value is contention, not activity.
     evicted_ms: int = 0
+    # What cu_by_card counts. "cu": compute units out of cu_total (KFD). "sm": NVIDIA's SM
+    # share as a percentage, so cu_total is 100 and the two read the same through cu_pct.
+    util_src: str = "cu"
 
     @property
     def total_gb(self) -> float:
@@ -444,7 +450,8 @@ def _owner_map(want: set[int]) -> dict[int, tuple[str, str]]:
 
 
 def tenants(backend_names=()) -> list[Tenant]:
-    """Every GPU process, largest first. Empty on a box with no KFD (so, on NVIDIA).
+    """Every GPU process, largest first. Empty on a box that can read neither KFD nor
+    host-sensors' NVIDIA table.
 
     `backend_names` is what the app manages; it both tags each tenant and supplies the
     candidates for the one-off topology exec, since a llama backend is by definition a
@@ -458,7 +465,7 @@ def tenants(backend_names=()) -> list[Tenant]:
     known = set(backend_names or ())
     gpu_ids = card_index_by_gpu_id(sorted(known))
     if not gpu_ids:
-        return []
+        return _nvidia_tenants(known)
 
     raw: list[tuple[int, dict[int, float]]] = []
     try:
@@ -494,6 +501,40 @@ def tenants(backend_names=()) -> list[Tenant]:
         for pid, per_card in raw
         for cont, comm in (owners.get(pid, ("", "")),)
     ]
+    out.sort(key=lambda t: (-t.total_gb, t.pid))
+    return out
+
+
+def _nvidia_tenants(known: set[str]) -> list[Tenant]:
+    """The same table on NVIDIA, from host-sensors' host-side nvidia-smi (see the module doc).
+
+    Card indices are the host's, which is the numbering foreign_by_card and the strip use. The
+    publisher samples every 2 s, so `working` here is "ran kernels in the last sample", not the
+    3 s decaying peak the KFD sampler keeps - coarser, but the same claim.
+    """
+    nv = host_sensors().get("nvidia") or {}
+    rows = nv.get("procs") or []
+    per: dict[int, dict[int, float]] = {}
+    sm: dict[int, dict[int, int]] = {}
+    for r in rows:
+        try:
+            pid, card = int(r["pid"]), int(r["gpu"])
+            gb = float(r.get("mem_mib") or 0) / 1024.0
+            pct = int(round(float(r.get("sm_pct") or 0)))
+        except (KeyError, TypeError, ValueError):
+            continue
+        per.setdefault(pid, {})[card] = per.get(pid, {}).get(card, 0.0) + gb
+        if pct > 0:
+            sm.setdefault(pid, {})[card] = pct
+    if not per:
+        return []
+    owners = _owner_map(set(per))
+    out = []
+    for pid, per_card in per.items():
+        cont, comm = owners.get(pid, ("", ""))
+        out.append(Tenant(pid=pid, comm=comm, container=cont,
+                          backend=cont if cont in known else "", per_card_gb=per_card,
+                          cu_by_card=sm.get(pid, {}), cu_total=100, util_src="sm"))
     out.sort(key=lambda t: (-t.total_gb, t.pid))
     return out
 
@@ -551,7 +592,8 @@ def gpu_capable_containers(backend_names=()) -> list[dict]:
 
     /dev/kfd is the AMD compute device; a container with it can run compute, and one without it
     cannot, which makes it a better test than the image name or a label someone has to remember
-    to set.
+    to set. On NVIDIA the same fact is a DeviceRequest (compose `deploy.resources...devices`,
+    `--gpus`) or the nvidia runtime.
     """
     known = set(backend_names or ())
     out: list[dict] = []
@@ -566,11 +608,12 @@ def gpu_capable_containers(backend_names=()) -> list[dict]:
         if c.name in known:
             continue
         try:
-            devs = (c.attrs.get("HostConfig") or {}).get("Devices") or []
-            paths = {str(d.get("PathOnHost", "")) for d in devs}
+            hc = c.attrs.get("HostConfig") or {}
+            paths = {str(d.get("PathOnHost", "")) for d in (hc.get("Devices") or [])}
+            nvidia = bool(hc.get("DeviceRequests")) or hc.get("Runtime") == "nvidia"
         except Exception:  # noqa: BLE001 - a container mid-removal is not an error
             continue
-        if "/dev/kfd" not in paths:
+        if "/dev/kfd" not in paths and not nvidia:
             continue
         out.append({"name": c.name, "running": c.status == "running",
                     "status": c.status, "last_gb": _LAST_SEEN.get(c.name, 0.0)})
