@@ -45,8 +45,10 @@ WantedBy=multi-user.target
 sudo systemctl enable --now host-sensors.service
 ```
 
-Edit the output path at the top of the script if your `model_loader_data` lives elsewhere. It
-writes every 2 s, atomically, and Model Loader ignores the file if it is more than 15 s old.
+If your `model_loader_data` lives elsewhere, point the script at it with
+`Environment=HOST_SENSORS_OUT=/path/to/model_loader_data/host_sensors.json` in the unit rather
+than editing the script. It writes every 2 s, atomically, and Model Loader ignores the file if
+it is more than 15 s old.
 
 ## What it publishes
 
@@ -55,8 +57,35 @@ writes every 2 s, atomically, and Model Loader ignores the file if it is more th
  "cpu_temp_c": 70.0, "nvme_temp_max_c": 71.8}
 ```
 
-GPU power and temperature are deliberately **not** in here: the llama container already reports
-them through its own vendor tool, and two sources for one number is how they end up disagreeing.
+On AMD, GPU power and temperature are deliberately **not** in here: the llama container already
+reports them through its own vendor tool, and two sources for one number is how they end up
+disagreeing.
+
+## NVIDIA: who is on which card
+
+On an NVIDIA box the service also publishes every card and every compute process, under an
+`nvidia` key, whenever `nvidia-smi` is on the host's PATH:
+
+```json
+"nvidia": {"gpus": [{"index": 1, "bus": "00000000:08:00.0", "name": "NVIDIA GeForce RTX 5070",
+                     "mem_used_mib": 7828, "mem_total_mib": 12227, "util_pct": 0, ...}],
+           "procs": [{"pid": 2886019, "gpu": 1, "mem_mib": 7796, "sm_pct": 0}]}
+```
+
+It has to come from the host. `nvidia-smi` in a container lists only that container's own
+processes, renumbered into its own pid namespace, on only the cards it was given. Measured on a
+box with one llama container per card: the container pinned to GPU0 saw itself and nothing else,
+ComfyUI's container saw itself as pid 1, and a container given every card with only the utility
+capability saw no processes at all. From the host the same call lists everything under host
+pids, which `docker top` maps back to a container.
+
+Model Loader uses it for three things on NVIDIA, and each one is empty without this service:
+
+* the GPU strip covers every card on the host, not just the ones a running backend was given;
+* the "on the cards" table and the hero's *also on the cards* row name non-backend tenants
+  (ComfyUI, a training run) with their VRAM and SM share (`nvidia-smi pmon`, one sample per
+  write);
+* the engine switch counts their VRAM, the same as it does with KFD on AMD.
 
 ## AMD notes
 
