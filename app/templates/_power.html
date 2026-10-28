@@ -85,7 +85,7 @@
         </div>
       </div>
       <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500">
-        <div>GPU {{ p.gpu_temp_max_c or '—' }} · CPU {{ p.cpu_temp_c or '—' }} · NVMe {{ p.nvme_temp_max_c or '—' }}</div>
+        <div>GPU {{ '%.0f' % p.gpu_temp_max_c if p.gpu_temp_max_c else '—' }} · CPU {{ '%.0f' % p.cpu_temp_c if p.cpu_temp_c else '—' }} · NVMe {{ '%.0f' % p.nvme_temp_max_c if p.nvme_temp_max_c else '—' }}</div>
         <div class="mt-0.5">warn {{ temp_warn_c | int }} · crit {{ temp_crit_c | int }}°C</div>
       </div>
     </div>
