@@ -30,39 +30,34 @@
   </div>
 </div>
 
-{# Power first: the models are the interesting part, the UPS is the constraint. Shares the 1s
-   cadence of the sensors underneath it - RAPL publishes every 2s, rocm-smi is sampled every 1s. #}
-<div class="mt-5" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_power.html" %}
+{# ---------------- polled zone 1: the cards, and who is on them ---------------- #}
+{# First, because the cards are what the box is: a chat model, an image pipeline and a TTS
+   server are all tenants of the same hardware, and the old order led with one of them and
+   left the others as a residual in its meter. 1 s, matching the samplers behind it. #}
+<div class="mt-5" hx-get="/cards" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_cards.html" %}
 </div>
 
-{# The host row, on the power row's 1 s cadence because it is the same kind of reading: what the
-   machine is doing, not what a model is doing. Four cheap probes (two /proc files, a statvfs and
-   a cached cgroup read), so the poll costs nothing worth measuring.
+{# ---------------- polled zone 2: the chat model in depth ---------------- #}
+{# The one tenant with a deep readout. 500 ms: the slot read behind it is ~1 ms, and the token
+   counter it exposes moves every few milliseconds during generation. #}
+<div id="llm" class="mt-3 scroll-mt-4" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
+  {% include "_hero.html" %}
+</div>
 
-   Above the threshold disclosure, not below it: those settings belong to the power and temp
-   readings, and sitting between the two instrument rows made them look like a divider between
-   unrelated things. #}
+{# ---------------- the box: power, load, memory, disk ---------------- #}
+{# Below the cards now: what the machine is drawing and how loaded it is matters, but it is the
+   context for the cards rather than the headline. Same 1 s cadence as the sensors behind it. #}
+<h2 class="mt-6 mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">The box</h2>
+<div hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_power.html" %}
+</div>
 <div class="mt-3" hx-get="/hoststats" hx-trigger="load, every 1s" hx-swap="innerHTML">
   {% include "_host_stats.html" %}
 </div>
 
 {# Outside the poll on purpose - see _power_settings.html #}
 {% include "_power_settings.html" %}
-
-{# ---------------- polled zone 1: what is loaded right now ---------------- #}
-{# 500 ms: the slot read behind this is ~1 ms, and the token counter it exposes moves every
-   few milliseconds during generation. This is the one zone worth polling hard. #}
-<div class="mt-3" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
-  {% include "_hero.html" %}
-</div>
-
-{# ---------------- polled zone 2: the cards ---------------- #}
-{# 1 s, matching the hw sampler: rocm-smi through docker exec costs ~90 ms, so polling faster
-   would redraw the same numbers and spend CPU doing it. #}
-<div class="mt-3" hx-get="/gpu-strip" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_gpu_strip.html" %}
-</div>
 
 
 

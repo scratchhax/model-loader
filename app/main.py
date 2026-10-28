@@ -5,7 +5,7 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import db, hw, services
+from . import db, gpu_activity, hw, services
 from . import strata as strata_engine
 from . import router_api
 from .config import settings
@@ -105,6 +105,7 @@ def _startup() -> None:
     # Downloads a deploy or restart interrupted; a single-stream temp resumes where it stopped.
     downloads_router.manager.resume_pending()
     hw.start_sampler()
+    gpu_activity.start()
     threading.Thread(target=_reconcile_strata_config, daemon=True, name="strata-config").start()
 
 
