@@ -6,15 +6,19 @@
   residual in its meter. On a box where one card belongs to an image pipeline, and soon a TTS
   server, that made half the hardware a footnote. Each panel now answers, top to bottom:
 
-    who is working on this card right now        (the headline line)
-    how full it is, and by whom                  (VRAM bar, one segment per tenant)
-    who has been using it                        (compute timeline, stacked by tenant)
+    how busy and how full                        (ring gauge: util inside, VRAM by tenant outside)
+    who is working on this card right now        (the headline, and the panel's glow)
+    who has been using it                        (one sparkline per tenant, 15 minutes)
     what each tenant is doing, in its own terms  (rows: tok/s for a model, renders for ComfyUI)
 
-  Colour follows the tenant's KIND (chat model, image, audio, other) and every row and segment
-  names itself, so identity never rests on colour alone. "Working" means it ran kernels in the
-  last few seconds or its own API says it is busy - never that it holds VRAM, because a model
+  Colour follows the tenant's KIND (chat model, image, audio, other) and every row, segment and
+  line names itself, so identity never rests on colour alone. "Working" means it ran kernels in
+  the last few seconds or its own API says it is busy - never that it holds VRAM, because a model
   server that sits on 6 GB all day and does nothing is the commonest thing on these cards.
+
+  Motion: every element that changes carries a stable id, so HTMX's settle step moves it from
+  its old attributes to its new ones and the CSS transitions run (the arcs sweep, the glow fades
+  over a second). Nothing blinks, pulses or pops; a change of state eases in and out.
 #}
 {% macro kind_bg(k) -%}
   {%- if k == 'llm' %}bg-sky-500{% elif k == 'image' %}bg-fuchsia-500{% elif k == 'audio' %}bg-lime-400{% else %}bg-slate-400 dark:bg-slate-500{% endif -%}
@@ -25,22 +29,40 @@
 {% macro kind_word(k) -%}
   {%- if k == 'llm' %}model{% elif k == 'image' %}image{% elif k == 'audio' %}audio{% else %}process{% endif -%}
 {%- endmacro %}
+{% macro kind_glow(k) -%}
+  {%- if k == 'llm' %}border-sky-500/50 shadow-[0_0_60px_-18px_rgba(14,165,233,0.65)]
+  {%- elif k == 'image' %}border-fuchsia-500/50 shadow-[0_0_60px_-18px_rgba(217,70,239,0.65)]
+  {%- elif k == 'audio' %}border-lime-400/50 shadow-[0_0_60px_-18px_rgba(163,230,53,0.6)]
+  {%- elif k == 'other' %}border-slate-400/50 shadow-[0_0_60px_-18px_rgba(148,163,184,0.5)]
+  {%- else %}border-slate-200 dark:border-slate-800 shadow-none{% endif -%}
+{%- endmacro %}
 {% macro ago(s) -%}
   {%- if s < 60 %}{{ '%.0f' % s }} s{% elif s < 3600 %}{{ '%.0f' % (s / 60) }} min{% elif s < 172800 %}{{ '%.0f' % (s / 3600) }} h{% else %}{{ '%.0f' % (s / 86400) }} d{% endif -%}
 {%- endmacro %}
 
 {% if panels %}
 <div id="gpu-tenant-toast" class="empty:hidden mb-2"></div>
-<div class="grid gap-3 {% if panels | length > 1 %}lg:grid-cols-2{% endif %}">
+<div class="grid gap-4 {% if panels | length > 1 %}lg:grid-cols-2{% endif %}">
   {% for p in panels %}
   {% set c = p.card %}
+  {% set i = c.index %}
   {% set hot = c.vram_pct >= 92 %}
-  <section class="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/95 px-4 py-3 text-slate-800 dark:text-slate-200">
+  {% set util = [[c.util_pct, 0] | max, 100] | min %}
+  <section id="gpu-panel-{{ i }}"
+           class="relative overflow-hidden rounded-2xl border bg-white dark:bg-slate-950 px-5 py-4 text-slate-800 dark:text-slate-200 transition-[border-color,box-shadow] duration-1000 ease-out {{ kind_glow(p.glow) }}">
 
+    {# The wash behind the panel, one per kind, so the fade between them is an opacity
+       transition (a gradient itself cannot be transitioned). #}
+    {% for k in ('llm', 'image', 'audio', 'other') %}
+    <div id="gpu-wash-{{ i }}-{{ k }}" aria-hidden="true"
+         class="pointer-events-none absolute -inset-px bg-gradient-to-br {% if k == 'llm' %}from-sky-500/[0.12]{% elif k == 'image' %}from-fuchsia-500/[0.12]{% elif k == 'audio' %}from-lime-400/[0.10]{% else %}from-slate-400/[0.08]{% endif %} via-transparent to-transparent transition-opacity duration-1000 ease-out {% if p.glow == k %}opacity-100{% else %}opacity-0{% endif %}"></div>
+    {% endfor %}
+
+    <div class="relative">
     {# ---- header: which card, and its thermals ---- #}
     <div class="flex items-baseline justify-between gap-2">
       <div class="flex min-w-0 items-baseline gap-2">
-        <h3 class="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">GPU {{ c.index }}</h3>
+        <h3 class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">GPU {{ i }}</h3>
         <span class="truncate font-mono text-[11px] text-slate-500">{{ c.name | replace('NVIDIA GeForce ', '') | replace('AMD Radeon ', '') }}</span>
       </div>
       <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
@@ -49,77 +71,115 @@
       </div>
     </div>
 
-    {# ---- headline: who is working, in words, with the card's util beside it ---- #}
-    <div class="mt-2 flex items-center justify-between gap-3">
-      <div class="min-w-0 text-sm">
+    <div class="mt-3 flex items-center gap-5">
+      {# ---- ring gauge: util on the inner arc, VRAM by tenant around the outside ---- #}
+      <div class="relative h-32 w-32 shrink-0"
+           title="inner arc: {{ '%.0f' % c.util_pct }}% util · outer ring: {{ '%.1f' % c.vram_used_gb }} of {{ '%.0f' % c.vram_total_gb }} GB VRAM, by tenant">
+        <svg viewBox="0 0 120 120" class="h-full w-full -rotate-90">
+          <circle cx="60" cy="60" r="52" fill="none" stroke-width="9" class="stroke-slate-200 dark:stroke-slate-800/80"/>
+          {% for s in p.ring %}
+          <circle id="gpu-ring-{{ i }}-{{ s.label }}" cx="60" cy="60" r="52" fill="none" stroke-width="9"
+                  stroke-dasharray="{{ s.dash }} {{ ring_c }}" stroke-dashoffset="{{ s.offset }}"
+                  class="{{ kind_text(s.kind) }} transition-all duration-700 ease-out {% if s.label == 'other' %}opacity-60{% endif %}" stroke="currentColor">
+            <title>{{ s.label }}: {{ '%.2f' % s.gb }} GB</title>
+          </circle>
+          {% endfor %}
+          <circle cx="60" cy="60" r="40" fill="none" stroke-width="6" class="stroke-slate-100 dark:stroke-slate-900"/>
+          <circle id="gpu-util-{{ i }}" cx="60" cy="60" r="40" fill="none" stroke-width="6" stroke-linecap="round"
+                  stroke-dasharray="{{ '%.2f' % (util * 2.5133) }} 251.33"
+                  class="stroke-emerald-500 dark:stroke-emerald-400 transition-all duration-700 ease-out drop-shadow-[0_0_5px_rgba(52,211,153,0.75)] {% if util < 0.5 %}opacity-0{% endif %}"/>
+        </svg>
+        <div class="absolute inset-0 flex flex-col items-center justify-center">
+          <span class="font-mono text-2xl font-semibold leading-none tabular-nums text-slate-900 dark:text-white">{{ '%.0f' % c.util_pct }}<span class="text-xs font-normal text-slate-500">%</span></span>
+          <span class="mt-1 text-[9px] uppercase tracking-[0.14em] text-slate-500">util</span>
+          <span class="mt-1 font-mono text-[10px] tabular-nums {% if hot %}text-amber-600 dark:text-amber-300{% else %}text-slate-500 dark:text-slate-400{% endif %}">{{ '%.1f' % c.vram_used_gb }}/{{ '%.0f' % c.vram_total_gb }} GB</span>
+        </div>
+      </div>
+
+      {# ---- headline: who is working, in words, and the number that matters for them ---- #}
+      <div class="min-w-0 flex-1">
         {% if p.working %}
           {% for r in p.working %}
-          <div class="flex min-w-0 items-center gap-2">
-            <span class="h-2 w-2 shrink-0 rounded-sm {{ kind_bg(r.kind) }}"></span>
-            <span class="truncate"><span class="font-mono font-medium">{{ r.label }}</span>
-            <span class="text-slate-500 dark:text-slate-400">
-              {%- if r.llm -%}
-                {%- if r.llm.loading %} loading a model
-                {%- elif r.llm.state == 'generating' %} generating
-                {%- elif r.llm.state == 'prefill' %} reading a prompt
+          <div class="{% if not loop.first %}mt-2{% endif %}">
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="h-2.5 w-2.5 shrink-0 rounded-sm {{ kind_bg(r.kind) }}"></span>
+              <span class="truncate text-base"><span class="font-mono font-semibold">{{ r.label }}</span>
+              <span class="text-slate-500 dark:text-slate-400">
+                {%- if r.llm -%}
+                  {%- if r.llm.loading %} loading a model
+                  {%- elif r.llm.state == 'generating' %} generating
+                  {%- elif r.llm.state == 'prefill' %} reading a prompt
+                  {%- else %} working{% endif -%}
+                {%- elif r.comfy and r.comfy.busy %} rendering
                 {%- else %} working{% endif -%}
-              {%- elif r.comfy and r.comfy.busy %} rendering
-              {%- else %} working{% endif -%}
-            </span></span>
+              </span></span>
+            </div>
+            {% if r.llm and r.llm.state == 'generating' %}
+            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ '%.0f' % r.llm.tps }}<span class="ml-1 text-xs font-normal text-slate-500">tok/s</span></div>
+            {% elif r.llm and r.llm.state == 'prefill' %}
+            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ r.llm.prefill_pct }}<span class="ml-1 text-xs font-normal text-slate-500">% of the prompt</span></div>
+            {% elif r.comfy and r.comfy.busy %}
+            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ '%.0f' % r.comfy.elapsed_s }}<span class="ml-1 text-xs font-normal text-slate-500">s{% if r.comfy.typical_s %} of ~{{ '%.0f' % r.comfy.typical_s }}{% endif %}{% if r.comfy.pending %} · {{ r.comfy.pending }} queued{% endif %}</span></div>
+            {% endif %}
           </div>
           {% endfor %}
         {% else %}
-          <span class="text-slate-500 dark:text-slate-400">idle</span>
-          {% if p.rows %}<span class="text-[11px] text-slate-500"> · {{ p.rows | length }} resident</span>{% endif %}
+          <div class="text-base text-slate-500 dark:text-slate-400">idle</div>
+          {% if p.rows %}<div class="mt-0.5 text-[11px] text-slate-500">{{ p.rows | length }} resident, nothing running</div>{% endif %}
         {% endif %}
-      </div>
-      <div class="shrink-0 text-right" title="{{ '%.0f' % c.util_pct }}% of this card's time running kernels, from the driver, sampled once a second.">
-        <span class="font-mono text-lg font-semibold tabular-nums text-emerald-700 dark:text-emerald-300">{{ '%.0f' % c.util_pct }}</span><span class="text-[10px] text-slate-500">% util</span>
+
+        {# VRAM by tenant, in words - the ring's legend #}
+        <div class="mt-3 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500 dark:text-slate-400">
+          {% for s in p.segs %}
+          <span class="inline-flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-sm {{ kind_bg(s.kind) }} {% if s.label == 'other' %}opacity-60{% endif %}"></span>
+            <span class="font-mono">{{ s.label }}</span> <span class="tabular-nums">{{ '%.1f' % s.gb }} GB</span></span>
+          {% endfor %}
+          <span class="inline-flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-sm bg-slate-200 dark:bg-slate-800 ring-1 ring-slate-300 dark:ring-slate-700"></span>
+            free <span class="tabular-nums">{{ '%.1f' % p.free_gb }} GB</span></span>
+        </div>
       </div>
     </div>
 
-    {# ---- VRAM: one measured segment per tenant, 2px gaps, free track behind ---- #}
-    <div class="mt-3 flex items-baseline justify-between text-[11px]">
-      <span class="text-slate-500">VRAM</span>
-      <span class="tabular-nums"><span class="font-mono font-semibold {% if hot %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.1f' % c.vram_used_gb }}</span><span class="text-slate-500"> / {{ '%.0f' % c.vram_total_gb }} GB</span></span>
-    </div>
-    <div class="mt-1 flex h-2.5 w-full gap-[2px] overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-      {% for s in p.segs %}
-      <div class="h-full transition-all duration-700 ease-out {{ kind_bg(s.kind) }} {% if s.label == 'other' %}opacity-60{% endif %}"
-           style="width: {{ '%.2f' % s.pct }}%" title="{{ s.label }}: {{ '%.2f' % s.gb }} GB"></div>
-      {% endfor %}
-    </div>
-    <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500 dark:text-slate-400">
-      {% for s in p.segs %}
-      <span class="inline-flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-sm {{ kind_bg(s.kind) }} {% if s.label == 'other' %}opacity-60{% endif %}"></span>
-        <span class="font-mono">{{ s.label }}</span> <span class="tabular-nums">{{ '%.1f' % s.gb }}</span></span>
-      {% endfor %}
-      <span class="inline-flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-sm bg-slate-200 dark:bg-slate-800 ring-1 ring-slate-300 dark:ring-slate-700"></span>
-        free <span class="tabular-nums">{{ '%.1f' % p.free_gb }}</span></span>
-    </div>
-
-    {# ---- timeline: who ran on this card, stacked by tenant, fixed 0-100% scale ---- #}
-    {% set tl = p.timeline %}
-    <div class="mt-3">
+    {# ---- sparklines: who ran on this card, one smooth line per tenant, fixed 0-100% ---- #}
+    {% set sp = p.spark %}
+    <div class="mt-4">
       <div class="flex items-baseline justify-between text-[10px] text-slate-500">
-        <span>compute by tenant</span>
-        <span class="tabular-nums">{% if tl.span_s %}last {% if tl.span_s >= 60 %}{{ tl.span_s // 60 }} min{% else %}{{ tl.span_s }} s{% endif %} · 100% scale{% endif %}</span>
+        <span class="flex flex-wrap items-center gap-x-3">
+          <span class="uppercase tracking-[0.12em]">compute</span>
+          {% for ln in sp.lines %}
+          <span class="inline-flex items-center gap-1"><span class="h-0.5 w-3 rounded-full {{ kind_bg(ln.kind) }}"></span><span class="font-mono">{{ ln.label }}</span> <span class="tabular-nums">peak {{ ln.peak }}%</span></span>
+          {% endfor %}
+          {% if sp.card %}<span class="inline-flex items-center gap-1"><span class="w-3 border-t border-dashed border-slate-400 dark:border-slate-500"></span>card util</span>{% endif %}
+        </span>
+        <span class="shrink-0 tabular-nums">{% if sp.span_s %}last {% if sp.span_s >= 60 %}{{ sp.span_s // 60 }} min{% else %}{{ sp.span_s }} s{% endif %}{% endif %}</span>
       </div>
-      {% if tl.span_s %}
-      <svg viewBox="0 0 100 24" preserveAspectRatio="none" class="mt-1 block h-10 w-full" role="img"
-           aria-label="compute share by tenant over the last {{ tl.span_s }} seconds">
-        <line x1="0" y1="23.5" x2="100" y2="23.5" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>
-        {% for b in tl.bands %}
-        <path d="{{ b.path }}" fill="currentColor" fill-opacity="0.85" class="{{ kind_text(b.kind) }}">
-          <title>{{ b.label }}: active in {{ b.busy_pct }}% of this window</title>
+      {% if sp.card %}
+      <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="mt-1.5 block h-20 w-full overflow-visible" role="img"
+           aria-label="compute share by tenant over the last {{ sp.span_s }} seconds">
+        <defs>
+          {% for ln in sp.lines %}
+          <linearGradient id="gpu-grad-{{ i }}-{{ loop.index }}" x1="0" y1="0" x2="0" y2="1" class="{{ kind_text(ln.kind) }}">
+            <stop offset="0%" stop-color="currentColor" stop-opacity="0.35"/>
+            <stop offset="100%" stop-color="currentColor" stop-opacity="0"/>
+          </linearGradient>
+          {% endfor %}
+        </defs>
+        <line x1="0" y1="16" x2="100" y2="16" class="stroke-slate-200/70 dark:stroke-slate-800/70" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>
+        <line x1="0" y1="31.5" x2="100" y2="31.5" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        <path d="{{ sp.card.line }}" fill="none" class="stroke-slate-400/70 dark:stroke-slate-500/70" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+        {% for ln in sp.lines %}
+        <path d="{{ ln.area }}" fill="url(#gpu-grad-{{ i }}-{{ loop.index }})"/>
+        <path d="{{ ln.line }}" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
+              vector-effect="non-scaling-stroke" class="{{ kind_text(ln.kind) }}">
+          <title>{{ ln.label }}: {{ ln.now }}% now, peak {{ ln.peak }}%</title>
         </path>
         {% endfor %}
       </svg>
-      {% if not tl.bands %}
-      <div class="-mt-6 mb-2 text-center text-[10px] text-slate-500">nothing ran on this card in this window</div>
+      {% if not sp.lines %}
+      <div class="-mt-12 mb-6 text-center text-[10px] text-slate-500">nothing ran on this card in this window</div>
       {% endif %}
       {% else %}
-      <div class="mt-1 flex h-10 items-center text-[10px] text-slate-500">collecting…</div>
+      <div class="mt-1.5 flex h-20 items-center justify-center text-[10px] text-slate-500">collecting…</div>
       {% endif %}
     </div>
 
@@ -191,6 +251,7 @@
     {% else %}
     <div class="mt-3 border-t border-slate-200 dark:border-slate-800 pt-2 text-[11px] text-slate-500">Nothing is on this card.</div>
     {% endif %}
+    </div>
   </section>
   {% endfor %}
 </div>

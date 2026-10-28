@@ -615,15 +615,37 @@ def _cards_context(llm: dict[str, dict]) -> dict:
         # enough to see, and named for what it nearly always is rather than as a mystery.
         if other > 0.15:
             segs.append({"label": "other", "kind": "other", "gb": other, "pct": 100.0 * other / total})
+        working = [r for r in ordered if r["working"]]
         panels.append({
-            "card": c, "rows": ordered, "segs": segs,
+            "card": c, "rows": ordered, "segs": segs, "ring": _ring(segs),
             "free_gb": max(0.0, c.vram_total_gb - c.vram_used_gb),
-            "working": [r for r in ordered if r["working"]],
-            "timeline": gpu_activity.stacked_bands(gpu_activity.timeline(c.index)),
+            "working": working,
+            # The panel's glow takes the colour of whoever leads the headline, so a glance
+            # across the row says which kind of work each card is doing.
+            "glow": working[0]["kind"] if working else "",
+            "spark": gpu_activity.sparklines(gpu_activity.timeline(c.index)),
         })
     stopped = [e for e in strip["ejectable"] if not e["running"]]
-    return {"panels": panels, "stopped": stopped, "now": time.time(), "engines": strip["engines"],
+    return {"panels": panels, "stopped": stopped, "now": time.time(), "ring_c": round(_RING_C, 2),
+            "engines": strip["engines"],
             "engine_switch": strip["engine_switch"], "share": strip["share"]}
+
+
+# The ring gauge's outer track: r = 52 in a 120 x 120 box.
+_RING_C = 2 * 3.14159265 * 52
+_RING_GAP = 2.0
+
+
+def _ring(segs: list[dict]) -> list[dict]:
+    """The VRAM segments as dash runs around the gauge's outer ring, a 2px gap after each."""
+    out, at = [], 0.0
+    for s in segs:
+        run = _RING_C * s["pct"] / 100.0
+        if run <= 0.5:
+            continue
+        out.append({**s, "dash": round(max(0.5, run - _RING_GAP), 2), "offset": round(-at, 2)})
+        at += run
+    return out
 
 
 @router.get("/cards", response_class=HTMLResponse)

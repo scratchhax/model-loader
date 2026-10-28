@@ -307,55 +307,68 @@ def kind_for(label: str) -> str:
     return _kinds_seen.get(label, "other")
 
 
-def stacked_bands(samples: list[CardSample], buckets: int = 90) -> dict:
-    """The timeline as one SVG path per tenant, stacked, in a 100 x 24 viewBox.
+def _smooth(points: list[tuple[float, float]], lo: float, hi: float) -> str:
+    """Catmull-Rom through the points as cubic Beziers, control points clamped to [lo, hi] so a
+    curve between two zeros never dips below the baseline it is drawn on."""
+    if len(points) < 2:
+        return ""
+    clamp = lambda v: min(hi, max(lo, v))  # noqa: E731
+    out = [f"M{points[0][0]:.2f},{points[0][1]:.2f}"]
+    for i in range(len(points) - 1):
+        p0 = points[i - 1] if i else points[i]
+        p1, p2 = points[i], points[i + 1]
+        p3 = points[i + 2] if i + 2 < len(points) else p2
+        c1 = (p1[0] + (p2[0] - p0[0]) / 6, clamp(p1[1] + (p2[1] - p0[1]) / 6))
+        c2 = (p2[0] - (p3[0] - p1[0]) / 6, clamp(p2[1] - (p3[1] - p1[1]) / 6))
+        out.append(f"C{c1[0]:.2f},{c1[1]:.2f} {c2[0]:.2f},{c2[1]:.2f} {p2[0]:.2f},{p2[1]:.2f}")
+    return " ".join(out)
 
-    Bucketed to `buckets` columns by taking each tenant's MEAN share per bucket: NVIDIA's pmon
-    reading is a 2 s sample, so a raw 1 s series is mostly repeats and zeros, and a mean says
-    how much of that stretch of time the tenant had the card. Stacked in a fixed order (the order
-    tenants first appear) so a band does not jump layers as its neighbours come and go. The total
-    is clamped at 100: per-process SM shares are sampled separately and can sum past the card.
+
+_W, _H, _PAD = 100.0, 32.0, 1.5
+
+
+def sparklines(samples: list[CardSample], buckets: int = 60) -> dict:
+    """The timeline as one smooth line per tenant, plus the card's own util, in a 100 x 32 box.
+
+    Each column is a MEAN over its samples: NVIDIA's pmon reading is a 2 s sample, so the raw
+    1 s series is mostly repeats and zeros, and a mean says how much of that stretch of time the
+    tenant had the card. At least two samples per column, or a short window (after a restart)
+    draws a comb. Fixed 0-100% scale, so a line's height means the same thing every frame.
+
+    Lines, not a stack: tenants rarely overlap on one card, and when they do a line each says
+    who was doing what without one band's height depending on the band beneath it.
     """
-    if len(samples) < 2:
-        return {"bands": [], "span_s": 0, "peak": 0}
-    # At least two samples per column. With more columns than samples (any window shorter than
-    # three minutes, e.g. after a restart) most columns are empty and the bands draw as a comb.
+    if len(samples) < 4:
+        return {"lines": [], "card": None, "span_s": 0}
     buckets = max(2, min(buckets, len(samples) // 2))
     t0, t1 = samples[0].ts, samples[-1].ts
     span = max(1.0, t1 - t0)
-    cols: list[dict[str, list[int]]] = [dict() for _ in range(buckets)]
-    order: list[str] = []
-    for s in samples:
-        i = min(buckets - 1, int((s.ts - t0) / span * buckets))
-        for label, pct in s.share.items():
-            if label not in order:
-                order.append(label)
-            cols[i].setdefault(label, []).append(pct)
+    col = lambda s: min(buckets - 1, int((s.ts - t0) / span * buckets))  # noqa: E731
     counts = [0] * buckets
+    util = [0.0] * buckets
+    per: dict[str, list[float]] = {}
     for s in samples:
-        counts[min(buckets - 1, int((s.ts - t0) / span * buckets))] += 1
-    means = [{lab: sum(v) / max(1, counts[i]) for lab, v in col.items()} for i, col in enumerate(cols)]
-    base = [0.0] * buckets
-    bands = []
-    peak = 0.0
-    w = 100.0 / buckets
-    for label in order:
-        top = []
-        for i in range(buckets):
-            room = max(0.0, 100.0 - base[i])
-            top.append(base[i] + min(room, means[i].get(label, 0.0)))
-        if max(t - b for t, b in zip(top, base)) <= 0.5:
-            base = top
+        i = col(s)
+        counts[i] += 1
+        util[i] += s.util
+        for label, pct in s.share.items():
+            per.setdefault(label, [0.0] * buckets)[i] += pct
+    xs = [i * _W / (buckets - 1) for i in range(buckets)]
+    y = lambda v: _H - _PAD - min(100.0, max(0.0, v)) / 100.0 * (_H - 2 * _PAD)  # noqa: E731
+
+    def shape(vals: list[float]) -> dict:
+        means = [v / c if c else 0.0 for v, c in zip(vals, counts)]
+        pts = [(x, y(m)) for x, m in zip(xs, means)]
+        line = _smooth(pts, _PAD, _H - _PAD)
+        return {"line": line, "area": f"{line} L{_W:.2f},{_H:.2f} L0,{_H:.2f} Z",
+                "now": round(means[-1]), "peak": round(max(means)),
+                "end_y": round(pts[-1][1], 2)}
+
+    lines = []
+    for label, vals in per.items():
+        sh = shape(vals)
+        if sh["peak"] < 1:
             continue
-        y = lambda v: 24.0 - v / 100.0 * 22.0  # noqa: E731
-        upper = " ".join(f"L{i * w:.2f},{y(top[i]):.2f} L{(i + 1) * w:.2f},{y(top[i]):.2f}"
-                         for i in range(buckets))
-        lower = " ".join(f"L{(i + 1) * w:.2f},{y(base[i]):.2f} L{i * w:.2f},{y(base[i]):.2f}"
-                         for i in reversed(range(buckets)))
-        path = f"M0,{y(base[0]):.2f} {upper} {lower} Z"
-        busy = sum(1 for t, b in zip(top, base) if t - b > 0.5)
-        bands.append({"label": label, "kind": kind_for(label), "path": path,
-                      "busy_pct": round(100 * busy / buckets)})
-        peak = max(peak, max(top))
-        base = top
-    return {"bands": bands, "span_s": int(span), "peak": round(peak)}
+        lines.append({"label": label, "kind": kind_for(label), **sh})
+    lines.sort(key=lambda ln: -ln["peak"])
+    return {"lines": lines, "card": shape(util), "span_s": int(span)}

@@ -109,24 +109,37 @@ class TestComfy:
         assert not st.ok and st.error == "OSError"
 
 
-class TestTimeline:
-    def _samples(self, shares):
-        return [ga.CardSample(ts=float(i), util=0, vram_gb=0, share=s) for i, s in enumerate(shares)]
+class TestSparklines:
+    def _samples(self, shares, util=0.0):
+        return [ga.CardSample(ts=float(i), util=util, vram_gb=0, share=s) for i, s in enumerate(shares)]
 
     def test_too_short(self):
-        assert ga.stacked_bands(self._samples([{}]))["bands"] == []
+        assert ga.sparklines(self._samples([{}] * 3))["lines"] == []
 
-    def test_idle_tenant_draws_no_band(self):
-        out = ga.stacked_bands(self._samples([{}, {}, {}]), buckets=3)
-        assert out["bands"] == [] and out["span_s"] == 2
+    def test_idle_tenant_draws_no_line_but_the_card_does(self):
+        out = ga.sparklines(self._samples([{}] * 8, util=40.0))
+        assert out["lines"] == [] and out["span_s"] == 7
+        assert out["card"]["now"] == 40
 
-    def test_stack_order_is_first_appearance_and_clamped(self):
+    def test_one_line_per_tenant_busiest_first(self):
         ga._kinds_seen.update({"llama-gpu0": "llm", "comfy": "image"})
-        out = ga.stacked_bands(self._samples([{"llama-gpu0": 80}, {"llama-gpu0": 80, "comfy": 90},
-                                              {"comfy": 50}]), buckets=3)
-        assert [b["label"] for b in out["bands"]] == ["llama-gpu0", "comfy"]
-        assert [b["kind"] for b in out["bands"]] == ["llm", "image"]
-        assert out["peak"] == 100                         # 80 + 90 clamps at the card's whole
+        shares = [{"llama-gpu0": 30}] * 4 + [{"comfy": 90}] * 4
+        out = ga.sparklines(self._samples(shares), buckets=4)
+        assert [ln["label"] for ln in out["lines"]] == ["comfy", "llama-gpu0"]
+        assert [ln["kind"] for ln in out["lines"]] == ["image", "llm"]
+        comfy, llama = out["lines"]
+        assert comfy["peak"] == 90 and comfy["now"] == 90 and llama["now"] == 0
+
+    def test_two_samples_per_column(self):
+        # 8 samples asked into 60 columns would leave most columns empty (a comb).
+        out = ga.sparklines(self._samples([{"x": 50}] * 8), buckets=60)
+        assert out["lines"][0]["line"].count("C") == 3     # 4 columns -> 3 curve segments
+
+    def test_curve_never_leaves_the_box(self):
+        out = ga.sparklines(self._samples([{"x": 0}, {"x": 100}] * 6), buckets=12)
+        nums = [float(v) for seg in out["lines"][0]["line"].replace("M", " ").replace("C", " ").split()
+                for v in seg.split(",")[1:]]
+        assert min(nums) >= ga._PAD - 0.01 and max(nums) <= ga._H - ga._PAD + 0.01
 
 
 def _wire(monkeypatch, comfy=None):
@@ -181,6 +194,9 @@ class TestCardsContext:
         assert labels[0] == "llama-gpu0"
         # 11.44 GB used on the card, 11.43 attributed: too little left over to draw.
         assert "other" not in labels
+        # The ring: 11.43 of 11.94 GB, starting at the top, a 2px gap before the free track.
+        ring = p0["ring"][0]
+        assert ring["offset"] == 0 and abs(ring["dash"] - (overview._RING_C * 11.43 / 11.94 - 2)) < 0.5
 
     def test_renders(self, monkeypatch):
         _wire(monkeypatch, comfy=ga.parse_comfy(ACTIVE, DONE))

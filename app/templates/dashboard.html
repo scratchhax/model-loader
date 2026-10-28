@@ -61,41 +61,11 @@
 
 
 
-{# ---------------- calm layer: inventory and recent activity ---------------- #}
-<div class="mt-6 grid gap-4 lg:grid-cols-3">
-
-  <section class="lg:col-span-2">
-    <div class="mb-2 flex items-baseline justify-between">
-      <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Backends</h2>
-      <a href="/containers" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Containers →</a>
-    </div>
-    <div class="space-y-2">
-      {% for b in backends %}
-      <a href="/containers"
-         class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/60">
-        <div class="flex min-w-0 items-center gap-2.5">
-          <span class="h-1.5 w-1.5 shrink-0 rounded-full
-            {% if b.status == 'running' %}bg-emerald-500{% elif b.status == 'restarting' %}bg-amber-500{% else %}bg-slate-300 dark:bg-slate-600{% endif %}"></span>
-          <span class="truncate font-mono text-sm">{{ b.name }}</span>
-          {# Only a CURRENT failure; history (the backend has served something since) is on
-             the Containers page, dimmed. See LlamaBackend.load_failed_current. #}
-          {% if b.load_failed_current %}
-          <span class="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950 dark:text-red-300">load failed</span>
-          {% endif %}
-        </div>
-        <div class="shrink-0 text-right text-[11px]">
-          {% if b.loaded_model %}
-          <span class="font-mono text-slate-600 dark:text-slate-300">{{ b.loaded_model }}</span>
-          {% else %}
-          <span class="text-slate-400 dark:text-slate-500">idle</span>
-          {% endif %}
-        </div>
-      </a>
-      {% endfor %}
-    </div>
-  </section>
-
-  <section class="space-y-4">
+{# ---------------- calm layer: the inventory ---------------- #}
+{# The backend list that used to lead this row is gone: every backend holding a card is on its
+   card panel above with what it is doing, and the full list, idle ones included, is the
+   Containers page's job. #}
+<div class="mt-6 grid gap-4 lg:grid-cols-2">
     <div>
       <div class="mb-2 flex items-baseline justify-between">
         <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Storage</h2>
@@ -136,8 +106,6 @@
       </div>
       <div hx-get="/updates" hx-trigger="load" hx-swap="outerHTML"></div>
     </div>
-
-  </section>
 </div>
 
 {% endblock %}
