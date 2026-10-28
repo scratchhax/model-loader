@@ -182,11 +182,11 @@
       {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n, tip='',
                        spark_unit='samples') %}
       <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
-                  {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-800 bg-slate-900/60{% endif %}"
+                  {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/60{% endif %}"
            {% if tip %}title="{{ tip }}"{% endif %}>
         <div class="flex items-baseline gap-1">
           <span class="font-mono text-2xl font-semibold tabular-nums leading-none
-                       {% if active %}text-{{ tint }}-300{% else %}text-slate-300{% endif %}">{{ value }}</span>
+                       {% if active %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-700 dark:text-slate-300{% endif %}">{{ value }}</span>
           <span class="text-[10px] text-slate-500">{{ unit }}</span>
         </div>
         <div class="mt-1 flex items-baseline justify-between gap-2">
@@ -434,7 +434,7 @@
            title="{% if solo_live %}The solo path: this request runs outside the batch slots, which is why every slot row below sits idle while it works - it is the only thing generating. {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens · {{ '%.1f' % s.gen_tps }} tok/s. A second concurrent request moves the conversation into a slot.{% elif s.gen_tps %}The solo path, idle. Last solo pass: {{ '%.1f' % s.gen_tps }} tok/s, {{ '{:,}'.format(s.decoded) }} tokens, {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} context{% if speed.solo_last_ts %} at {{ speed.solo_last_ts | ts }}{% endif %}. The row stays so the strip does not resize on every hand-off.{% else %}The solo path, idle - no solo pass since the app started. The row stays so the strip does not resize on every hand-off.{% endif %}">
         <span class="w-3 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-400 dark:text-slate-600' }}" title="solo path, not a slot">S</span>
         <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if solo_live else '700' }}"></span>
-        <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
+        <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-400 dark:text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
           <div class="h-full bg-{{ tint }}-{{ '500/70' if solo_live else '600/40' }} transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
         </div>
@@ -453,7 +453,7 @@
               title="The only slot generating - the machine's headline rate above is this row's number.">solo</span>
         {% endif %}
         {% if not dense %}
-        <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
+        <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-400 dark:text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         {% endif %}
         <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
           <div class="h-full bg-{{ tint }}-500/70 transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
