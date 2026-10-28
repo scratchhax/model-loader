@@ -927,9 +927,17 @@ def host_nvidia_cards() -> list[GpuCard]:
     card the backends between them describe a subset - and the card an image generator has to
     itself is in nobody's view at all. The host publisher sees them all.
     """
-    nv = host_sensors().get("nvidia") or {}
+    return _nv_cards(host_sensors().get("nvidia") or {})
+
+
+def _nv_cards(nv: dict) -> list[GpuCard]:
+    """The publisher's gpus block as cards, in the host's own numbering.
+
+    A malformed entry is dropped rather than costing the whole set. Split out so a caller that
+    has already read the sensors file - power_rollup - does not read it a second time.
+    """
     out: list[GpuCard] = []
-    for g in nv.get("gpus") or []:
+    for g in (nv or {}).get("gpus") or []:
         try:
             out.append(GpuCard(
                 index=int(g["index"]), name=str(g.get("name") or "GPU"),
@@ -945,28 +953,45 @@ def host_nvidia_cards() -> list[GpuCard]:
     return out
 
 
+def _backend_cards() -> list[GpuCard]:
+    """The first backend container that reports cards, as that container sees them.
+
+    ONE container's view rather than a sum across them: a card two containers were both handed
+    reports its full draw in each of them, while a card numbered 0 inside a container pinned to
+    the host's second slot is a DIFFERENT card from the one numbered 0 in a container pinned to
+    the first. The vendor tools report no bus id, so those two cases are indistinguishable from
+    here, and a sum across containers is a total that could be either doubled or halved.
+    """
+    from . import services
+    for name in services._effective_container_names():
+        st = stats_for(name)
+        if st.ok and st.gpu and st.gpu.cards:
+            return st.gpu.cards
+    return []
+
+
 def power_rollup(baseline_w: float, psu_efficiency: float) -> dict:
     """What the machine is drawing, split into measured parts and a stated allowance.
 
-    GPU figures come from the same sampler the dashboard already uses, so the cards' numbers
-    here and on the GPU strip cannot disagree.
+    On NVIDIA the GPU watts come from the host publisher, because it sees every card whoever is
+    driving it. The backends see only the cards they were given, and a box whose GPUs are busy
+    with an image generator or a training run has no backend in the list at all - which showed up
+    here as "0 W GPUs" next to two cards pulling three hundred watts between them. The host
+    figures are the same nvidia-smi the tenant table and the strip's VRAM meters are built from,
+    so nothing on the page disagrees with anything else on it. On AMD, or with the publisher not
+    running, fall back to the backends' own vendor tools, which carries two caveats: a card no
+    backend was given is missing from the total, and the total is one container's view.
     """
-    from . import services
-    gpu_w = 0.0
-    gpu_cards: list[dict] = []
-    gpu_temp_max = 0.0
-    for name in services._effective_container_names():
-        st = stats_for(name)
-        if not (st.ok and st.gpu and st.gpu.cards):
-            continue
-        for c in st.gpu.cards:
-            gpu_w += c.power_w
-            gpu_temp_max = max(gpu_temp_max, c.temp_c)
-            gpu_cards.append({"index": c.index, "watts": round(c.power_w, 1),
-                              "temp_c": round(c.temp_c, 1)})
-        break
-
     host = host_sensors()
+    cards = _nv_cards(host.get("nvidia") or {})
+    gpu_src = "host"
+    if not cards:
+        cards, gpu_src = _backend_cards(), "backends"
+    gpu_w = round(sum(c.power_w for c in cards), 1)
+    gpu_temp_max = max((c.temp_c for c in cards), default=0.0)
+    gpu_cards = [{"index": c.index, "watts": round(c.power_w, 1),
+                  "temp_c": round(c.temp_c, 1)} for c in cards]
+
     cpu_w = host.get("cpu_package_w")
     # Hottest device, named: "78 C" is not actionable unless you know whether it is a GPU
     # junction, the CPU package or an NVMe controller baking under the cards.
@@ -995,6 +1020,9 @@ def power_rollup(baseline_w: float, psu_efficiency: float) -> dict:
         "hottest_label": hottest_label,
         "gpu_w": round(gpu_w, 1),
         "gpu_cards": gpu_cards,
+        # "host": every card on the box, whoever is driving it. "backends": only what a running
+        # backend was given. "": nothing to measure, so the 0 W is real. The panel says which.
+        "gpu_src": gpu_src if cards else "",
         "gpu_temp_max_c": round(gpu_temp_max, 1) if gpu_temp_max else None,
         "cpu_w": round(cpu_w, 1) if cpu_w is not None else None,
         "cpu_temp_c": host.get("cpu_temp_c"),

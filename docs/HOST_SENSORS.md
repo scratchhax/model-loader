@@ -4,7 +4,8 @@ The overview reports **power at the wall**. Two of the three inputs are measured
 
 | Input | Source | Where from |
 |---|---|---|
-| GPU socket power, per card | `rocm-smi` / `nvidia-smi` | inside the llama container, already |
+| GPU socket power, per card (NVIDIA) | `nvidia-smi` | **this service** — every card, whoever drives it |
+| GPU socket power, per card (AMD) | `rocm-smi` | inside the llama container, still |
 | CPU package power | RAPL | **this service** |
 | Board, RAM, fans, drives | — | nothing meters them; you set an allowance on the page |
 
@@ -59,7 +60,8 @@ it is more than 15 s old.
 
 On AMD, GPU power and temperature are deliberately **not** in here: the llama container already
 reports them through its own vendor tool, and two sources for one number is how they end up
-disagreeing.
+disagreeing. On NVIDIA they are, for the opposite reason — see the next section. Either way the
+wall estimate reads GPU watts from exactly one of the two, never both.
 
 ## NVIDIA: who is on which card
 
@@ -79,13 +81,26 @@ ComfyUI's container saw itself as pid 1, and a container given every card with o
 capability saw no processes at all. From the host the same call lists everything under host
 pids, which `docker top` maps back to a container.
 
-Model Loader uses it for three things on NVIDIA, and each one is empty without this service:
+Model Loader uses it for four things on NVIDIA, and each one is empty without this service:
 
 * the GPU strip covers every card on the host, not just the ones a running backend was given;
 * the "on the cards" table and the hero's *also on the cards* row name non-backend tenants
   (ComfyUI, a training run) with their VRAM and SM share (`nvidia-smi pmon`, one sample per
   write);
-* the engine switch counts their VRAM, the same as it does with KFD on AMD.
+* the engine switch counts their VRAM, the same as it does with KFD on AMD;
+* **the wall figure sums every card**, not just the ones a running backend was given.
+
+That last one is the expensive one. The roll-up used to take its GPU watts from the llama
+backends, which is correct on an AMD box and quietly wrong on this one: with no llama container
+up, the sum was empty, and the overview reported `41 W measured (0 W GPUs + 41 W CPU)` while two
+RTX 5070s capped at 175 W ran ComfyUI and two training runs — roughly 300 W missing from the one
+number the panel exists to get right. A container also only ever sees the cards it was handed, so
+on a box pinned one container per card the old figure was halved even with everything running.
+On NVIDIA the host's `nvidia-smi` is therefore the source, and it is the same call the tenant
+table and the strip's meters already use, so the power row cannot drift from the rest of the
+page. The panel's tooltip says which source fed the total; without the publisher, or on AMD, it
+falls back to a backend's own reading and says so, because a card no backend holds is missing
+from that number.
 
 ## AMD notes
 
