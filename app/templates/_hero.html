@@ -147,7 +147,7 @@
              kernels on them, which is the case this whole readout used to render as "idle"
              next to a 71% utilisation bar. Named, because "busy" without a name is worse than
              the silence it replaces. #}
-          {% if hero_foreign and not (speed and speed.live) and not hero_loading %}
+          {% if hero_foreign and not cards_above and not (speed and speed.live) and not hero_loading %}
           <span class="text-violet-300">· {{ hero_foreign[0].label }} busy</span>
           {% endif %}
         </div>
@@ -314,7 +314,7 @@
        per-pid VRAM, so ComfyUI, a stray PyTorch script and a second llama-server all surface
        identically with no code for any of them - the label falls back container -> comm -> pid.
        Violet because it is the one block on this panel that is not about our own model. #}
-    {% if hero_foreign %}
+    {% if hero_foreign and not cards_above %}{# the card panels above say this now #}
     <div class="mt-3 rounded-xl border border-violet-500/25 bg-violet-500/[0.06] px-3 py-2">
       <div class="text-[10px] font-medium uppercase tracking-[0.14em] text-violet-300/80">also on the cards</div>
       <div class="mt-1.5 space-y-1">

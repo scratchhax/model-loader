@@ -80,6 +80,15 @@ class TestComfy:
         monkeypatch.setattr(ga.time, "time", lambda: 1_000.0 + 600.0)
         assert st.progress_pct == 95
 
+    def test_running_job_start_is_inferred_from_the_queue(self):
+        # A running job carries create_time only (measured on ComfyUI 0.42). Queued at 5 s,
+        # behind work that last ended at 60 s: it started at 60 s.
+        st = ga.parse_comfy({"jobs": [{"id": "r", "status": "in_progress", "create_time": 5_000}]}, DONE)
+        assert st.running.start_ms == 60_000
+        # Queued after the worker went idle: it started when it was queued.
+        st = ga.parse_comfy({"jobs": [{"id": "r", "status": "in_progress", "create_time": 90_000}]}, DONE)
+        assert st.running.start_ms == 90_000
+
     def test_no_history_no_estimate(self):
         st = ga.parse_comfy(ACTIVE, {"jobs": []})
         assert st.typical_s == 0.0 and st.progress_pct is None
@@ -180,7 +189,7 @@ class TestCardsContext:
         html = e.get_template("_cards.html").render(**ctx, parked_engines=set())
         assert "GPU 0" in html and "GPU 1" in html
         assert "64 tok/s" in html and "rendering" in html and "2 queued" in html
-        assert "/gpu-activity/comfy/comfy/preview?f=q_00001_.png" in html
+        assert "<img" not in html                         # no thumbnails: they blinked on every poll
         assert "quinn-train" in html and "restore" in html
 
     def test_renders_with_nothing(self):

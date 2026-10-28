@@ -30,7 +30,6 @@
 {%- endmacro %}
 
 {% if panels %}
-<style>@keyframes fadein { from { opacity: 0 } to { opacity: 1 } }</style>
 <div id="gpu-tenant-toast" class="empty:hidden mb-2"></div>
 <div class="grid gap-3 {% if panels | length > 1 %}lg:grid-cols-2{% endif %}">
   {% for p in panels %}
@@ -140,6 +139,11 @@
               {%- elif r.pct -%}<span class="text-emerald-700 dark:text-emerald-300" title="this tenant's share of the card's compute, last sample">{{ r.pct }}%</span>
               {%- else -%}<span class="text-slate-500" title="ran no kernels in the last sample">idle</span>{%- endif -%}
             </span>
+            {% if r.eject %}
+            <button class="shrink-0 rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-px text-[10px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700"
+                    hx-post="/gpu-tenants/{{ r.label }}/eject" hx-target="#gpu-tenant-toast" hx-swap="innerHTML"
+                    title="Stops the container and returns its {{ '%.2f' % r.gb }} GB. It reloads its weights on restore.">eject</button>
+            {% endif %}
           </div>
 
           {# ---- the tool's own account ---- #}
@@ -178,24 +182,9 @@
           {% else %}
             {{ 'running kernels' if r.working else 'holding VRAM, running nothing' }}
           {% endif %}
-          {% if r.eject %}
-            · <button class="rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-px text-[10px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700"
-                    hx-post="/gpu-tenants/{{ r.label }}/eject" hx-target="#gpu-tenant-toast" hx-swap="innerHTML"
-                    title="Stops the container and returns its {{ '%.2f' % r.gb }} GB. It reloads its weights on restore.">eject</button>
-          {% endif %}
           </div>
         </div>
 
-        {# The last render, small. hx-preserve with an id per file: the panel re-renders every
-           second, and a thumbnail rebuilt on every swap can blink while it decodes. The id only
-           changes when the file does, so the one swap that inserts a new image is a real change. #}
-        {% if r.comfy and r.comfy.ok and r.comfy.last and r.comfy.last.filename %}
-        {% set j = r.comfy.last %}
-        <img id="thumb-{{ c.index }}-{{ (j.subfolder ~ '-' ~ j.filename) | replace('/', '-') | replace('.', '-') | replace(' ', '-') }}" hx-preserve="true"
-             src="/gpu-activity/comfy/{{ r.label }}/preview?f={{ j.filename | urlencode }}&s={{ j.subfolder | urlencode }}"
-             alt="last ComfyUI output: {{ j.filename }}" title="{{ j.filename }}"
-             class="h-14 w-14 shrink-0 rounded-md object-cover ring-1 ring-slate-200 dark:ring-slate-800 animate-[fadein_600ms_ease-out]" loading="lazy">
-        {% endif %}
       </div>
       {% endfor %}
     </div>

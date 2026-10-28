@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-import urllib.request
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .. import db, gpu_activity, gpu_procs, hf, hw, ini, services, telemetry, vram_live
 from .. import strata as strata_engine
@@ -638,26 +637,6 @@ async def cards_partial(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("_cards.html", ctx)
 
 
-@router.get("/gpu-activity/comfy/{container}/preview")
-async def comfy_preview(container: str, f: str, s: str = "") -> Response:
-    """A ComfyUI output, proxied: the app reaches ComfyUI on the docker host's bridge address,
-    which the browser cannot. Keyed by filename, which ComfyUI never reuses, so it caches."""
-    url = gpu_activity.comfy_image_url(container, gpu_activity.ComfyJob(
-        id="", status="completed", filename=f, subfolder=s))
-    if not url:
-        return Response(status_code=404)
-
-    def _fetch() -> tuple[bytes, str]:
-        with urllib.request.urlopen(url, timeout=5) as r:
-            return r.read(), r.headers.get("Content-Type") or "image/webp"
-    try:
-        body, ctype = await asyncio.to_thread(_fetch)
-    except Exception:  # noqa: BLE001 - a missing preview is a missing thumbnail, nothing more
-        return Response(status_code=404)
-    return Response(body, media_type=ctype,
-                    headers={"Cache-Control": "private, max-age=86400, immutable"})
-
-
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
@@ -667,7 +646,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
     ctx = {"request": request, "snap": snap, "backends": backends,
            "ini_sections": ini.list_sections(),
-           "active_downloads": active, "host_line": _host_line()}
+           "active_downloads": active, "host_line": _host_line(), "cards_above": True}
     ctx.update(await _hero_context())
     ctx.update(await asyncio.to_thread(_cards_context, await _llm_activity()))
     ctx["parked_engines"] = {services.engine_for(b.name) for b in backends
@@ -686,7 +665,7 @@ def dashboard_v2_redirect() -> RedirectResponse:
 
 @router.get("/hero", response_class=HTMLResponse)
 async def hero_partial(request: Request) -> HTMLResponse:
-    ctx = {"request": request}
+    ctx = {"request": request, "cards_above": True}
     ctx.update(await _hero_context())
     return templates.TemplateResponse("_hero.html", ctx)
 

@@ -25,7 +25,6 @@ import os
 import statistics
 import threading
 import time
-import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
@@ -202,13 +201,20 @@ def parse_comfy(active: dict, done: dict, url: str = "") -> ComfyStatus:
     """Two /api/jobs pages (unfinished, finished) as one status. Split out for the tests."""
     live = [_job(j) for j in (active.get("jobs") or [])]
     running = [j for j in live if j.status == "in_progress"]
+    recent = [_job(j) for j in (done.get("jobs") or [])][:_RECENT_N]
+    # Oldest first: with one GPU worker there is one, and if a build ever runs two the one that
+    # has been going longest is the one a progress estimate is most wrong about.
+    run = min(running, key=lambda j: j.start_ms or j.created_ms) if running else None
+    if run and not run.start_ms:
+        # ComfyUI stamps execution_start_time from the history messages, which exist only once a
+        # job finishes, so a running job has none (measured: in_progress carries create_time and
+        # nothing else). One worker runs one job at a time, so it started when it was queued or
+        # when the job before it ended, whichever was later. Exact to the worker's own handoff.
+        prev_end = max((j.end_ms for j in recent if j.end_ms), default=0)
+        run.start_ms = max(run.created_ms, prev_end)
     return ComfyStatus(
-        ok=True, url=url,
-        # Oldest start first: with one GPU worker there is one, and if a build ever runs two the
-        # one that has been going longest is the one a progress estimate is most wrong about.
-        running=min(running, key=lambda j: j.start_ms or j.created_ms) if running else None,
-        pending=sum(1 for j in live if j.status == "pending"),
-        recent=[_job(j) for j in (done.get("jobs") or [])][:_RECENT_N])
+        ok=True, url=url, running=run,
+        pending=sum(1 for j in live if j.status == "pending"), recent=recent)
 
 
 def comfy_status(container: str) -> ComfyStatus:
@@ -231,17 +237,6 @@ def comfy_status(container: str) -> ComfyStatus:
     with _lock:
         _comfy_cache[container] = (now, st)
     return st
-
-
-def comfy_image_url(container: str, job: ComfyJob) -> str:
-    """Where this app can fetch a job's preview from. The browser cannot reach the URL the app
-    uses (it is the docker host's bridge address), so the page goes through /gpu-activity."""
-    base = comfy_url(container)
-    if not base or not job.filename:
-        return ""
-    q = urllib.parse.urlencode({"filename": job.filename, "subfolder": job.subfolder,
-                                "type": "output", "preview": "webp;80"})
-    return f"{base}/view?{q}"
 
 
 # ---------------------------------------------------------------------------------------------
