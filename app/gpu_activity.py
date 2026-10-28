@@ -318,6 +318,9 @@ def stacked_bands(samples: list[CardSample], buckets: int = 90) -> dict:
     """
     if len(samples) < 2:
         return {"bands": [], "span_s": 0, "peak": 0}
+    # At least two samples per column. With more columns than samples (any window shorter than
+    # three minutes, e.g. after a restart) most columns are empty and the bands draw as a comb.
+    buckets = max(2, min(buckets, len(samples) // 2))
     t0, t1 = samples[0].ts, samples[-1].ts
     span = max(1.0, t1 - t0)
     cols: list[dict[str, list[int]]] = [dict() for _ in range(buckets)]
