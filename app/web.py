@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from . import db
 from . import strata_models
 from .engine_colors import engine_tint
+from .gpu_activity import curve
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.globals["hue"] = lambda s: sum(ord(c) for c in (s or "")) % 360
@@ -21,6 +22,7 @@ templates.env.globals["strata_only"] = strata_models.strata_only
 templates.env.globals["badge_categories"] = db.BADGE_CATEGORIES
 templates.env.globals["badge_labels"] = db.BADGE_LABELS
 templates.env.globals["engine_tint"] = engine_tint
+templates.env.globals["curve"] = curve
 
 
 def _fmt_ts(v) -> str:

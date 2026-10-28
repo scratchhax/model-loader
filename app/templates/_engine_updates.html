@@ -3,7 +3,8 @@
    While a check runs, the card re-asks every 2 s; otherwise it is static until reloaded. #}
 <div id="engine-updates"
      {% if checking %}hx-get="/updates" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}
-     class="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
+     class="rounded-2xl border border-slate-200 bg-white px-5 py-4 text-slate-800 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200">
+  <h2 class="mb-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Engine updates</h2>
   {% if rows %}
   <div class="space-y-2.5">
     {% for r in rows %}

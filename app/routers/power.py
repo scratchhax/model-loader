@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from .. import db, hw, power_cap
 from ..config import settings
+from ..gpu_activity import curve
 from ..web import templates
 
 router = APIRouter()
@@ -55,6 +56,9 @@ def _power_context() -> dict:
         "power_spark": hw.sparkline(watts, cfg["power_crit_w"]) if len(watts) > 2 else "",
         "temp_spark": hw.sparkline(temps, cfg["temp_crit_c"]) if len(temps) > 2 else "",
         "gpu_cap": power_cap.status(),
+        # The same series as curves for the overview's smooth sparklines, on the same ceilings.
+        "power_curve": curve(watts, cfg["power_crit_w"]),
+        "temp_curve": curve(temps, cfg["temp_crit_c"]),
     }
 
 
@@ -106,6 +110,9 @@ def _host_stats_context() -> dict:
         "load_spark": hw.sparkline(lh, 100.0) if len(lh) > 2 else "",
         "ram_spark": hw.sparkline(rh, ram_total or None) if len(rh) > 2 else "",
         "hist_n": len(lh),
+        "load_curve": curve(lh, 100.0),
+        # Drawn as USED, so the line rises as the box fills, the same direction as the ring.
+        "ram_curve": curve([ram_total - r for r in rh], ram_total or None) if ram_total else None,
         "load_warn": load["pct"] >= _LOAD_WARN_PCT and load["pct"] < _LOAD_CRIT_PCT,
         "load_crit": load["pct"] >= _LOAD_CRIT_PCT,
 

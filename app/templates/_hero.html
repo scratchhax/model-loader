@@ -1,4 +1,5 @@
 {% from "_icons.html" import icon %}
+{% from "_viz.html" import area %}
 {#
   NOW SERVING - the main page's hero. Polled every 2s.
 
@@ -22,7 +23,7 @@
    label on the left and the state word on the right cannot drift apart. Idle maps to the same
    slate-400 the label has always been, which is deliberate: when nothing is happening the panel
    should look exactly as it did before, and colour should mean something is. #}
-{% set state_text = {'emerald': 'text-emerald-300', 'sky': 'text-sky-300', 'amber': 'text-amber-300'}.get(accent, 'text-slate-400') %}
+{% set state_text = {'emerald': 'text-emerald-600 dark:text-emerald-300', 'sky': 'text-sky-600 dark:text-sky-300', 'amber': 'text-amber-600 dark:text-amber-300'}.get(accent, 'text-slate-500 dark:text-slate-400') %}
 {% set state_glow = {'emerald': 'rgba(16,185,129,0.55)', 'sky': 'rgba(14,165,233,0.55)', 'amber': 'rgba(245,158,11,0.55)'}.get(accent, 'transparent') %}
 {% set state_glow_dim = {'emerald': 'rgba(16,185,129,0.30)', 'sky': 'rgba(14,165,233,0.30)', 'amber': 'rgba(245,158,11,0.30)'}.get(accent, 'transparent') %}
 
@@ -32,26 +33,23 @@
    generating, which is that both are the box working rather than the box waiting. #}
 {% set glowing = live or hero_loading %}
 
-{# The engine's colour (app/engine_colors.py): a light shade over the whole card and its border, so
-   which engine holds the cards reads at a glance. Only while a model is up - an empty card is
-   nobody's. The state wash below keeps its corner on top of it. #}
+{# The engine's colour (app/engine_colors.py) now only marks the backend's name in the header. It
+   used to wash the whole card, which made this the one panel on the page in its own palette;
+   the cards above it set the page's look, so this one glows the way they do - sky, the chat
+   model's colour on the cards, while it works, amber while a model loads - and fades between
+   states over a second (stable ids, so HTMX's settle runs the transitions). #}
 {% set tint = engine_tint(hero_engine) if (hero_model and engine_tint is defined) else None %}
-<div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 px-5 py-4 text-slate-100
-            shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)]"
-     {% if tint %}style="border-color: rgba({{ tint.rgb }}, 0.45);"{% endif %}>
+{% set hero_glow = 'amber' if hero_loading else ('sky' if live else '') %}
+<div id="hero-panel"
+     class="relative overflow-hidden rounded-2xl border bg-white dark:bg-slate-950 px-5 py-4 text-slate-800 dark:text-slate-100 transition-[border-color,box-shadow] duration-1000 ease-out
+            {% if hero_glow == 'sky' %}border-sky-500/50 shadow-[0_0_60px_-18px_rgba(14,165,233,0.65)]
+            {% elif hero_glow == 'amber' %}border-amber-500/50 shadow-[0_0_60px_-18px_rgba(245,158,11,0.6)]
+            {% else %}border-slate-200 dark:border-slate-800 shadow-none{% endif %}">
 
-  {% if tint %}
-  <div class="pointer-events-none absolute inset-0"
-       style="background: linear-gradient(135deg, rgba({{ tint.rgb }}, 0.07) 0%, rgba({{ tint.rgb }}, 0.16) 100%);"></div>
-  {% endif %}
-
-  {# state wash: a wide, very soft gradient so the panel reads its own status from across the desk #}
-  <div class="pointer-events-none absolute inset-0 transition-opacity duration-700
-              {% if glowing %}opacity-100{% else %}opacity-40{% endif %}
-              {% if accent == 'emerald' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(16,185,129,0.16),transparent_55%)]
-              {% elif accent == 'sky' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(14,165,233,0.16),transparent_55%)]
-              {% elif accent == 'amber' %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(245,158,11,0.16),transparent_55%)]
-              {% else %}bg-[radial-gradient(120%_140%_at_0%_0%,rgba(148,163,184,0.10),transparent_55%)]{% endif %}"></div>
+  <div id="hero-wash-sky" aria-hidden="true"
+       class="pointer-events-none absolute -inset-px bg-gradient-to-br from-sky-500/[0.12] via-transparent to-transparent transition-opacity duration-1000 ease-out {% if hero_glow == 'sky' %}opacity-100{% else %}opacity-0{% endif %}"></div>
+  <div id="hero-wash-amber" aria-hidden="true"
+       class="pointer-events-none absolute -inset-px bg-gradient-to-br from-amber-500/[0.12] via-transparent to-transparent transition-opacity duration-1000 ease-out {% if hero_glow == 'amber' %}opacity-100{% else %}opacity-0{% endif %}"></div>
 
   <div class="relative">
     <div class="flex items-start justify-between gap-4">
@@ -63,12 +61,12 @@
         <div class="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.14em]">
           <span class="ml-state {% if glowing %}ml-state-live{% endif %} {{ state_text }} transition-colors duration-700"
                 style="--ml-glow: {{ state_glow }}; --ml-glow-dim: {{ state_glow_dim }};">{{ 'loading' if hero_loading else 'now serving' }}</span>
-          {% if hero_backend %}<span class="text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-500"
+          {% if hero_backend %}<span class="text-slate-400 dark:text-slate-600">·</span><span class="font-mono normal-case tracking-normal text-slate-500"
               {% if tint %}style="color: rgba({{ tint.rgb }}, 0.85);"{% endif %}>{{ hero_backend }}</span>{% endif %}
         </div>
 
         {% if hero_model %}
-        <h2 class="mt-1.5 truncate font-mono text-xl font-semibold tracking-tight text-white sm:text-2xl"
+        <h2 class="mt-1.5 truncate font-mono text-xl font-semibold tracking-tight text-slate-900 dark:text-white sm:text-2xl"
             {% if hero_alias %}title="{{ hero_alias.repo }}"{% endif %}>{{ hero_alias.label if hero_alias else hero_model }}</h2>
         {% if hero_alias %}
         {# Strata only knows the catalog slot the model was installed into; say both, so the name on
@@ -76,17 +74,17 @@
         <div class="mt-0.5 text-[11px] text-slate-500">{{ hero_alias.owner }} · Strata serves it as
           <span class="font-mono">{{ hero_model }}</span> (installed into its {{ hero_alias.tag }} slot)</div>
         {% endif %}
-        <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+        <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
           {% if hero_shape and hero_shape.is_moe %}
           <span class="rounded bg-violet-500/15 px-1.5 py-0.5 font-medium text-violet-300"
                 title="Mixture of experts: only a few experts run per token, so offloading experts to host RAM costs far less speed than moving whole layers">MoE</span>
           {% elif hero_shape %}
-          <span class="rounded bg-slate-700/60 px-1.5 py-0.5 font-medium text-slate-300"
+          <span class="rounded bg-slate-200 dark:bg-slate-700/60 px-1.5 py-0.5 font-medium text-slate-700 dark:text-slate-300"
                 title="Dense: every parameter is read for every token, so any CPU offload is expensive">dense</span>
           {% endif %}
           {% if hero_quant %}<span class="font-mono">{{ hero_quant }}</span>{% endif %}
-          {% if hero_size_h %}<span class="text-slate-600">·</span><span class="tabular-nums">{{ hero_size_h }}</span>{% endif %}
-          {% if hero_ctx_cfg %}<span class="text-slate-600">·</span><span class="tabular-nums">ctx {{ hero_ctx_cfg }}</span>{% endif %}
+          {% if hero_size_h %}<span class="text-slate-400 dark:text-slate-600">·</span><span class="tabular-nums">{{ hero_size_h }}</span>{% endif %}
+          {% if hero_ctx_cfg %}<span class="text-slate-400 dark:text-slate-600">·</span><span class="tabular-nums">ctx {{ hero_ctx_cfg }}</span>{% endif %}
         </div>
 
         {# ---- what the box is doing, for the 10-40 s this panel used to spend blank ----
@@ -110,14 +108,14 @@
            until the router's third status value turned up - makes a 29 GB model that is one
            request away from working look like an empty box. #}
         {% if hero_asleep %}
-        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-slate-400"
+        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-slate-500 dark:text-slate-400"
            title="--sleep-idle-seconds released this model's VRAM after an idle period. The server still holds the model and reloads it on the next request, measured at 8-9 s on this box. Nothing is lost, and the configured context is unchanged.">
           Idle long enough that its VRAM was released. The next request reloads it, about
           8&ndash;9 seconds, and nothing else about it changes.
         </p>
         {% endif %}
         {% if hero_loading %}
-        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-amber-200/70"
+        <p class="mt-1.5 max-w-prose text-[11px] leading-relaxed text-amber-700 dark:text-amber-200/70"
            title="Measured on this box: the weights usually come out of the host page cache rather than off the array - a cold spawn of a 15.3 GB model read 0.0 MiB from md0 and still took 18.1 s, because the cost is moving the bytes onto the cards, not finding them. A model that has not been touched in a while, or one evicted from the cache by a bigger load, does read from the array. Note that load-mode = mlock does not change this: mlock is released when the server process exits, and it is the page cache, not mlock, that survives an eviction.">
           Moving {% if hero_size_h %}{{ hero_size_h }} of {% endif %}weights{% if hero_loading_gpu %} onto the cards{% else %} into place{% endif %}{% if hero_ctx_cfg %},
           then allocating the KV cache for {{ hero_ctx_cfg }} of context{% endif %}.
@@ -161,13 +159,13 @@
            to be reconstructed by dividing by a progress value printed to two decimals, which is
            +/-6% early in a prompt - a denominator worse than no denominator. #}
         {% if speed and speed.state == 'prefill' and (speed.prefill_done or speed.prefill_total) %}
-        <div class="mt-0.5 font-mono text-[10px] tabular-nums text-slate-400"
+        <div class="mt-0.5 font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400"
              title="{% if speed.prefill_done %}prompt tokens read so far of {{ '{:,}'.format(speed.prefill_total) }} in this prompt{% else %}the size of the prompt being read. Strata reports progress only once a 16,384-token chunk completes, so a read smaller than one chunk - an agent turn behind a cached prefix - shows its size and no fraction{% endif %}. Tokens served from the KV cache count as read - they are tokens the slot does not have to process, and excluding them would make a heavily cached prompt appear to crawl while it finished instantly.">
-          {% if speed.prefill_done %}{{ '{:,}'.format(speed.prefill_done) }}<span class="text-slate-600"> / {{ '{:,}'.format(speed.prefill_total) }}</span>{% else %}{{ '{:,}'.format(speed.prefill_total) }}{% endif %}<span class="text-slate-600"> tok</span>
+          {% if speed.prefill_done %}{{ '{:,}'.format(speed.prefill_done) }}<span class="text-slate-400 dark:text-slate-600"> / {{ '{:,}'.format(speed.prefill_total) }}</span>{% else %}{{ '{:,}'.format(speed.prefill_total) }}{% endif %}<span class="text-slate-400 dark:text-slate-600"> tok</span>
         </div>
         {% endif %}
         {% if hero_vram_used is not none %}
-        <div class="mt-1 font-mono text-sm tabular-nums text-slate-300">{{ '%.1f' % hero_vram_used }}<span class="text-slate-600"> / {{ '%.0f' % hero_vram_total }} GB</span></div>
+        <div class="mt-1 font-mono text-sm tabular-nums text-slate-700 dark:text-slate-300">{{ '%.1f' % hero_vram_used }}<span class="text-slate-400 dark:text-slate-600"> / {{ '%.0f' % hero_vram_total }} GB</span></div>
         {% endif %}
       </div>
     </div>
@@ -196,11 +194,14 @@
           {% if spark_peak %}
           {# The scale is stated rather than implied: this line is drawn against its own window
              peak, because no fixed ceiling is meaningful across a dense 27B and a 4B-active MoE. #}
-          <span class="text-[9px] tabular-nums text-slate-600" title="the sparkline is drawn against this peak, over the last {{ spark_n }} {{ spark_unit }}">peak {{ '%.0f' % spark_peak }}</span>
+          <span class="text-[9px] tabular-nums text-slate-400 dark:text-slate-600" title="the sparkline is drawn against this peak, over the last {{ spark_n }} {{ spark_unit }}">peak {{ '%.0f' % spark_peak }}</span>
           {% endif %}
         </div>
-        {% if spark %}
-        <svg viewBox="0 0 100 20" class="mt-1 block h-6 w-full {% if active %}text-{{ tint }}-400{% else %}text-slate-600{% endif %}" preserveAspectRatio="none">
+        {% if spark is mapping %}
+        {# The page's one chart shape (_viz.html), so these read as the same family as the cards. #}
+        <div class="mt-1.5">{{ area(spark, 'hero-' ~ (label | replace(' ', '-')), ('text-' ~ tint ~ '-500 dark:text-' ~ tint ~ '-400') if active else 'text-slate-400 dark:text-slate-600', 'h-8') }}</div>
+        {% elif spark %}
+        <svg viewBox="0 0 100 20" class="mt-1 block h-6 w-full {% if active %}text-{{ tint }}-500 dark:text-{{ tint }}-400{% else %}text-slate-400 dark:text-slate-600{% endif %}" preserveAspectRatio="none">
           <polyline fill="none" stroke="currentColor" stroke-width="1.5"
                     vector-effect="non-scaling-stroke" points="{{ spark }}"/>
         </svg>
@@ -210,7 +211,7 @@
 
       {{ readout('%.1f' % speed.gen_tps if (speed and speed.gen_tps) else '—', 'tok/s', 'out',
                  speed and speed.state == 'generating', 'emerald',
-                 tps_spark, tps_peak, tps_samples) }}
+                 tps_curve or tps_spark, tps_peak, tps_samples) }}
       {# The "in" line's sparkline is SPARSE where "out" above it is continuous: one point per
          completed prefill rather than one per poll. A prefill happens once per request and the
          only trustworthy figure is the one the engine reports afterwards, so sampling it on the
@@ -219,7 +220,7 @@
          rate down becomes visible. #}
       {{ readout('%.0f' % speed.prefill_tps if (speed and speed.prefill_tps) else '—', 'tok/s', 'in',
                  speed and speed.state == 'prefill', 'sky',
-                 pp_spark, pp_peak, pp_samples,
+                 pp_curve or pp_spark, pp_peak, pp_samples,
                  'one point per prompt read, newest last - not a continuous line like out', 'prompts') }}
        {# Continuous like "out": a slot holds its context between requests, so every poll is a
           true reading. The peak is in TOKENS while the headline is in k, which the tooltip
@@ -237,7 +238,7 @@
        {% set ctx_live = speed and speed.state != 'idle' %}
        {% set ctx_tint = 'rose' if ns.fill >= 90 else ('amber' if ns.fill >= 75 else ('emerald' if ctx_live else 'slate')) %}
        {{ readout((speed.ctx_used / 1000) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
-                  ctx_live, ctx_tint, cx_spark, cx_peak, cx_samples,
+                  ctx_live, ctx_tint, cx_curve or cx_spark, cx_peak, cx_samples,
                   'how full the window has been over the last few minutes; the peak is in tokens. Green while a generation is live, amber at 75% and rose at 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.') }}
 
       {# ---- speculation's scorecard ----
@@ -341,7 +342,7 @@
     {% set used_pct = (100.0 * speed.ctx_used / speed.ctx_total) | round(2) %}
     {% set cached_pct = (100.0 * speed.ctx_cached / speed.ctx_total) | round(2) %}
     <div class="mt-3">
-      <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-800"
+      <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
            title="{{ '{:,}'.format(speed.ctx_used) }} of {{ '{:,}'.format(speed.ctx_total) }} tokens in use{% if speed.ctx_cached %}, {{ '{:,}'.format(speed.ctx_cached) }} reused from cache rather than re-read{% endif %}">
         <div class="flex h-full transition-all duration-700 ease-out">
           <div class="h-full bg-slate-500" style="width: {{ cached_pct }}%"></div>
@@ -355,13 +356,13 @@
            other conversations - so dividing by it made a fully cached chat appear to shed cache
            while it answered, and mixed a second conversation's size into the ratio. #}
         {% if speed.ctx_cached and speed.prompt_tokens %}
-        <span class="text-slate-400">{{ (100.0 * speed.ctx_cached / speed.prompt_tokens) | round(0) | int }}% from cache
-          <span class="text-slate-600">· only the rest was re-read</span></span>
+        <span class="text-slate-500 dark:text-slate-400">{{ (100.0 * speed.ctx_cached / speed.prompt_tokens) | round(0) | int }}% from cache
+          <span class="text-slate-400 dark:text-slate-600">· only the rest was re-read</span></span>
         {% elif speed.cache_known and speed.prompt_tokens and speed.state in ('prefill', 'generating') %}
         {# 0% is the interesting case, not a blank. It means this prompt missed the cache
            entirely and every token of it is being re-read. #}
-        <span class="text-amber-300/80" title="This prompt matched nothing in any slot's cache, so all {{ '{:,}'.format(speed.prompt_tokens) }} tokens of it are being read from scratch. The usual cause here is more live conversations than slots: each slot caches exactly one, and --parallel sets how many there are.">0% from cache
-          <span class="text-amber-300/50">· the whole prompt is being re-read</span></span>
+        <span class="text-amber-700 dark:text-amber-300/80" title="This prompt matched nothing in any slot's cache, so all {{ '{:,}'.format(speed.prompt_tokens) }} tokens of it are being read from scratch. The usual cause here is more live conversations than slots: each slot caches exactly one, and --parallel sets how many there are.">0% from cache
+          <span class="text-amber-600 dark:text-amber-300/50">· the whole prompt is being re-read</span></span>
         {% endif %}
       </div>
     </div>
@@ -378,14 +379,14 @@
     <div class="mt-1.5 flex items-center gap-2 text-[10px] tabular-nums"
          title="{{ '%.1f' % hws.gpu_gb }} GB of this model's {{ '%.1f' % hws.total_gb }} GB is resident on the GPUs and {{ '%.1f' % hws.host_gb }} GB is in host RAM ({{ '%.0f' % hws.host_pct }}%). {% if hws.is_moe %}For a MoE it is the experts that move; attention stays resident.{% endif %} Those reads run at system-memory speed rather than VRAM speed, which is the dominant cost once a model stops fitting. Measured from what the driver reports for the running process, not predicted — llama.cpp does not report it at all.">
       <span class="shrink-0 text-slate-500">{% if hws.is_moe %}experts{% else %}weights{% endif %}</span>
-      <span class="flex h-1 min-w-0 flex-1 gap-[2px] overflow-hidden rounded-full bg-slate-800">
+      <span class="flex h-1 min-w-0 flex-1 gap-[2px] overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
         {# sky-600/rose-600, not the -500 the context bar above uses: on this dark surface
            sky-500 sits at L 0.685, outside the 0.48-0.67 band. The -600 pair passes every
            check here (worst adjacent dE 20.9 protan, 33.6 normal vision). #}
         <span class="h-full bg-sky-600" style="width: {{ '%.3f' % hws.gpu_pct }}%"></span>
         <span class="h-full bg-rose-600" style="width: {{ '%.3f' % hws.host_pct }}%"></span>
       </span>
-      <span class="shrink-0 text-slate-400">{{ '%.0f' % hws.host_pct }}% in host RAM</span>
+      <span class="shrink-0 text-slate-500 dark:text-slate-400">{{ '%.0f' % hws.host_pct }}% in host RAM</span>
     </div>
     {% endif %}
 
@@ -419,7 +420,7 @@
       <div class="mb-1 flex items-baseline justify-between {{ fs }} uppercase tracking-wide text-slate-500">
         <span>slots</span>
         {% if per_slot_ctx %}
-        <span class="normal-case tracking-normal text-slate-600"
+        <span class="normal-case tracking-normal text-slate-400 dark:text-slate-600"
               title="--ctx-size is the whole KV pool; each slot gets that divided by parallel, rounded up to a multiple of 128">
           {{ speed.slots | length }} × {{ (per_slot_ctx / 1000) | round(0) | int }}k each
         </span>
@@ -431,13 +432,13 @@
       {% set tint = 'emerald' if s.state == 'generating' else ('sky' if s.state == 'prefill' else 'slate') %}
       <div class="flex items-center gap-2 py-1 text-[10px] tabular-nums"
            title="{% if solo_live %}The solo path: this request runs outside the batch slots, which is why every slot row below sits idle while it works - it is the only thing generating. {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens · {{ '%.1f' % s.gen_tps }} tok/s. A second concurrent request moves the conversation into a slot.{% elif s.gen_tps %}The solo path, idle. Last solo pass: {{ '%.1f' % s.gen_tps }} tok/s, {{ '{:,}'.format(s.decoded) }} tokens, {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} context{% if speed.solo_last_ts %} at {{ speed.solo_last_ts | ts }}{% endif %}. The row stays so the strip does not resize on every hand-off.{% else %}The solo path, idle - no solo pass since the app started. The row stays so the strip does not resize on every hand-off.{% endif %}">
-        <span class="w-3 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-600' }}" title="solo path, not a slot">S</span>
+        <span class="w-3 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-400 dark:text-slate-600' }}" title="solo path, not a slot">S</span>
         <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if solo_live else '700' }}"></span>
         <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
-        <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-800">
+        <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
           <div class="h-full bg-{{ tint }}-{{ '500/70' if solo_live else '600/40' }} transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
         </div>
-        <span class="w-24 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-600' }}">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
+        <span class="w-24 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-400 dark:text-slate-600' }}">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-300 dark:text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
       </div>
       {% endif %}
       <div class="grid gap-x-4" style="grid-template-columns: repeat({{ slot_columns }}, minmax(0, 1fr));">
@@ -445,20 +446,20 @@
       {% set tint = 'emerald' if s.state == 'generating' else ('sky' if s.state == 'prefill' else 'slate') %}
       <div class="flex items-center gap-2 {{ rowpad }} {{ fs }} tabular-nums"
            title="slot {{ s.index }} · {{ s.state }}{% if s.task_id is not none %} · task {{ s.task_id }}{% endif %} · {{ '{:,}'.format(s.ctx_used) }} of {{ '{:,}'.format(s.ctx_total) }} tokens{% if s.gen_tps %} · {{ '%.1f' % s.gen_tps }} tok/s{% endif %}">
-        <span class="w-3 shrink-0 text-right text-slate-600">{{ s.index }}</span>
+        <span class="w-3 shrink-0 text-right text-slate-400 dark:text-slate-600">{{ s.index }}</span>
         <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if s.state != 'idle' else '700' }}"></span>
         {% if lone and s.state != 'idle' %}
-        <span class="shrink-0 rounded bg-slate-700/60 px-1 text-[8px] uppercase tracking-wide text-slate-400"
+        <span class="shrink-0 rounded bg-slate-200 dark:bg-slate-700/60 px-1 text-[8px] uppercase tracking-wide text-slate-500 dark:text-slate-400"
               title="The only slot generating - the machine's headline rate above is this row's number.">solo</span>
         {% endif %}
         {% if not dense %}
         <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-300{% else %}text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         {% endif %}
-        <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-800">
+        <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
           <div class="h-full bg-{{ tint }}-500/70 transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
         </div>
         {% if roomy %}
-        <span class="w-24 shrink-0 text-right text-slate-500">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
+        <span class="w-24 shrink-0 text-right text-slate-500">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-300 dark:text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
         {% else %}
         <span class="w-8 shrink-0 text-right text-slate-500">{{ s.ctx_pct }}%</span>
         {% endif %}
@@ -479,7 +480,7 @@
     <div class="mt-2 flex items-baseline justify-between text-[10px] uppercase tracking-wide text-slate-500"
          title="Strata's conversation cache: idle conversations' KV is parked in host RAM and restored on the next turn - this is why an agent turn comes back in under a second instead of re-reading its history. {{ cc.parked }} of {{ cc.slots }} parked slots hold {{ (cc.bytes / 1073741824) | round(1) }} GiB right now. Since boot: {{ cc.parks }} parks, {{ cc.restores }} restores, {{ cc.evictions }} evictions{% if cc.requests %}; {{ (100.0 * cc.requests_reused / cc.requests) | round(0) | int }}% of the last {{ '{:,}'.format(cc.requests) }} requests resumed from cache{% endif %}. Each eviction is a conversation thrown out to make room, and it costs a full re-read on its next turn - a climbing eviction count is the early warning that a context or concurrency change outgrew the budget. Host RAM, not the cards: this KV is VRAM that was already released.">
       <span>conversation cache</span>
-      <span class="normal-case tracking-normal text-slate-600 tabular-nums">
+      <span class="normal-case tracking-normal text-slate-400 dark:text-slate-600 tabular-nums">
         {{ cc.parked }} of {{ cc.slots }} parked · {{ (cc.bytes / 1073741824) | round(1) }} GiB
         {%- if cc.requests %} · {{ (100.0 * cc.requests_reused / cc.requests) | round(0) | int }}% resumed{% endif %}
       </span>

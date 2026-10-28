@@ -142,6 +142,20 @@ class TestSparklines:
         assert min(nums) >= ga._PAD - 0.01 and max(nums) <= ga._H - ga._PAD + 0.01
 
 
+class TestCurve:
+    def test_too_few(self):
+        assert ga.curve([1, 2]) is None and ga.curve(None) is None
+
+    def test_long_series_are_averaged_down(self):
+        cv = ga.curve(list(range(240)), top=240, points=60)
+        assert cv["line"].count("C") == 59 and cv["peak"] < 240 and cv["last"] > 230
+
+    def test_a_pinned_scale_leaves_headroom(self):
+        # 300 W against a 600 W limit sits mid-box; against its own peak it would touch the top.
+        flat = ga.curve([300] * 5, top=600)["line"]
+        assert ga.curve([300] * 5)["line"] != flat and "16.00" in flat
+
+
 def _wire(monkeypatch, comfy=None):
     backend_card = hw.GpuCard(index=0, name="NVIDIA GeForce RTX 5070", util_pct=37,
                               vram_used_gb=11.44, vram_total_gb=11.94, temp_c=57,

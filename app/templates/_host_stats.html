@@ -18,121 +18,81 @@
   fraction consumed. The load bar is the exception and is drawn against core count, because
   that is the only denominator that makes a load figure mean anything.
 #}
-{# Load and memory get a sparkline instead of a bar; swap and disk keep theirs.
-   The split is by whether the value MOVES. Load and free RAM change second to second, so the
-   recent shape says more than the instant does, and because both lines are drawn against a real
-   ceiling (core count, total RAM) the height still reads as the fraction a bar would have shown
-   - the sparkline subsumes it rather than sitting beside it. Swap and disk move on the scale of
-   a model download; a line of 240 identical samples would be decoration. #}
-{% macro spark(points, crit, warn) -%}
-<svg viewBox="0 0 100 20" class="mt-2 block h-6 w-full
-            {% if crit %}text-red-600 dark:text-red-400{% elif warn %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400/80{% endif %}"
-     preserveAspectRatio="none">
-  <polyline fill="none" stroke="currentColor" stroke-width="1.5"
-            vector-effect="non-scaling-stroke" points="{{ points }}"/>
-</svg>
+{#
+  Rings, the same gauge the GPU panels use, because every one of these is a share of a whole:
+  load of cores, RAM of total, swap of swap, disk of the models volume. The number beside each is
+  still the one a decision is made on (free RAM, free disk), and load and RAM keep a short line
+  underneath because they move second to second where swap and disk move on the scale of a
+  download.
+#}
+{% from "_viz.html" import area, ring %}
+{% macro tone(crit, warn, ok='text-emerald-500 dark:text-emerald-400') -%}
+  {%- if crit %}text-red-500 dark:text-red-400{% elif warn %}text-amber-500 dark:text-amber-400{% else %}{{ ok }}{% endif -%}
 {%- endmacro %}
-
-{% macro bar(pct, crit, warn) -%}
-{# Clamped here rather than inline: an unclamped width silently renders a bar wider than its
-   track, and a load over 100% of cores is a normal reading, not an error. #}
-{% set w = 0 if pct is none else (100 if pct > 100 else (0 if pct < 0 else pct)) %}
-<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-  <div class="h-full rounded-full transition-[width] duration-700 ease-out
-              {% if crit %}bg-red-400{% elif warn %}bg-amber-400{% else %}bg-emerald-400/80{% endif %}"
-       style="width: {{ '%.1f' % w }}%"></div>
+{% macro chip(crit, warn, crit_txt, warn_txt) -%}
+  {%- if crit %}<span class="rounded bg-red-500/20 px-1 py-px text-[9px] font-medium text-red-700 dark:text-red-300">{{ crit_txt }}</span>
+  {%- elif warn %}<span class="rounded bg-amber-500/20 px-1 py-px text-[9px] font-medium text-amber-700 dark:text-amber-300">{{ warn_txt }}</span>{% endif -%}
+{%- endmacro %}
+{% macro gauge(id, pct, color, center) -%}
+<div class="relative h-16 w-16 shrink-0">
+  {{ ring(id, pct, color, 'h-16 w-16') }}
+  <div class="absolute inset-0 flex items-center justify-center font-mono text-[11px] font-semibold tabular-nums text-slate-700 dark:text-slate-200">{{ center }}</div>
 </div>
 {%- endmacro %}
 
-{% macro shell(crit, warn) -%}
-rounded-xl border px-4 py-3 transition-colors duration-500
-{% if crit %}border-red-500/50 bg-red-50 dark:bg-red-950/30
-{% elif warn %}border-amber-500/40 bg-amber-50 dark:bg-amber-950/20
-{% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/95{% endif %}
-{%- endmacro %}
-
-{# grid-cols-1 on a phone, not the implicit column: an implicit track sizes to its widest card, so
-   one long models path widened all four cards past the screen. #}
-<div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+{% set swap_pct = (100.0 * host.swap_used / host.swap_total) if host.swap_total > 0 else 0 %}
+{# grid-cols-1 on a phone, not the implicit column: an implicit track sizes to its widest tile, so
+   one long models path widened every tile past the screen. #}
+<div class="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
 
   {# ---------------- CPU load ---------------- #}
-  <div class="{{ shell(host.load_crit, host.load_warn) }}">
-    <div class="flex items-baseline gap-2">
-      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.load_crit %}text-red-700 dark:text-red-300{% elif host.load_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</span>
-      <span class="text-xs text-slate-500">load</span>
-      {% if host.load_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">saturated</span>
-      {% elif host.load_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">busy</span>{% endif %}
-    </div>
-    {% if host.load_spark %}{{ spark(host.load_spark, host.load_crit, host.load_warn) }}{% else %}{{ bar(host.load.pct, host.load_crit, host.load_warn) }}{% endif %}
-    <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
-      <span title="1, 5 and 15 minute averages">{{ '%.2f' % host.load.load5 }} · {{ '%.2f' % host.load.load15 }}</span>
-      <span>{{ '%.0f' % host.load.pct }}% of {{ host.load.cores }} cores</span>
+  <div class="flex min-w-0 items-center gap-3">
+    {{ gauge('box-load', host.load.pct, tone(host.load_crit, host.load_warn), ('%.0f%%' % host.load.pct) if host.load.ok else '—') }}
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">cpu load {{ chip(host.load_crit, host.load_warn, 'saturated', 'busy') }}</div>
+      <div class="mt-0.5 font-mono text-xl font-semibold leading-tight tabular-nums text-slate-900 dark:text-slate-100">{{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</div>
+      <div class="text-[10px] tabular-nums text-slate-500" title="5 and 15 minute averages, and the cores they are measured against">{{ '%.2f' % host.load.load5 }} · {{ '%.2f' % host.load.load15 }} · {{ host.load.cores }} cores</div>
+      {% if host.load_curve %}<div class="mt-1">{{ area(host.load_curve, 'box-load-line', tone(host.load_crit, host.load_warn), 'h-5') }}</div>{% endif %}
     </div>
   </div>
 
   {# ---------------- memory ---------------- #}
-  <div class="{{ shell(host.ram_crit, host.ram_warn) }}">
-    <div class="flex items-baseline gap-2">
-      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.ram_crit %}text-red-700 dark:text-red-300{% elif host.ram_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % host.ram_avail }}</span>
-      <span class="text-xs text-slate-500">GB RAM free</span>
-      {% if host.ram_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">no headroom</span>
-      {% elif host.ram_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">tight</span>{% endif %}
-    </div>
-    {% if host.ram_spark %}{{ spark(host.ram_spark, host.ram_crit, host.ram_warn) }}{% else %}{{ bar(host.ram_used_pct, host.ram_crit, host.ram_warn) }}{% endif %}
-    <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
-      <span>{{ '%.0f' % host.ram_total }} GB total</span>
+  <div class="flex min-w-0 items-center gap-3">
+    {{ gauge('box-ram', host.ram_used_pct, tone(host.ram_crit, host.ram_warn, 'text-sky-500 dark:text-sky-400'), '%.0f%%' % host.ram_used_pct) }}
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">ram {{ chip(host.ram_crit, host.ram_warn, 'no headroom', 'tight') }}</div>
+      <div class="mt-0.5 font-mono text-xl font-semibold leading-tight tabular-nums text-slate-900 dark:text-slate-100">{{ '%.0f' % host.ram_avail }}<span class="ml-1 font-sans text-[11px] font-normal text-slate-500">GB free</span></div>
       {# The arena is called out because it is the one tenant that does not give itself back. #}
-      <span {% if host.arena > 0 %}title="Strata's pinned expert arena. Unlike page cache this is not reclaimable - the kernel taking its pages back is what suspends KFD queues."{% endif %}>
-        {% if host.arena > 0 %}{{ '%.0f' % host.arena }} GB pinned by strata{% else %}nothing pinned{% endif %}
-      </span>
+      <div class="truncate text-[10px] tabular-nums text-slate-500" {% if host.arena > 0 %}title="Strata's pinned expert arena. Unlike page cache this is not reclaimable - the kernel taking its pages back is what suspends KFD queues."{% endif %}>
+        of {{ '%.0f' % host.ram_total }} GB · {% if host.arena > 0 %}{{ '%.0f' % host.arena }} GB pinned by strata{% else %}nothing pinned{% endif %}</div>
+      {% if host.ram_curve %}<div class="mt-1">{{ area(host.ram_curve, 'box-ram-line', tone(host.ram_crit, host.ram_warn, 'text-sky-500 dark:text-sky-400'), 'h-5') }}</div>{% endif %}
     </div>
   </div>
 
   {# ---------------- swap ---------------- #}
-  <div class="{{ shell(false, host.swap_warn) }}">
-    <div class="flex items-baseline gap-2">
-      {% if host.swap_total <= 0 %}
-      <span class="font-mono text-3xl font-semibold tabular-nums leading-none text-slate-900 dark:text-slate-100">none</span>
-      <span class="text-xs text-slate-500">swap</span>
+  <div class="flex min-w-0 items-center gap-3">
+    {{ gauge('box-swap', swap_pct, tone(false, host.swap_warn, 'text-violet-500 dark:text-violet-400'), ('%.0f%%' % swap_pct) if host.swap_total > 0 else 'none') }}
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">swap {{ chip(false, host.swap_warn, '', 'swapping') }}</div>
+      {% if host.swap_total > 0 %}
+      <div class="mt-0.5 font-mono text-xl font-semibold leading-tight tabular-nums text-slate-900 dark:text-slate-100">{{ '%.1f' % host.swap_used }}<span class="ml-1 font-sans text-[11px] font-normal text-slate-500">GB used</span></div>
+      <div class="text-[10px] tabular-nums text-slate-500">of {{ '%.0f' % host.swap_total }} GB</div>
       {% else %}
-      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.swap_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % host.swap_used }}</span>
-      <span class="text-xs text-slate-500">GB swap used</span>
-      {% if host.swap_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">swapping</span>{% endif %}
+      {# No ring to fill. The line says what the absence means instead. #}
+      <div class="mt-0.5 font-mono text-xl font-semibold leading-tight text-slate-900 dark:text-slate-100">none</div>
+      <div class="text-[10px] text-slate-500" title="With no swap the kernel has no slack. A model sized past available RAM is an OOM kill, not a slow run.">oversizing RAM is an OOM kill</div>
       {% endif %}
     </div>
-    {% if host.swap_total > 0 %}
-      {{ bar(100.0 * host.swap_used / host.swap_total, false, host.swap_warn) }}
-      <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
-        <span>{{ '%.0f' % host.swap_total }} GB total</span>
-        <span>{{ '%.0f' % (100.0 * host.swap_used / host.swap_total) }}%</span>
-      </div>
-    {% else %}
-      {# No bar: there is nothing to fill. The line says what the absence means instead. #}
-      <div class="mt-2 h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800/50"></div>
-      <div class="mt-1.5 text-[10px] text-slate-500"
-           title="With no swap the kernel has no slack. A model sized past available RAM is an OOM kill, not a slow run.">
-        no overflow, so oversizing RAM is an OOM kill
-      </div>
-    {% endif %}
   </div>
 
   {# ---------------- disk ---------------- #}
-  <div class="{{ shell(host.disk_crit, host.disk_warn) }}">
-    <div class="flex items-baseline gap-2">
-      <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                   {% if host.disk_crit %}text-red-700 dark:text-red-300{% elif host.disk_warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % host.disk_free }}</span>
-      <span class="text-xs text-slate-500">GB free</span>
-      {% if host.disk_crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">low</span>
-      {% elif host.disk_warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">filling</span>{% endif %}
-    </div>
-    {{ bar(host.disk_used_pct, host.disk_crit, host.disk_warn) }}
-    <div class="mt-1.5 flex items-baseline justify-between text-[10px] tabular-nums text-slate-500">
-      <span class="shrink-0">{{ '%.0f' % host.disk_total }} GB total</span>
-      {# min-w-0, or a flex item never shrinks below its text and truncate has nothing to cut. #}
-      <span class="min-w-0 truncate pl-2 font-mono" title="{{ host.disk_path }}">{{ host.disk_path }}</span>
+  <div class="flex min-w-0 items-center gap-3">
+    {{ gauge('box-disk', host.disk_used_pct, tone(host.disk_crit, host.disk_warn, 'text-indigo-500 dark:text-indigo-400'), '%.0f%%' % host.disk_used_pct) }}
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">models disk {{ chip(host.disk_crit, host.disk_warn, 'low', 'filling') }}</div>
+      <div class="mt-0.5 font-mono text-xl font-semibold leading-tight tabular-nums text-slate-900 dark:text-slate-100">{% if host.disk_free >= 1000 %}{{ '%.1f' % (host.disk_free / 1024) }}<span class="ml-1 font-sans text-[11px] font-normal text-slate-500">TB free</span>{% else %}{{ '%.0f' % host.disk_free }}<span class="ml-1 font-sans text-[11px] font-normal text-slate-500">GB free</span>{% endif %}</div>
+      {# min-w-0 on the column, or truncate has nothing to cut. #}
+      <div class="truncate text-[10px] tabular-nums text-slate-500" title="{{ host.disk_path }}">of {% if host.disk_total >= 1000 %}{{ '%.1f' % (host.disk_total / 1024) }} TB{% else %}{{ '%.0f' % host.disk_total }} GB{% endif %} · <span class="font-mono">{{ host.disk_path }}</span></div>
     </div>
   </div>
 </div>

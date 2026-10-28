@@ -328,6 +328,11 @@ async def _hero_context() -> dict:
                          else hw.sparkline(cx, cx_peak or None) if len(cx) > 2 else ""),
             "cx_peak": 0.0 if hero_loading else cx_peak,
             "cx_samples": 0 if hero_loading else len(cx),
+            # The same three series as the page's smooth curves, on the same scales (each
+            # against its own window peak, which the tiles print). Blank mid-load, as above.
+            "tps_curve": None if hero_loading else gpu_activity.curve(tps, tps_peak or None),
+            "pp_curve": None if hero_loading else gpu_activity.curve(pp, pp_peak or None),
+            "cx_curve": None if hero_loading else gpu_activity.curve(cx, cx_peak or None),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
             "hero_foreign": hero_foreign,

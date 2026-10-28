@@ -16,43 +16,45 @@
   driving it - and from a backend's own vendor tool when there is no host view. The tooltip says
   which, because the fallback is a total with holes in it and 0 W otherwise looks like an idle box.
 #}
+{#
+  Drawn inside the overview's "the box" panel rather than as two cards of its own: the panel
+  carries the border, these carry the reading. Warn and critical tint the reading's own block,
+  so a hot NVMe does not repaint the whole panel.
+#}
+{% from "_viz.html" import area %}
 {% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
 {% set crit = p.wall_w >= power_crit_w %}
 {% set tcrit = p.hottest_c is not none and p.hottest_c >= temp_crit_c %}
 {% set twarn = p.hottest_c is not none and p.hottest_c >= temp_warn_c and not tcrit %}
+{% set pc = 'text-red-500 dark:text-red-400' if crit else ('text-amber-500 dark:text-amber-400' if warn else 'text-emerald-500 dark:text-emerald-400') %}
+{% set tc = 'text-red-500 dark:text-red-400' if tcrit else ('text-amber-500 dark:text-amber-400' if twarn else 'text-sky-500 dark:text-sky-400') %}
 
-<div class="grid gap-3 sm:grid-cols-2">
+<div class="grid gap-x-8 gap-y-4 sm:grid-cols-2">
 
   {# ---------------- power ---------------- #}
-  <div class="rounded-xl border px-4 py-3 transition-colors duration-500
-              {% if crit %}border-red-500/50 bg-red-50 dark:bg-red-950/30
-              {% elif warn %}border-amber-500/40 bg-amber-50 dark:bg-amber-950/20
-              {% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/95{% endif %}">
+  <div id="box-power" class="-mx-3 rounded-xl px-3 py-2 transition-colors duration-700 ease-out
+              {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}">
     <div class="flex items-start justify-between gap-2">
-      <div class="flex items-baseline gap-2">
-        <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                     {% if crit %}text-red-700 dark:text-red-300{% elif warn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">{{ '%.0f' % p.wall_w }}</span>
-        <span class="text-xs text-slate-500">W at the wall</span>
-        {% if crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">over limit</span>
-        {% elif warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">high</span>{% endif %}
+      <div>
+        <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">at the wall</div>
+        <div class="mt-1 flex items-baseline gap-1.5">
+          <span class="font-mono text-4xl font-semibold leading-none tabular-nums {{ pc }}">{{ '%.0f' % p.wall_w }}</span>
+          <span class="text-sm text-slate-500">W</span>
+          {% if crit %}<span class="rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">over limit</span>
+          {% elif warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">high</span>{% endif %}
+        </div>
       </div>
       <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500"
            title="{{ '%.0f' % p.measured_w }} W measured ({{ '%.0f' % p.gpu_w }} W GPUs{% if p.cpu_w is not none %} + {{ '%.0f' % p.cpu_w }} W CPU{% endif %}) plus a {{ '%.0f' % p.baseline_w }} W allowance for board, RAM, fans and drives, divided by {{ '%.0f' % (p.psu_efficiency * 100) }}% PSU efficiency{% if p.gpu_src == 'backends' %} - GPU watts are one backend's own view; a card no backend was given is missing{% endif %}{% if not p.host_ok %} - CPU power is UNAVAILABLE, host-sensors.service is not publishing{% endif %}">
         <div>{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }} W</div>
-        <div class="mt-0.5 {% if not p.host_ok %}text-amber-600 dark:text-amber-400/80{% endif %}">
-          {% if p.host_ok %}est.{% else %}est. · no CPU data{% endif %}
-        </div>
+        <div class="mt-0.5">GPUs {{ '%.0f' % p.gpu_w }}{% if p.cpu_w is not none %} · CPU {{ '%.0f' % p.cpu_w }}{% endif %} W</div>
+        <div class="mt-0.5 {% if not p.host_ok %}text-amber-600 dark:text-amber-400/80{% endif %}">{% if p.host_ok %}est.{% else %}est. · no CPU data{% endif %}</div>
       </div>
     </div>
-    {% if power_spark %}
-    <svg viewBox="0 0 100 20" class="mt-2 block h-9 w-full {% if crit %}text-red-600 dark:text-red-400{% elif warn %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400/80{% endif %}"
-         preserveAspectRatio="none" title="scaled to the {{ power_crit_w | int }} W limit">
-      <polyline fill="none" stroke="currentColor" stroke-width="1.5"
-                vector-effect="non-scaling-stroke" points="{{ power_spark }}"/>
-    </svg>
-    {% else %}
-    <div class="mt-2 flex h-9 items-center text-[10px] text-slate-600">collecting…</div>
-    {% endif %}
+    <div class="mt-2" title="scaled to the {{ power_crit_w | int }} W limit">
+      {% if power_curve %}{{ area(power_curve, 'box-power-line', pc, 'h-14') }}
+      {% else %}<div class="flex h-14 items-center text-[10px] text-slate-500">collecting…</div>{% endif %}
+    </div>
     {# A card not holding the cap that was asked for (power_cap.py). Red when a card is ABOVE it,
        because that is the case that trips the UPS; amber when it is merely different. #}
     {% if gpu_cap and gpu_cap.off %}
@@ -71,36 +73,26 @@
   </div>
 
   {# ---------------- thermals ---------------- #}
-  <div class="rounded-xl border px-4 py-3 transition-colors duration-500
-              {% if tcrit %}border-red-500/50 bg-red-50 dark:bg-red-950/30
-              {% elif twarn %}border-amber-500/40 bg-amber-50 dark:bg-amber-950/20
-              {% else %}border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/95{% endif %}">
+  <div id="box-temp" class="-mx-3 rounded-xl px-3 py-2 transition-colors duration-700 ease-out
+              {% if tcrit %}bg-red-500/10{% elif twarn %}bg-amber-500/10{% else %}bg-transparent{% endif %}">
     <div class="flex items-start justify-between gap-2">
-      <div class="flex items-baseline gap-2">
-        <span class="font-mono text-3xl font-semibold tabular-nums leading-none
-                     {% if tcrit %}text-red-700 dark:text-red-300{% elif twarn %}text-amber-700 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif %}">
-          {% if p.hottest_c is not none %}{{ '%.0f' % p.hottest_c }}{% else %}—{% endif %}
-        </span>
-        <span class="text-xs text-slate-500">°C hottest</span>
-        {% if p.hottest_label %}
-        <span class="rounded bg-slate-200 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-300">{{ p.hottest_label }}</span>
-        {% endif %}
+      <div>
+        <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">hottest
+          {%- if p.hottest_label %} <span class="ml-1 rounded bg-slate-100 dark:bg-slate-800 px-1 py-px font-mono normal-case tracking-normal text-slate-600 dark:text-slate-300">{{ p.hottest_label }}</span>{% endif %}</div>
+        <div class="mt-1 flex items-baseline gap-1.5">
+          <span class="font-mono text-4xl font-semibold leading-none tabular-nums {{ tc }}">{% if p.hottest_c is not none %}{{ '%.0f' % p.hottest_c }}{% else %}—{% endif %}</span>
+          <span class="text-sm text-slate-500">°C</span>
+        </div>
       </div>
-      <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500"
-           title="GPU {{ p.gpu_temp_max_c or '—' }}°C · CPU {{ p.cpu_temp_c or '—' }}°C · NVMe {{ p.nvme_temp_max_c or '—' }}°C">
-        <div>crit {{ temp_crit_c | int }}°C</div>
-        <div class="mt-0.5">warn {{ temp_warn_c | int }}°C</div>
+      <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500">
+        <div>GPU {{ p.gpu_temp_max_c or '—' }} · CPU {{ p.cpu_temp_c or '—' }} · NVMe {{ p.nvme_temp_max_c or '—' }}</div>
+        <div class="mt-0.5">warn {{ temp_warn_c | int }} · crit {{ temp_crit_c | int }}°C</div>
       </div>
     </div>
-    {% if temp_spark %}
-    <svg viewBox="0 0 100 20" class="mt-2 block h-9 w-full {% if tcrit %}text-red-600 dark:text-red-400{% elif twarn %}text-amber-600 dark:text-amber-400{% else %}text-sky-600 dark:text-sky-400/80{% endif %}"
-         preserveAspectRatio="none" title="scaled to the {{ temp_crit_c | int }}°C critical threshold">
-      <polyline fill="none" stroke="currentColor" stroke-width="1.5"
-                vector-effect="non-scaling-stroke" points="{{ temp_spark }}"/>
-    </svg>
-    {% else %}
-    <div class="mt-2 flex h-9 items-center text-[10px] text-slate-600">collecting…</div>
-    {% endif %}
+    <div class="mt-2" title="scaled to the {{ temp_crit_c | int }}°C critical threshold">
+      {% if temp_curve %}{{ area(temp_curve, 'box-temp-line', tc, 'h-14') }}
+      {% else %}<div class="flex h-14 items-center text-[10px] text-slate-500">collecting…</div>{% endif %}
+    </div>
   </div>
 
 </div>

@@ -372,3 +372,29 @@ def sparklines(samples: list[CardSample], buckets: int = 60) -> dict:
         lines.append({"label": label, "kind": kind_for(label), **sh})
     lines.sort(key=lambda ln: -ln["peak"])
     return {"lines": lines, "card": shape(util), "span_s": int(span)}
+
+
+def curve(values, top: float | None = None, points: int = 60) -> dict | None:
+    """Any series as the overview's one chart shape: a smooth line and the area under it, in a
+    100 x 32 box. None for fewer than three values, so a template can test it directly.
+
+    `top` pins the scale (a limit, a total, 100%) so the height means the same thing every
+    frame; without it the series is drawn against its own peak, which is right only for rates
+    with no meaningful ceiling (tok/s), and the caller should then print that peak. Long series
+    are averaged down to `points` columns: the line is drawn at card width, and 240 points in
+    a few hundred pixels is noise rather than detail.
+    """
+    vals = [float(v) for v in (values or []) if v is not None]
+    if len(vals) < 3:
+        return None
+    if len(vals) > points:
+        k = len(vals) / points
+        chunks = [vals[int(i * k):int((i + 1) * k)] or [vals[int(i * k)]] for i in range(points)]
+        vals = [sum(c) / len(c) for c in chunks]
+    ceil = top if top and top > 0 else (max(vals) or 1.0)
+    n = len(vals)
+    y = lambda v: _H - _PAD - min(1.0, max(0.0, v / ceil)) * (_H - 2 * _PAD)  # noqa: E731
+    pts = [(i * _W / (n - 1), y(v)) for i, v in enumerate(vals)]
+    line = _smooth(pts, _PAD, _H - _PAD)
+    return {"line": line, "area": f"{line} L{_W:.2f},{_H:.2f} L0,{_H:.2f} Z",
+            "last": vals[-1], "peak": max(vals)}

@@ -35,9 +35,12 @@ def _render(**kw):
     return templates.get_template("_hero.html").render(**ctx)
 
 
-def test_card_wears_the_active_engines_shade():
+def test_backend_name_wears_the_active_engines_shade():
+    # The card itself no longer washes in the engine's colour: it glows the way the GPU panels
+    # above it do. The engine's shade stays on the backend name, where it still says who holds
+    # the cards.
     html = _render(hero_model="glm-5.3-flash", hero_backend="maya", hero_engine="maya")
-    assert "rgba(217,70,239, 0.45)" in html and "rgba(217,70,239, 0.16)" in html
+    assert "rgba(217,70,239, 0.85)" in html and "rgba(217,70,239, 0.16)" not in html
 
 
 def test_no_model_no_tint():
