@@ -11,6 +11,10 @@
 
   The wall figure is an estimate: GPU and CPU power are measured, everything else is the
   allowance set below. The tooltip carries that arithmetic so the panel does not have to.
+
+  GPU watts come from the host publisher where it has cards - every card on the box, whoever is
+  driving it - and from a backend's own vendor tool when there is no host view. The tooltip says
+  which, because the fallback is a total with holes in it and 0 W otherwise looks like an idle box.
 #}
 {% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
 {% set crit = p.wall_w >= power_crit_w %}
@@ -33,7 +37,7 @@
         {% elif warn %}<span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">high</span>{% endif %}
       </div>
       <div class="shrink-0 text-right text-[10px] tabular-nums text-slate-500"
-           title="{{ '%.0f' % p.measured_w }} W measured ({{ '%.0f' % p.gpu_w }} W GPUs{% if p.cpu_w is not none %} + {{ '%.0f' % p.cpu_w }} W CPU{% endif %}) plus a {{ '%.0f' % p.baseline_w }} W allowance for board, RAM, fans and drives, divided by {{ '%.0f' % (p.psu_efficiency * 100) }}% PSU efficiency{% if not p.host_ok %} - CPU power is UNAVAILABLE, host-sensors.service is not publishing{% endif %}">
+           title="{{ '%.0f' % p.measured_w }} W measured ({{ '%.0f' % p.gpu_w }} W GPUs{% if p.cpu_w is not none %} + {{ '%.0f' % p.cpu_w }} W CPU{% endif %}) plus a {{ '%.0f' % p.baseline_w }} W allowance for board, RAM, fans and drives, divided by {{ '%.0f' % (p.psu_efficiency * 100) }}% PSU efficiency{% if p.gpu_src == 'backends' %} - GPU watts are one backend's own view; a card no backend was given is missing{% endif %}{% if not p.host_ok %} - CPU power is UNAVAILABLE, host-sensors.service is not publishing{% endif %}">
         <div>{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }} W</div>
         <div class="mt-0.5 {% if not p.host_ok %}text-amber-600 dark:text-amber-400/80{% endif %}">
           {% if p.host_ok %}est.{% else %}est. · no CPU data{% endif %}
