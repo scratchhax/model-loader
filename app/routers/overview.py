@@ -6,7 +6,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .. import db, gpu_procs, hf, hw, ini, services, telemetry, vram_live
+from .. import db, gpu_activity, gpu_procs, hf, hw, ini, services, telemetry, vram_live
 from .. import strata as strata_engine
 from .. import strata_models
 from ..config import settings
@@ -328,6 +328,11 @@ async def _hero_context() -> dict:
                          else hw.sparkline(cx, cx_peak or None) if len(cx) > 2 else ""),
             "cx_peak": 0.0 if hero_loading else cx_peak,
             "cx_samples": 0 if hero_loading else len(cx),
+            # The same three series as the page's smooth curves, on the same scales (each
+            # against its own window peak, which the tiles print). Blank mid-load, as above.
+            "tps_curve": None if hero_loading else gpu_activity.curve(tps, tps_peak or None),
+            "pp_curve": None if hero_loading else gpu_activity.curve(pp, pp_peak or None),
+            "cx_curve": None if hero_loading else gpu_activity.curve(cx, cx_peak or None),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
             "hero_foreign": hero_foreign,
@@ -538,6 +543,127 @@ def _tenant_rows(tenants: list, cards: list) -> list[dict]:
     return rows
 
 
+async def _llm_activity() -> dict[str, dict]:
+    """What each llama backend is doing, keyed by container name, for its row on a card.
+
+    The same probe and the same cache the hero reads, so the card rows and the hero can never
+    disagree, and asking twice costs nothing: inference_speed is cached per backend and touches
+    /slots only while a task is in flight (an idle model is left alone so it can sleep).
+    """
+    out: dict[str, dict] = {}
+    for b in await _hero_backends_cached():
+        model = (b.loading_model or b.loaded_model or b.sleeping_model or "").split(",")[0].strip()
+        sp = (await services.inference_speed(b.name, b.internal_port, b.loaded_model)
+              if b.loaded_model else None)
+        live = bool(sp and sp.live)
+        out[b.name] = {
+            "model": model,
+            "loading": bool(b.loading_model),
+            "asleep": bool(b.sleeping_model) and not b.loaded_model and not b.loading_model,
+            "state": sp.state if live else "idle",
+            "tps": round(sp.gen_tps, 1) if (live and sp.gen_tps) else 0.0,
+            "prefill_pct": sp.prefill_pct if live else 0,
+            "slots_busy": sum(1 for s in sp.slots if s.state != "idle") if live else 0,
+        }
+    return out
+
+
+def _cards_context(llm: dict[str, dict]) -> dict:
+    """One panel per card: who holds it, who is working on it, and what that work is.
+
+    Built on _gpu_strip_context rather than beside it, so the card list, the host renumbering,
+    the eject/restore rows and the engine switch all come from the one place that already gets
+    them right; this adds the per-tenant view and the timeline on top.
+    """
+    strip = _gpu_strip_context()
+    cards = strip["cards"]
+    tenants = _gpu_tenants()
+    ejectable = {e["name"]: e for e in strip["ejectable"]}
+    panels = []
+    for c in cards:
+        rows: dict[str, dict] = {}
+        for t in tenants:
+            gb = t.per_card_gb.get(c.index, 0.0)
+            cu = t.cu_by_card.get(c.index, 0)
+            if gb < 0.01 and not cu:
+                continue
+            # One row per container, not per pid: a llama router runs a child per model, and
+            # two pids of one tenant are one thing to the person reading the card.
+            r = rows.setdefault(t.label, {
+                "label": t.label, "kind": gpu_activity.kind_of(t.label, not t.foreign),
+                "backend": t.backend, "gb": 0.0, "pct": 0, "known": False, "pids": []})
+            r["gb"] += gb
+            r["pids"].append(t.pid)
+            if t.cu_total:
+                r["known"] = True
+                r["pct"] = max(r["pct"], round(100.0 * cu / t.cu_total))
+        for r in rows.values():
+            r["working"] = r["pct"] > 0
+            r["llm"] = llm.get(r["backend"]) if r["backend"] else None
+            r["comfy"] = (gpu_activity.comfy_status(r["label"])
+                          if r["kind"] == "image" and "comfy" in r["label"].lower() else None)
+            # The tool's own account beats the compute sample: a render between two pmon
+            # samples is still a render, and a chat model mid-generation is working even on
+            # the one sample that caught it waiting on the CPU.
+            if r["comfy"] and r["comfy"].busy:
+                r["working"] = True
+            if r["llm"] and (r["llm"]["state"] != "idle" or r["llm"]["loading"]):
+                r["working"] = True
+            r["eject"] = ejectable.get(r["label"])
+        ordered = sorted(rows.values(), key=lambda r: (not r["working"], -r["gb"]))
+        held = sum(r["gb"] for r in ordered)
+        other = max(0.0, c.vram_used_gb - held)
+        total = c.vram_total_gb or 1.0
+        segs = [{"label": r["label"], "kind": r["kind"], "gb": r["gb"],
+                 "pct": 100.0 * r["gb"] / total} for r in sorted(ordered, key=lambda r: -r["gb"])]
+        # Driver context and anything nvidia-smi did not attribute. Shown only when it is big
+        # enough to see, and named for what it nearly always is rather than as a mystery.
+        if other > 0.15:
+            segs.append({"label": "other", "kind": "other", "gb": other, "pct": 100.0 * other / total})
+        working = [r for r in ordered if r["working"]]
+        panels.append({
+            "card": c, "rows": ordered, "segs": segs, "ring": _ring(segs),
+            "free_gb": max(0.0, c.vram_total_gb - c.vram_used_gb),
+            "working": working,
+            # The panel's glow takes the colour of whoever leads the headline, so a glance
+            # across the row says which kind of work each card is doing.
+            "glow": working[0]["kind"] if working else "",
+            "spark": gpu_activity.sparklines(gpu_activity.timeline(c.index)),
+        })
+    stopped = [e for e in strip["ejectable"] if not e["running"]]
+    return {"panels": panels, "stopped": stopped, "now": time.time(), "ring_c": round(_RING_C, 2),
+            "engines": strip["engines"],
+            "engine_switch": strip["engine_switch"], "share": strip["share"]}
+
+
+# The ring gauge's outer track: r = 52 in a 120 x 120 box.
+_RING_C = 2 * 3.14159265 * 52
+_RING_GAP = 2.0
+
+
+def _ring(segs: list[dict]) -> list[dict]:
+    """The VRAM segments as dash runs around the gauge's outer ring, a 2px gap after each."""
+    out, at = [], 0.0
+    for s in segs:
+        run = _RING_C * s["pct"] / 100.0
+        if run <= 0.5:
+            continue
+        out.append({**s, "dash": round(max(0.5, run - _RING_GAP), 2), "offset": round(-at, 2)})
+        at += run
+    return out
+
+
+@router.get("/cards", response_class=HTMLResponse)
+async def cards_partial(request: Request) -> HTMLResponse:
+    ctx = {"request": request}
+    llm = await _llm_activity()
+    ctx.update(await asyncio.to_thread(_cards_context, llm))
+    backends = await _hero_backends_cached()
+    ctx["parked_engines"] = {services.engine_for(b.name) for b in backends
+                             if getattr(b, "unloaded_model", None)}
+    return templates.TemplateResponse("_cards.html", ctx)
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     snap = services.snapshot_models_dir()
@@ -547,9 +673,11 @@ async def dashboard(request: Request) -> HTMLResponse:
     active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
     ctx = {"request": request, "snap": snap, "backends": backends,
            "ini_sections": ini.list_sections(),
-           "active_downloads": active, "host_line": _host_line()}
+           "active_downloads": active, "host_line": _host_line(), "cards_above": True}
     ctx.update(await _hero_context())
-    ctx.update(await asyncio.to_thread(_gpu_strip_context))
+    ctx.update(await asyncio.to_thread(_cards_context, await _llm_activity()))
+    ctx["parked_engines"] = {services.engine_for(b.name) for b in backends
+                             if getattr(b, "unloaded_model", None)}
     ctx.update(_power_context())
     ctx.update(_host_stats_context())
     ctx.update(_power_settings_context())
@@ -564,7 +692,7 @@ def dashboard_v2_redirect() -> RedirectResponse:
 
 @router.get("/hero", response_class=HTMLResponse)
 async def hero_partial(request: Request) -> HTMLResponse:
-    ctx = {"request": request}
+    ctx = {"request": request, "cards_above": True}
     ctx.update(await _hero_context())
     return templates.TemplateResponse("_hero.html", ctx)
 

@@ -1,0 +1,35 @@
+{#
+  The overview's two chart shapes, shared so every panel draws them the same way: a smooth
+  filled sparkline for anything that moves over time, and a ring for anything that is a share of
+  a whole. Colour comes in as a text-* class and is drawn with currentColor, so a caller states
+  meaning (emerald, amber, red, a tenant's kind) and never repeats the drawing.
+
+  Both take a stable id. The panels re-render every second; HTMX's settle step carries an element
+  with the same id from its old attributes to its new ones, which is what lets the ring sweep and
+  the colour fade instead of jumping.
+#}
+
+{% macro area(cv, id, color, h='h-12') -%}
+<svg viewBox="0 0 100 32" preserveAspectRatio="none" class="block {{ h }} w-full overflow-visible {{ color }}" aria-hidden="true">
+  <defs>
+    <linearGradient id="{{ id }}-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="currentColor" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="currentColor" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <line x1="0" y1="31.5" x2="100" y2="31.5" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>
+  <path d="{{ cv.area }}" fill="url(#{{ id }}-fill)"/>
+  <path id="{{ id }}" d="{{ cv.line }}" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"
+        stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+</svg>
+{%- endmacro %}
+
+{% macro ring(id, pct, color, size='h-16 w-16', width=10) -%}
+{% set p = [[pct or 0, 0] | max, 100] | min %}
+<svg viewBox="0 0 120 120" class="{{ size }} shrink-0 -rotate-90" aria-hidden="true">
+  <circle cx="60" cy="60" r="50" fill="none" stroke-width="{{ width }}" class="stroke-slate-200 dark:stroke-slate-800/80"/>
+  <circle id="{{ id }}" cx="60" cy="60" r="50" fill="none" stroke-width="{{ width }}" stroke-linecap="round" stroke="currentColor"
+          stroke-dasharray="{{ '%.2f' % (p * 3.1416) }} 314.16"
+          class="{{ color }} transition-all duration-700 ease-out {% if p < 0.5 %}opacity-0{% endif %}"/>
+</svg>
+{%- endmacro %}

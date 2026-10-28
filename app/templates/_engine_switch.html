@@ -1,0 +1,98 @@
+{# The engine switch, shared by the GPU strip and the card panels. Expects engines, engine_switch, share, parked_engines. #}
+  {#
+    ENGINE SWITCH.
+
+    The two engines cannot share these cards. A llama.cpp router at --models-max 1 holds its
+    model until something evicts it, and Strata sizes its expert cache against free VRAM at
+    startup - so whichever starts second gets the scraps, or dies outright on "mtp: buffers do
+    not fit". Exclusivity is the only arrangement where either gets the hardware it was sized
+    for.
+
+    One button per engine rather than a stop button per container, because the thing being
+    chosen is which engine owns the box, and doing that by hand is three clicks with a wait in
+    the middle that has to be judged by eye.
+  #}
+  {% if engines and engines|length > 1 %}
+  {# A running Strata can be asked to unload instead of being stopped: same VRAM and RAM
+     back in ~0.3 s, container and page cache left warm, return trip in seconds instead of
+     a 90 s cold start. The checkbox is offered only when that is actually possible, and
+     hx-include on the forms is what carries it. It sits AFTER the buttons and names the
+     handover it modifies: a bare "unload instead of stop" read as an orphan when the
+     word "stop" appeared on no button in the row. #}
+  {% set strata_live = engines | selectattr('engine', 'equalto', 'strata') | selectattr('running') | list %}
+  <div class="mt-3 border-t border-slate-200 dark:border-slate-800 pt-2.5">
+    <div id="engine-switch-toast" class="empty:hidden mb-2"></div>
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="text-[10px] uppercase tracking-wide text-slate-500">Engine</span>
+      {% for e in engines %}
+      {# holding = running AND not parked. A parked engine is offered like a stopped one, since
+         taking over is exactly what loading it again does. #}
+      {% set holding = e.running and e.engine not in (parked_engines or []) %}
+      {% set parked = e.running and not holding %}
+      <form class="contents"
+            {% if not holding %}
+            hx-post="/engines/{{ e.engine }}/activate"
+            {% if strata_live %}hx-include="#engine-soft"{% endif %}
+            hx-target="#engine-switch-toast" hx-swap="innerHTML"
+            hx-confirm="Hand the cards to {{ e.engine }}? Every other container holding a GPU is released - unloaded and kept warm where that is offered, stopped otherwise - then the driver is waited on and {{ e.names|join(', ') }} starts."
+            {% endif %}>
+      <button class="inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-mono
+                     {% if holding %}border-fuchsia-300 dark:border-fuchsia-700 bg-fuchsia-50 dark:bg-fuchsia-950/40 text-fuchsia-700 dark:text-fuchsia-300
+                     {% else %}border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800{% endif %}"
+              {% if parked %}
+              title="Parked: the container is up but holds no VRAM. Taking over releases the engine holding the cards, then loads {{ e.names|join(', ') }} again."
+              {% elif not holding %}
+              title="Releases every other GPU container (unload where supported, stop otherwise), waits for the VRAM to actually come back, then starts {{ e.names|join(', ') }}."
+              {% else %}disabled title="Already holding the cards."{% endif %}>
+        <span class="h-2 w-2 shrink-0 rounded-sm {% if holding %}bg-fuchsia-600{% elif parked %}bg-fuchsia-100 dark:bg-fuchsia-900{% else %}bg-slate-300 dark:bg-slate-700{% endif %}"></span>
+        {{ e.engine }}
+        {%- if holding %} <span class="text-[10px] text-fuchsia-600 dark:text-fuchsia-400/70">active</span>
+        {%- elif parked %} <span class="text-[10px] text-slate-500">parked · take over</span>
+        {%- else %} <span class="text-[10px] text-slate-500">take over</span>{% endif %}
+      </button>
+      </form>
+      {# Share: start this engine, displace nothing. Offered only when the cards divide -
+         the note names the division, because a button that silently OOMs one engine is
+         worse than no button, and the honest note is what makes clicking it informed. #}
+      {% if not e.running and share and share.get(e.engine) %}
+      <form class="contents"
+            hx-post="/engines/{{ e.engine }}/activate"
+            hx-target="#engine-switch-toast" hx-swap="innerHTML"
+            hx-confirm="Share the cards? {{ e.names|join(', ') }} starts and nothing is stopped — {{ share[e.engine] }}.">
+      {# The hidden input is the whole request: HTMX posts the form's inputs, and a form
+         with none was a hard take-over wearing a green badge (measured the hard way). #}
+      <input type="hidden" name="share" value="1">
+      <button class="inline-flex items-center rounded-lg border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 px-2 py-1.5 text-[10px] font-mono text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-900/40"
+              title="Starts {{ e.names|join(', ') }} without stopping or unloading anything: {{ share[e.engine] }}.">
+        share
+      </button>
+      </form>
+      {% endif %}
+      {% endfor %}
+      {% if strata_live %}
+      <label class="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 cursor-pointer select-none"
+             title="Modifies the take-over buttons: a running Strata is asked to UNLOAD instead of being stopped - the same VRAM and RAM come back in ~0.3 s and it stays warm, so the way back costs seconds. The trade: a parked server can still be woken by a stray request. Uncheck for the hard handover.">
+        {# hx-preserve because the strip re-renders every second: without it the swap
+           re-creates the checkbox from the template's hardcoded `checked` and the user's
+           uncheck survives exactly one poll. The preserved node keeps its live state. #}
+        <input type="checkbox" id="engine-soft" name="soft" value="1" checked
+               hx-preserve="true" class="accent-fuchsia-600">
+        handover: unload strata instead of stopping it
+      </label>
+      {% endif %}
+      {#
+        The phase is shown for everything except 'done'. 'loading' is the one that earns its
+        place: the container is up but the model is not in yet - 90 s on Strata, which reads
+        ~55 GB of experts into RAM before its port opens - and without this the panel looked
+        idle for a minute and a half while the switch was working perfectly.
+      #}
+      {% if engine_switch and engine_switch.phase and engine_switch.phase != 'done' %}
+      <span class="text-[11px] {% if engine_switch.phase == 'failed' %}text-red-600 dark:text-red-400{% else %}text-amber-600 dark:text-amber-400{% endif %}">
+        {%- if engine_switch.phase == 'loading' %}loading the model on {{ engine_switch.engine }}
+        {%- else %}{{ engine_switch.phase }} &rarr; {{ engine_switch.engine }}{% endif %}
+        {%- if engine_switch.msg %} · {{ engine_switch.msg }}{% endif %}
+      </span>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}

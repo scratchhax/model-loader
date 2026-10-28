@@ -30,119 +30,71 @@
   </div>
 </div>
 
-{# Power first: the models are the interesting part, the UPS is the constraint. Shares the 1s
-   cadence of the sensors underneath it - RAPL publishes every 2s, rocm-smi is sampled every 1s. #}
-<div class="mt-5" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_power.html" %}
+{# ---------------- polled zone 1: the cards, and who is on them ---------------- #}
+{# First, because the cards are what the box is: a chat model, an image pipeline and a TTS
+   server are all tenants of the same hardware, and the old order led with one of them and
+   left the others as a residual in its meter. 1 s, matching the samplers behind it. #}
+<div class="mt-5" hx-get="/cards" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  {% include "_cards.html" %}
 </div>
 
-{# The host row, on the power row's 1 s cadence because it is the same kind of reading: what the
-   machine is doing, not what a model is doing. Four cheap probes (two /proc files, a statvfs and
-   a cached cgroup read), so the poll costs nothing worth measuring.
 
-   Above the threshold disclosure, not below it: those settings belong to the power and temp
-   readings, and sitting between the two instrument rows made them look like a divider between
-   unrelated things. #}
-<div class="mt-3" hx-get="/hoststats" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_host_stats.html" %}
-</div>
-
-{# Outside the poll on purpose - see _power_settings.html #}
-{% include "_power_settings.html" %}
-
-{# ---------------- polled zone 1: what is loaded right now ---------------- #}
-{# 500 ms: the slot read behind this is ~1 ms, and the token counter it exposes moves every
-   few milliseconds during generation. This is the one zone worth polling hard. #}
-<div class="mt-3" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
+{# ---------------- polled zone 2: the chat model in depth ---------------- #}
+{# The one tenant with a deep readout. 500 ms: the slot read behind it is ~1 ms, and the token
+   counter it exposes moves every few milliseconds during generation. #}
+<div id="llm" class="mt-4 scroll-mt-4" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
   {% include "_hero.html" %}
 </div>
 
-{# ---------------- polled zone 2: the cards ---------------- #}
-{# 1 s, matching the hw sampler: rocm-smi through docker exec costs ~90 ms, so polling faster
-   would redraw the same numbers and spend CPU doing it. #}
-<div class="mt-3" hx-get="/gpu-strip" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_gpu_strip.html" %}
-</div>
+{# ---------------- the box: power, heat, load, memory, disk ---------------- #}
+{# One panel, in the cards' shape, rather than six free-standing tiles: these are all readings
+   of the same machine, and six bordered boxes under two big panels read as a different page.
+   Same 1 s cadence as the sensors behind them. #}
+<section class="mt-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 px-5 py-4 text-slate-800 dark:text-slate-200">
+  <h2 class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">The box</h2>
+  <div class="mt-3" hx-get="/power" hx-trigger="load, every 1s" hx-swap="innerHTML">
+    {% include "_power.html" %}
+  </div>
+  <div class="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800" hx-get="/hoststats" hx-trigger="load, every 1s" hx-swap="innerHTML">
+    {% include "_host_stats.html" %}
+  </div>
+  {# Outside the poll on purpose - see _power_settings.html #}
+  <div class="mt-2">{% include "_power_settings.html" %}</div>
+</section>
 
-
-
-{# ---------------- calm layer: inventory and recent activity ---------------- #}
-<div class="mt-6 grid gap-4 lg:grid-cols-3">
-
-  <section class="lg:col-span-2">
-    <div class="mb-2 flex items-baseline justify-between">
-      <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Backends</h2>
-      <a href="/containers" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Containers →</a>
+{# ---------------- calm layer: the inventory ---------------- #}
+{# The backend list that used to lead this row is gone: every backend holding a card is on its
+   card panel above with what it is doing, and the full list, idle ones included, is the
+   Containers page's job. Disk space went up into the box, beside the other capacities. #}
+<div class="mt-4 grid items-start gap-4 lg:grid-cols-2">
+  <section class="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 px-5 py-4 text-slate-800 dark:text-slate-200">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Models</h2>
+      <a href="/models" class="text-[11px] text-slate-500 hover:underline dark:text-slate-400">Models →</a>
     </div>
-    <div class="space-y-2">
-      {% for b in backends %}
-      <a href="/containers"
-         class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800/60">
-        <div class="flex min-w-0 items-center gap-2.5">
-          <span class="h-1.5 w-1.5 shrink-0 rounded-full
-            {% if b.status == 'running' %}bg-emerald-500{% elif b.status == 'restarting' %}bg-amber-500{% else %}bg-slate-300 dark:bg-slate-600{% endif %}"></span>
-          <span class="truncate font-mono text-sm">{{ b.name }}</span>
-          {# Only a CURRENT failure; history (the backend has served something since) is on
-             the Containers page, dimmed. See LlamaBackend.load_failed_current. #}
-          {% if b.load_failed_current %}
-          <span class="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950 dark:text-red-300">load failed</span>
-          {% endif %}
-        </div>
-        <div class="shrink-0 text-right text-[11px]">
-          {% if b.loaded_model %}
-          <span class="font-mono text-slate-600 dark:text-slate-300">{{ b.loaded_model }}</span>
-          {% else %}
-          <span class="text-slate-400 dark:text-slate-500">idle</span>
-          {% endif %}
-        </div>
+    <div class="mt-3 grid grid-cols-3 gap-4">
+      <a href="/models" class="group">
+        <div class="font-mono text-4xl font-semibold leading-none tabular-nums text-slate-900 group-hover:text-sky-600 dark:text-slate-100 dark:group-hover:text-sky-400 transition-colors">{{ snap.ggufs | length }}</div>
+        <div class="mt-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">GGUFs on disk</div>
       </a>
-      {% endfor %}
+      <a href="/config" class="group">
+        <div class="font-mono text-4xl font-semibold leading-none tabular-nums text-slate-900 group-hover:text-sky-600 dark:text-slate-100 dark:group-hover:text-sky-400 transition-colors">{{ ini_sections | length }}</div>
+        <div class="mt-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">configured</div>
+      </a>
+      <a href="/downloads" class="group">
+        <div class="font-mono text-4xl font-semibold leading-none tabular-nums transition-colors {% if active_downloads %}text-sky-600 dark:text-sky-400{% else %}text-slate-300 dark:text-slate-700 group-hover:text-sky-600 dark:group-hover:text-sky-400{% endif %}">{{ active_downloads }}</div>
+        <div class="mt-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-500">downloading</div>
+      </a>
     </div>
+    {% if snap.disk %}
+    <div class="mt-4 text-[11px] tabular-nums text-slate-500">{{ snap.disk.free_h }} free of {{ snap.disk.total_h }} on the models volume</div>
+    {% endif %}
   </section>
 
-  <section class="space-y-4">
-    <div>
-      <div class="mb-2 flex items-baseline justify-between">
-        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Storage</h2>
-        <a href="/models" class="text-xs text-slate-500 hover:underline dark:text-slate-400">Models →</a>
-      </div>
-      <div class="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
-        <div class="flex items-baseline justify-between">
-          <span class="font-mono text-lg font-semibold tabular-nums">{{ snap.disk.free_h if snap.disk else '—' }}</span>
-          <span class="text-[11px] text-slate-500 dark:text-slate-400">free</span>
-        </div>
-        {% if snap.disk %}
-        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-          <div class="h-full bg-gradient-to-r from-sky-500 to-indigo-600" style="width: {{ snap.disk.used_pct }}%"></div>
-        </div>
-        <div class="mt-1.5 text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
-          {{ snap.disk.used_pct }}% of {{ snap.disk.total_h }} used
-        </div>
-        {% endif %}
-        <div class="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2.5 text-[11px] dark:border-slate-800">
-          <div><span class="font-mono text-base font-semibold tabular-nums">{{ snap.ggufs | length }}</span>
-               <span class="text-slate-500 dark:text-slate-400">GGUFs</span></div>
-          <div><span class="font-mono text-base font-semibold tabular-nums">{{ ini_sections | length }}</span>
-               <span class="text-slate-500 dark:text-slate-400">configured</span></div>
-        </div>
-        {% if active_downloads %}
-        <a href="/downloads" class="mt-2 flex items-center gap-1.5 text-[11px] text-sky-600 hover:underline dark:text-sky-400">
-          {{ icon('download', 12) }} {{ active_downloads }} downloading →
-        </a>
-        {% endif %}
-      </div>
-    </div>
-
-    {# Engine updates. Loaded once, not polled: it changes every few hours at most, and the
-       check behind it runs in the background so the page never waits on GitHub. #}
-    <div>
-      <div class="mb-2 flex items-baseline justify-between">
-        <h2 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Engine updates</h2>
-      </div>
-      <div hx-get="/updates" hx-trigger="load" hx-swap="outerHTML"></div>
-    </div>
-
-  </section>
+  {# Engine updates. Loaded once, not polled: it changes every few hours at most, and the
+     check behind it runs in the background so the page never waits on GitHub. The partial is
+     its own panel, header included, because it replaces itself (outerHTML). #}
+  <div hx-get="/updates" hx-trigger="load" hx-swap="outerHTML"></div>
 </div>
 
 {% endblock %}
