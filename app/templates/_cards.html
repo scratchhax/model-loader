@@ -119,7 +119,7 @@
             {% elif r.llm and r.llm.state == 'prefill' %}
             <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ r.llm.prefill_pct }}<span class="ml-1 text-xs font-normal text-slate-500">% of the prompt</span></div>
             {% elif r.comfy and r.comfy.busy %}
-            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ '%.0f' % r.comfy.elapsed_s }}<span class="ml-1 text-xs font-normal text-slate-500">s{% if r.comfy.typical_s %} of ~{{ '%.0f' % r.comfy.typical_s }}{% endif %}{% if r.comfy.pending %} · {{ r.comfy.pending }} queued{% endif %}</span></div>
+            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ '%.0f' % r.comfy.elapsed_s }}<span class="ml-1 text-xs font-normal text-slate-500">s{% if r.comfy.typical_s %} of ~{{ '%.0f' % r.comfy.typical_s }} s{% endif %}{% if r.comfy.pending %} · {{ r.comfy.pending }} queued{% endif %}</span></div>
             {% endif %}
           </div>
           {% endfor %}
