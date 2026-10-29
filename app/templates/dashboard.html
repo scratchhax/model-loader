@@ -36,14 +36,25 @@
    a scroll below the cards. Sticky at the header's measured height rather than a hard-coded
    one, because the header can wrap taller on a narrow window. It carries the page background
    and its own top padding, so nothing scrolling past shows between it and the header. #}
-<div id="box-bar" class="sticky top-[57px] z-20 -mx-2 mt-2 bg-slate-50 px-2 pb-1 pt-2 dark:bg-slate-950" hx-get="/boxbar" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_box_bar.html" %}
+<div id="box-bar" class="sticky top-[57px] z-20 -mx-2 mt-2 flex items-stretch gap-2 bg-slate-50 px-2 pb-1 pt-2 dark:bg-slate-950">
+  <div class="min-w-0 flex-1" hx-get="/boxbar" hx-trigger="load, every 1s" hx-swap="innerHTML">
+    {% include "_box_bar.html" %}
+  </div>
+  {# Beside the poll, never inside it - see _power_settings.html #}
+  {% include "_power_settings.html" %}
 </div>
 <script>
   (function () {
     var bar = document.getElementById('box-bar'), head = document.querySelector('header');
     function place() { if (bar && head) bar.style.top = head.offsetHeight + 'px'; }
     place(); window.addEventListener('resize', place);
+    // The thresholds dropdown closes the way a menu does: a click outside it, or Escape. Looked
+    // up on each event because a save swaps the whole <details> for a fresh one.
+    function shut(e) {
+      var d = document.getElementById('box-thresholds');
+      if (d && d.open && (e.type === 'keydown' ? e.key === 'Escape' : !d.contains(e.target))) d.open = false;
+    }
+    document.addEventListener('click', shut); document.addEventListener('keydown', shut);
   })();
 </script>
 
@@ -97,9 +108,5 @@
      its own panel, header included, because it replaces itself (outerHTML). #}
   <div hx-get="/updates" hx-trigger="load" hx-swap="outerHTML"></div>
 </div>
-
-{# Alert thresholds for the strip at the top. Here rather than beside it: they are set once and
-   rarely revisited, and outside every poll on purpose - see _power_settings.html. #}
-<div class="mt-4 px-1">{% include "_power_settings.html" %}</div>
 
 {% endblock %}

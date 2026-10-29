@@ -1,21 +1,31 @@
 {% from "_icons.html" import icon %}
 {#
-  Alert thresholds. Deliberately NOT part of the polled readings partial: that one is replaced
-  every second, which slammed this disclosure shut and threw away whatever was half-typed in it.
-  Anything interactive has to live outside the poll.
+  Alert thresholds and the GPU power cap, as a dropdown off the box strip they govern. A button
+  at the strip's right end opens it; it closes on a click outside or Escape (dashboard.html).
+
+  Deliberately NOT inside the strip's polled partial: that is replaced every second, which would
+  slam this shut and throw away whatever was half-typed in it. Anything interactive has to live
+  outside the poll, which is why the strip's wrapper holds this beside the polled div.
+
+  Both forms swap the WHOLE <details> (closest details), because both routes render this whole
+  template. The thresholds form used to target itself, which nested a second copy of this
+  disclosure inside the first after every save.
 #}
-<details class="mt-2" {% if reopen %}open{% endif %}>
-  <summary class="cursor-pointer list-none text-[10px] uppercase tracking-wide text-slate-500 hover:text-slate-300">
-    {{ icon('sliders-horizontal', 10) }} alert thresholds
-    {% if saved %}<span class="ml-1.5 text-emerald-400">saved</span>{% endif %}
+<details id="box-thresholds" class="relative flex shrink-0" {% if reopen %}open{% endif %}>
+  <summary class="flex cursor-pointer list-none items-center gap-1.5 rounded-2xl border border-slate-200 bg-white/90 px-3 text-slate-500 shadow-[0_8px_24px_-16px_rgba(0,0,0,0.5)] backdrop-blur transition-colors hover:text-slate-800 dark:border-slate-800 dark:bg-slate-950/90 dark:hover:text-slate-200 [&::-webkit-details-marker]:hidden"
+           title="Alert thresholds and the GPU power cap">
+    {{ icon('sliders-horizontal', 16) }}
+    {% if saved %}<span class="text-[10px] text-emerald-600 dark:text-emerald-400">saved</span>{% endif %}
   </summary>
-  <form hx-post="/power/settings" hx-target="this" hx-swap="outerHTML"
+  <div class="absolute right-0 top-full z-30 mt-2 w-[min(40rem,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white p-4 text-slate-800 shadow-[0_24px_48px_-20px_rgba(0,0,0,0.6)] dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200">
+  <h3 class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">Alert thresholds</h3>
+  <form hx-post="/power/settings" hx-target="closest details" hx-swap="outerHTML"
         class="mt-2 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-6">
     {% macro field(name, label, value, hint) %}
     <label class="block">
       <span class="block text-[10px] text-slate-500" title="{{ hint }}">{{ label }}</span>
       <input type="number" step="any" name="{{ name }}" value="{{ value }}"
-             class="mt-0.5 w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-200">
+             class="mt-0.5 w-full rounded border border-slate-300 bg-white px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
     </label>
     {% endmacro %}
     {{ field('power_warn_w', 'warn W', power_warn_w | int, 'Amber above this estimated wall draw') }}
@@ -24,7 +34,7 @@
     {{ field('temp_warn_c', 'warn °C', temp_warn_c | int, 'Amber at or above this temperature') }}
     {{ field('temp_crit_c', 'crit °C', temp_crit_c | int, 'Red at or above, and the ceiling the temperature sparkline is drawn against') }}
     <div class="flex items-end">
-      <button class="w-full rounded bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-900 hover:bg-white">Save</button>
+      <button class="w-full rounded bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-700 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-white">Save</button>
     </div>
   </form>
   {# The cards' board-power cap. Unlike the thresholds above this one changes hardware: it is
@@ -32,22 +42,23 @@
   {% if gpu_cap and gpu_cap.cards %}
   {% set lo, hi = gpu_cap.range %}
   <form hx-post="/power/cap" hx-target="closest details" hx-swap="outerHTML"
-        class="mt-3 flex flex-wrap items-end gap-x-3 gap-y-1 text-[11px]">
+        class="mt-4 flex flex-wrap items-end gap-x-3 gap-y-1 border-t border-slate-200 pt-3 text-[11px] dark:border-slate-800">
     <label class="block">
       <span class="block text-[10px] text-slate-500"
             title="Each card's board-power limit, applied by the host at every boot and within a few seconds of a change here. Generation draws about 145 W a card here, so a low cap mostly costs prompt reading.">GPU power cap W</span>
       <input type="number" name="cap_w" step="1" value="{{ gpu_cap.want }}"
              {% if lo %}min="{{ lo }}"{% endif %} {% if hi %}max="{{ hi }}"{% endif %}
-             class="mt-0.5 w-24 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-200">
+             class="mt-0.5 w-24 rounded border border-slate-300 bg-white px-1.5 py-1 font-mono text-[11px] tabular-nums text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
     </label>
-    <button class="rounded bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-900 hover:bg-white">Apply</button>
+    <button class="rounded bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-slate-700 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-white">Apply</button>
     <span class="pb-1 text-[10px] tabular-nums text-slate-500">
       {% if lo and hi %}each card takes {{ lo }}-{{ hi }} W · {% endif %}now
       {% for c in gpu_cap.cards %}{{ c.cap_w }} W{% if not loop.last %} / {% endif %}{% endfor %}
     </span>
     {% if cap_note %}
-    <span class="w-full text-[10px] {% if cap_ok %}text-emerald-400{% else %}text-amber-400{% endif %}">{{ cap_note }}</span>
+    <span class="w-full text-[10px] {% if cap_ok %}text-emerald-600 dark:text-emerald-400{% else %}text-amber-600 dark:text-amber-400{% endif %}">{{ cap_note }}</span>
     {% endif %}
   </form>
   {% endif %}
+  </div>
 </details>
