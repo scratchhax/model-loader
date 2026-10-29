@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -1184,6 +1185,105 @@ def host_disk_gb(path: Path | str) -> tuple[float, float]:
         return (round(u.free / 1024 ** 3, 1), round(u.total / 1024 ** 3, 1))
     except OSError:
         return (0.0, 0.0)
+
+
+# Filesystems that hold data. Everything else in mountinfo (overlay root, proc, sysfs, tmpfs,
+# cgroup, devpts, mqueue) is the container's own plumbing and says nothing about the host.
+_REAL_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "jfs", "bcachefs",
+            "nfs", "nfs4", "cifs", "smb3", "fuseblk", "ntfs", "ntfs3", "exfat", "vfat"}
+# Docker bind-mounts these three from its data-root into every container, so whichever disk
+# they sit on is the one images, containers and volumes fill. It is the disk the app would
+# otherwise never see: no compose mount names it, and on wheatley it hit 100% while the strip
+# showed only the models disk, healthy at 62%.
+_DOCKER_FILES = ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf")
+_MOUNTS_TTL_S = 60.0
+_mounts_cache: tuple[float, list[tuple[str, str]]] = (0.0, [])
+
+
+def _unescape_mount(s: str) -> str:
+    # mountinfo writes space, tab, newline and backslash as octal escapes (\040 ...).
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _read_mounts(mountinfo: str = "/proc/self/mountinfo") -> list[tuple[str, str]]:
+    """(disk key, mount point) for every real filesystem this process can see.
+
+    The key is what shares free space. Usually that is the device (major:minor), but every ZFS
+    dataset and btrfs subvolume gets a device number of its own while drawing on one pool: on
+    glados /models (tank) and /data (tank/services) read as two disks with the same 10.7 TB
+    free. So ZFS is keyed by pool name and btrfs by its backing device.
+    """
+    try:
+        lines = Path(mountinfo).read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        left, sep, right = line.partition(" - ")
+        f, r = left.split(), right.split()
+        if not sep or len(f) < 5 or not r or r[0] not in _REAL_FS:
+            continue
+        key = f[2]
+        if r[0] == "zfs" and len(r) > 1:
+            key = "zfs:" + r[1].split("/", 1)[0]
+        elif r[0] == "btrfs" and len(r) > 1:
+            key = "btrfs:" + r[1]
+        out.append((key, _unescape_mount(f[4])))
+    return out
+
+
+def _mounts() -> list[tuple[str, str]]:
+    # The mount table changes on a container recreate, never between polls; re-reading it each
+    # second would be harmless but pointless.
+    global _mounts_cache
+    now = time.monotonic()
+    if now - _mounts_cache[0] > _MOUNTS_TTL_S:
+        _mounts_cache = (now, _read_mounts())
+    return _mounts_cache[1]
+
+
+def host_disks(models_dir: Path | str, mounts: list[tuple[str, str]] | None = None,
+               usage=shutil.disk_usage) -> list[dict]:
+    """One entry per host filesystem this container can see: [{label, paths, free, total}].
+
+    Bind mounts of the same filesystem share a device number, so wheatley's /models, /strata
+    and /data collapse into one disk, and the three Docker-managed files into another. Named
+    for what fills them: "models" for the one holding the models dir, "docker" for Docker's
+    data-root, otherwise the mount point's last component. Models first, then docker, then the
+    rest by name. With no mount table to read (tests, a non-Linux dev box), the models dir alone.
+    """
+    mounts = _mounts() if mounts is None else mounts
+    models = str(models_dir).rstrip("/") or "/"
+    # The mount holding the models dir is the longest mount point that prefixes it.
+    holder = max((m for m in mounts if models == m[1] or models.startswith(m[1].rstrip("/") + "/")),
+                 key=lambda m: len(m[1]), default=None)
+    groups: dict[str, list[str]] = {}
+    for dev, point in mounts:
+        groups.setdefault(dev, []).append(point)
+    if not groups:
+        groups = {"models": [models]}
+        holder = ("models", models)
+
+    out = []
+    for dev, points in groups.items():
+        labels = []
+        if holder and dev == holder[0]:
+            labels.append("models")
+        if any(p in _DOCKER_FILES for p in points):
+            labels.append("docker")
+        if not labels:
+            labels.append(points[0].rstrip("/").rsplit("/", 1)[-1] or "root")
+        probe = models if "models" in labels else points[0]
+        try:
+            u = usage(probe)
+            free, total = round(u.free / 1024 ** 3, 1), round(u.total / 1024 ** 3, 1)
+        except OSError:
+            continue
+        if total <= 0:
+            continue
+        out.append({"label": " · ".join(labels), "paths": points, "free": free, "total": total})
+    rank = lambda d: (0 if d["label"].startswith("models") else 1 if "docker" in d["label"] else 2, d["label"])
+    return sorted(out, key=rank)
 
 # The arena probe is a docker exec, and the arena moves on the timescale of a model load,
 # not a poll - a 10 s TTL keeps it off the hot path without ever showing a stale load.

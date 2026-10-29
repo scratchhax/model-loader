@@ -753,12 +753,20 @@ def _atomic_write(cp: configparser.ConfigParser) -> None:
     # interleaving of both. mkstemp also removes the symlink/precedence games a
     # fixed path invites. fsync before the replace: os.replace is atomic to other
     # processes, but without it a power loss can leave the renamed file zero-length.
+    # mkstemp creates 0600, so the old mode is carried over (as fileio.atomic_replace does).
+    # Without it every save left models.ini root-only, and the nightly backup, which runs as
+    # the box's user, silently stopped capturing it.
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".models.ini.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as tmp:
             tmp.write(text)
             tmp.flush()
             os.fsync(tmp.fileno())
+        os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
     except BaseException:
         try:

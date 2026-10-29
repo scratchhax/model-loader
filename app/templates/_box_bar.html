@@ -2,7 +2,7 @@
 {% from "_viz.html" import area, ring %}
 {#
   THE BOX, as one strip across the top of the overview: wall power, the hottest sensor, CPU load,
-  RAM, swap and the models disk. It used to be a panel of its own below the LLM readout, which
+  RAM, swap and every host disk. It used to be a panel of its own below the LLM readout, which
   put the one constraint that is not optional (the power budget) a scroll away. A strip is
   always in view - the page keeps it pinned under the header - and costs one line.
 
@@ -17,6 +17,9 @@
 
   On a phone the strip stays ONE row that scrolls sideways instead of wrapping: wrapped it was
   250px tall, and pinned under the header that is a third of the screen gone for good.
+
+  From lg up it wraps instead, and at lg-to-xl the two curves are dropped: with a disk per host
+  filesystem the strip needs ~1,090px, and a 1,024px window wrapped the disks onto a second row.
 #}
 {% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
 {% set crit = p.wall_w >= power_crit_w %}
@@ -52,7 +55,7 @@
       </div>
       <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }}{% if not p.host_ok %} · <span class="text-amber-600 dark:text-amber-400">no CPU data</span>{% endif %}</div>
     </div>
-    <div class="hidden w-24 shrink-0 sm:block xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
   </div>
 
   {# ---- heat ---- #}
@@ -65,7 +68,7 @@
       </div>
       <div class="mt-0.5 font-mono text-[10px] text-slate-500">{{ p.hottest_label or 'hottest' }}</div>
     </div>
-    <div class="hidden w-24 shrink-0 sm:block xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
   </div>
 
   <span class="hidden h-7 w-px bg-slate-200 dark:bg-slate-800 lg:block" aria-hidden="true"></span>
@@ -110,21 +113,24 @@
     </div>
   </div>
 
-  {# ---- models disk ---- #}
-  <div {{ cell('bar-disk', host.disk_crit, host.disk_warn) }}
-       title="{{ '%.0f' % host.disk_free }} GB free of {{ '%.0f' % host.disk_total }} GB on {{ host.disk_path }}">
-    {{ mini_ring('bar-disk-ring', host.disk_used_pct, tone(host.disk_crit, host.disk_warn, 'text-indigo-500 dark:text-indigo-400')) }}
+  {# ---- disks: one per host filesystem the container can see (hw.host_disks) ---- #}
+  {# Ids by position, so a disk keeps its id across polls and its ring sweeps rather than jumps. #}
+  {% for d in host.disks %}
+  <div {{ cell('bar-disk-' ~ loop.index0, d.crit, d.warn) }}
+       title="{{ d.label }}: {{ '%.0f' % d.free }} GB free of {{ '%.0f' % d.total }} GB. Seen in the container at {{ d.paths | join(', ') }}">
+    {{ mini_ring('bar-disk-ring-' ~ loop.index0, d.used_pct, tone(d.crit, d.warn, 'text-indigo-500 dark:text-indigo-400')) }}
     <div>
       <div class="flex items-baseline gap-1 leading-none">
-        {% if host.disk_free >= 1000 %}
-        <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(host.disk_crit, host.disk_warn) }}">{{ '%.1f' % (host.disk_free / 1024) }}</span><span class="text-[10px] text-slate-500">TB free</span>
+        {% if d.free >= 1000 %}
+        <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(d.crit, d.warn) }}">{{ '%.1f' % (d.free / 1024) }}</span><span class="text-[10px] text-slate-500">TB free</span>
         {% else %}
-        <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(host.disk_crit, host.disk_warn) }}">{{ '%.0f' % host.disk_free }}</span><span class="text-[10px] text-slate-500">GB free</span>
+        <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(d.crit, d.warn) }}">{{ '%.0f' % d.free }}</span><span class="text-[10px] text-slate-500">GB free</span>
         {% endif %}
       </div>
-      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">disk {{ '%.0f' % host.disk_used_pct }}%</div>
+      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ d.label }} {{ '%.0f' % d.used_pct }}%</div>
     </div>
   </div>
+  {% endfor %}
 
   {# A card not holding the cap that was asked for (power_cap.py). Red when a card is ABOVE it,
      because that is the case that trips the UPS; amber when it is merely different. #}
