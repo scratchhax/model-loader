@@ -14,6 +14,9 @@
 
   The wall figure is an estimate: GPU and CPU power are measured, everything else is the
   allowance in the alert settings. The tooltip carries that arithmetic.
+
+  On a phone the strip stays ONE row that scrolls sideways instead of wrapping: wrapped it was
+  250px tall, and pinned under the header that is a third of the screen gone for good.
 #}
 {% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
 {% set crit = p.wall_w >= power_crit_w %}
@@ -26,7 +29,7 @@
   {%- if crit %}text-red-600 dark:text-red-300{% elif warn %}text-amber-600 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif -%}
 {%- endmacro %}
 {% macro cell(id, crit, warn) -%}
-  id="{{ id }}" class="flex min-w-0 items-center gap-2.5 rounded-lg px-2 py-1 transition-colors duration-700 ease-out {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
+  id="{{ id }}" class="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 transition-colors duration-700 ease-out {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
 {%- endmacro %}
 {% macro mini_ring(id, pct, color) -%}
 <div class="relative h-9 w-9 shrink-0">
@@ -37,7 +40,7 @@
 {% set tc = tone(tcrit, twarn, 'text-sky-500 dark:text-sky-400') %}
 {% set swap_pct = (100.0 * host.swap_used / host.swap_total) if host.swap_total > 0 else 0 %}
 
-<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-2xl border border-slate-200 bg-white/90 px-3 py-1.5 text-slate-800 shadow-[0_8px_24px_-16px_rgba(0,0,0,0.5)] backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 dark:text-slate-200">
+<div class="flex flex-nowrap items-center justify-between gap-x-3 gap-y-1 overflow-x-auto rounded-2xl [scrollbar-width:none] lg:flex-wrap lg:overflow-visible border border-slate-200 bg-white/90 px-3 py-1.5 text-slate-800 shadow-[0_8px_24px_-16px_rgba(0,0,0,0.5)] backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 dark:text-slate-200">
 
   {# ---- power ---- #}
   <div {{ cell('bar-power', crit, warn) }}
@@ -49,7 +52,7 @@
       </div>
       <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }}{% if not p.host_ok %} · <span class="text-amber-600 dark:text-amber-400">no CPU data</span>{% endif %}</div>
     </div>
-    <div class="w-24 shrink-0 xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
   </div>
 
   {# ---- heat ---- #}
@@ -62,7 +65,7 @@
       </div>
       <div class="mt-0.5 font-mono text-[10px] text-slate-500">{{ p.hottest_label or 'hottest' }}</div>
     </div>
-    <div class="w-24 shrink-0 xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
   </div>
 
   <span class="hidden h-7 w-px bg-slate-200 dark:bg-slate-800 lg:block" aria-hidden="true"></span>
