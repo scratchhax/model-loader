@@ -62,13 +62,6 @@ def _power_context() -> dict:
     }
 
 
-@router.get("/power", response_class=HTMLResponse)
-def power_partial(request: Request) -> HTMLResponse:
-    ctx = {"request": request}
-    ctx.update(_power_context())
-    return templates.TemplateResponse("_power.html", ctx)
-
-
 # Thresholds for the host row. Chosen against what this box actually does rather than generic
 # sysadmin numbers: the things that go wrong here are a model sized past available RAM (an OOM
 # kill, because there is no swap) and a models volume filling up mid-download (weights are
@@ -138,11 +131,16 @@ def _host_stats_context() -> dict:
     }}
 
 
-@router.get("/hoststats", response_class=HTMLResponse)
-def host_stats_partial(request: Request) -> HTMLResponse:
+@router.get("/boxbar", response_class=HTMLResponse)
+def box_bar_partial(request: Request) -> HTMLResponse:
+    """The strip across the top of the overview: power, heat, load, RAM, swap, disk.
+
+    One partial for what used to be two (/power and /hoststats), because the strip is one
+    line and two polls racing to fill halves of it would redraw it twice a second."""
     ctx = {"request": request}
+    ctx.update(_power_context())
     ctx.update(_host_stats_context())
-    return templates.TemplateResponse("_host_stats.html", ctx)
+    return templates.TemplateResponse("_box_bar.html", ctx)
 
 
 def _power_settings_context(saved: bool = False, cap_note: str = "", cap_ok: bool = False) -> dict:
