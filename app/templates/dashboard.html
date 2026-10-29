@@ -34,14 +34,15 @@
 {# Power, heat, load, RAM, swap and disk as one line that stays in view while the page scrolls:
    the power budget is the one constraint that is not optional, and as a panel of its own it sat
    a scroll below the cards. Sticky at the header's measured height rather than a hard-coded
-   one, because the header can wrap taller on a narrow window. 1 s, matching the sensors. #}
-<div id="box-bar" class="sticky top-[57px] z-20 mt-4" hx-get="/boxbar" hx-trigger="load, every 1s" hx-swap="innerHTML">
+   one, because the header can wrap taller on a narrow window. It carries the page background
+   and its own top padding, so nothing scrolling past shows between it and the header. #}
+<div id="box-bar" class="sticky top-[57px] z-20 -mx-2 mt-2 bg-slate-50 px-2 pb-1 pt-2 dark:bg-slate-950" hx-get="/boxbar" hx-trigger="load, every 1s" hx-swap="innerHTML">
   {% include "_box_bar.html" %}
 </div>
 <script>
   (function () {
     var bar = document.getElementById('box-bar'), head = document.querySelector('header');
-    function place() { if (bar && head) bar.style.top = (head.offsetHeight + 8) + 'px'; }
+    function place() { if (bar && head) bar.style.top = head.offsetHeight + 'px'; }
     place(); window.addEventListener('resize', place);
   })();
 </script>
