@@ -608,7 +608,7 @@ def _outside_slots(engine: str, r: dict) -> bool:
     The slot strip stays honest about this: none of them holds the work, and it says so. Only
     the headline state comes from the engine.
     """
-    return engine == "strata" and bool(r.get("newest"))
+    return engine_registry.speaks_strata(engine) and bool(r.get("newest"))
 # Engines that publish Strata's /metrics document (live / requests / totals). Maya is a fork of
 # Strata's server and kept the format field for field, so both are read the one way; the log
 # scrapers stay for engines that only speak in log lines.
@@ -799,7 +799,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
         # is no sleep state to wake - and n_prompt_tokens, the conversation it carries on,
         # lives nowhere else. Without this read an idle Strata renders "-" for context after
         # any restart, when there is no remembered busy sample to fall back on.
-        if _engine == "strata":
+        if engine_registry.speaks_strata(_engine):
             raw_slots = await _slot_states(container_name, internal_port, model_id)
     elif _settled_task.get(container_name) != open_task:
         raw_slots = await _slot_states(container_name, internal_port, model_id)
@@ -865,7 +865,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     # distracting than a row that is idle half the time.
     solo = None
     solo_last_ts = 0.0
-    if _engine == "strata" and len(slots) > 1:
+    if engine_registry.speaks_strata(_engine) and len(slots) > 1:
         per_slot_ctx = max((sl.ctx_total for sl in slots), default=0)
         if outside:
             prompt_tok = int(r.get("cur_prompt_tokens") or 0)

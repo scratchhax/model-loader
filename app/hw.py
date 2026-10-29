@@ -1310,7 +1310,12 @@ def strata_arena_gb() -> float:
     client = _client()
     if client is not None:
         try:
-            for c in client.containers.list(filters={"label": "ai-lab.engine=strata"}):
+            # Every Strata-server container (the Qwen install and DeepSeek): they are exclusive,
+            # so at most one is running, and whichever it is pins its experts the same way.
+            from . import engine_registry
+            running = [c for e in engine_registry.STRATA_PROTOCOL
+                       for c in client.containers.list(filters={"label": f"ai-lab.engine={e}"})]
+            for c in running:
                 r = c.exec_run(
                     timed_shell("awk '/^anon /{print $2; exit} /^rss /{print $2; exit}' "
                                 "/sys/fs/cgroup/memory.stat 2>/dev/null"),
