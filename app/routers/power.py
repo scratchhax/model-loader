@@ -72,12 +72,33 @@ _RAM_WARN_FREE_GB = 16.0
 _RAM_CRIT_FREE_GB = 8.0
 _DISK_WARN_FREE_GB = 150.0
 _DISK_CRIT_FREE_GB = 60.0
+# A small disk gets proportional limits instead: 150 GB free on a 120 GB drive is impossible,
+# and the fixed figure would leave it amber for ever.
+_DISK_WARN_FRAC = 0.15
+_DISK_CRIT_FRAC = 0.05
+
+
+def _disk_entry(d: dict) -> dict:
+    """A host_disks() entry with the numbers the strip draws and the two alert flags.
+
+    Critical includes a disk with nothing free. The old single-disk rule was `0 < free < 60`,
+    written so an unreadable disk (0 of 0) would not alarm, and it read a FULL disk the same
+    way - exactly the state Docker's disk was in when nobody could see it. Unreadable disks
+    never reach here (host_disks drops a zero total), so free == 0 is a real reading.
+    """
+    free, total = d["free"], d["total"]
+    crit_at = min(_DISK_CRIT_FREE_GB, total * _DISK_CRIT_FRAC)
+    warn_at = min(_DISK_WARN_FREE_GB, total * _DISK_WARN_FRAC)
+    return {**d,
+            "used_pct": round(100.0 * (total - free) / total, 1),
+            "crit": free < crit_at,
+            "warn": crit_at <= free < warn_at}
 
 
 def _host_stats_context() -> dict:
     """The host row: load, memory, swap, disk, at the cadence of the other meters.
 
-    Four cheap reads (two /proc files, one statvfs, one cached cgroup probe), so this can sit
+    Cheap reads (two /proc files, a statvfs per disk, one cached cgroup probe), so this can sit
     on the same 1 s poll as the power row without costing anything. Deliberately NOT
     snapshot_models_dir(), which walks every GGUF to size it.
 
@@ -87,7 +108,7 @@ def _host_stats_context() -> dict:
     """
     load = hw.host_load()
     swap_used, swap_total = hw.host_swap_gb()
-    free_gb, total_gb = hw.host_disk_gb(settings.models_dir)
+    disks = [_disk_entry(d) for d in hw.host_disks(settings.models_dir)]
     ram_total = hw.host_ram_gb()
     ram_avail = hw.host_ram_available_gb()
     arena = hw.strata_arena_gb()
@@ -122,12 +143,9 @@ def _host_stats_context() -> dict:
         # arena cannot be paged out, so pressure lands on everything else.
         "swap_warn": swap_total > 0 and swap_used > 0.5,
 
-        "disk_free": free_gb,
-        "disk_total": total_gb,
-        "disk_used_pct": round(100.0 * (total_gb - free_gb) / total_gb, 1) if total_gb else 0.0,
-        "disk_warn": 0 < free_gb < _DISK_WARN_FREE_GB and free_gb >= _DISK_CRIT_FREE_GB,
-        "disk_crit": 0 < free_gb < _DISK_CRIT_FREE_GB,
-        "disk_path": str(settings.models_dir),
+        # Every host disk the container can see, not just the models one: Docker's data-root
+        # filled to 100% on wheatley while this showed the models disk at 62%.
+        "disks": disks,
     }}
 
 

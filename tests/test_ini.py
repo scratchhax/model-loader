@@ -159,6 +159,15 @@ class TestBackups:
         path = ini.settings.models_ini_path
         assert list(path.parent.glob(".models.ini.*.tmp")) == []
 
+    def test_save_keeps_the_files_mode(self, ini_env):
+        # mkstemp makes 0600; a save that published that left models.ini unreadable to the
+        # nightly backup, which then skipped it for two weeks.
+        self._write_many(1)
+        path = ini.settings.models_ini_path
+        path.chmod(0o644)
+        self._write_many(1)
+        assert path.stat().st_mode & 0o777 == 0o644
+
     def test_list_backups_newest_first(self, ini_env):
         self._write_many(3)
         out = ini.list_backups()
