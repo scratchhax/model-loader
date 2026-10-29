@@ -33,13 +33,18 @@ class Engine:
     # Where its upstream releases are and how to read them (updates.py), and its upgrade runbook.
     updates: dict = field(default_factory=dict)
     runbook: str = ""
+    # The server it speaks. "strata" for every engine that IS Strata's server, whatever model is
+    # behind it: /health's loaded flag, /unload and /load, /slots, the solo path outside the
+    # slots. The "strata" engine name itself stays the Qwen install (tuning, pin file, pack
+    # catalog, update check); this is only the wire protocol.
+    protocol: str = ""
 
 
 ENGINES: dict[str, Engine] = {e.name: e for e in (
     Engine(
         name="strata", label="Strata", color=("indigo", "99,102,241"),
         single_model=True, ready_path="/health", ready_timeout_s=420.0,
-        strata_metrics=True, parks=True,
+        strata_metrics=True, parks=True, protocol="strata",
         updates={"repo": "Niko1221/Strata", "kind": "tags", "image": "ai-lab/strata",
                  "live_tag": "rocm7", "container": "strata"},
         runbook="~/ai-lab/strata/UPGRADING.md"),
@@ -58,14 +63,32 @@ ENGINES: dict[str, Engine] = {e.name: e for e in (
         updates={"repo": "mw00/project-maya", "kind": "tags", "image": "ai-lab/maya",
                  "live_tag": "rocm7", "container": "maya"},
         runbook="~/ai-lab/maya/UPGRADING.md"),
+    # DeepSeek-V4.1-Flash on Strata 0.2.7's own DeepSeek engine (strata-dsv41), in a container
+    # of its own. Not the "strata" engine with another model: 0.2.3 and later hand an undeclared
+    # tool call back as text, which breaks Open WebUI's tool search, so the Qwen install stays on
+    # 0.2.1 and this one runs the newer image beside it. Exclusive like the others; a load reads
+    # ~150 GB of experts into the cards and RAM, so it gets Maya's long timeout (upstream measured
+    # ~1 min on four R9700s; the router's narration, _NARRATE_MAX_S, has to outlast it).
+    Engine(
+        name="deepseek", label="DeepSeek", color=("teal", "20,184,166"),
+        single_model=True, ready_path="/health", ready_timeout_s=900.0,
+        strata_metrics=True, parks=True, protocol="strata",
+        runbook="~/ai-lab/strata/UPGRADING.md"),
 )}
 
 NAMES: tuple[str, ...] = tuple(ENGINES)
 DEFAULT_READY_TIMEOUT_S = 420.0
+# Every engine that is Strata's server underneath (see Engine.protocol).
+STRATA_PROTOCOL: tuple[str, ...] = tuple(n for n, e in ENGINES.items() if e.protocol == "strata")
 
 
 def get(name: str | None) -> Engine | None:
     return ENGINES.get((name or "").strip().lower())
+
+
+def speaks_strata(engine: str | None) -> bool:
+    """Is this engine Strata's server (whatever model it runs)?"""
+    return (engine or "").strip().lower() in STRATA_PROTOCOL
 
 
 def serving(engine: str, status_code: int, body) -> bool:
@@ -79,7 +102,7 @@ def serving(engine: str, status_code: int, body) -> bool:
     """
     if status_code != 200:
         return False
-    if engine == "strata":
+    if speaks_strata(engine):
         return isinstance(body, dict) and bool(body.get("loaded"))
     if engine == "maya":
         return isinstance(body, dict) and str(body.get("status") or "") == "ok"

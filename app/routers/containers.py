@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
-from .. import db, gpu_procs, hw, ini, services, vram_live
+from .. import db, engine_registry, gpu_procs, hw, ini, services, vram_live
 from ..config import settings
 from .. import strata as strata_engine
 from ..downloader import manager
@@ -248,7 +248,7 @@ def containers_strata_load(name: str) -> HTMLResponse:
     shows the flip, and a refusal (usually "the GPU is in use by another program") surfaces
     on the card via services.strata_error().
     """
-    if services.engine_for(name) != strata_engine.ENGINE:
+    if not engine_registry.speaks_strata(services.engine_for(name)):
         return _toast(False, "not a Strata backend")
     ok, msg = services.strata_load(name)
     return _toast(ok, msg)
@@ -261,7 +261,7 @@ def containers_strata_unload(name: str) -> HTMLResponse:
     The soft counterpart of Stop. It refuses (409) while a request is in flight rather than
     pulling the model out from under it, which is the right answer and worth seeing.
     """
-    if services.engine_for(name) != strata_engine.ENGINE:
+    if not engine_registry.speaks_strata(services.engine_for(name)):
         return _toast(False, "not a Strata backend")
     ok, msg = services.strata_unload(name)
     return _toast(ok, msg)

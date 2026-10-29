@@ -123,7 +123,7 @@ class TestMayaResolve:
     def test_default_engine_order_unchanged(self):
         # ENGINES[0] answers a request that names no model, and /props asks it first.
         assert ra.ENGINES[:2] == ("strata", "llama") and "maya" in ra.ENGINES
-        assert ra.SINGLE_MODEL == {"strata", "maya"}
+        assert ra.SINGLE_MODEL == {"strata", "maya", "deepseek"}
 
 
 # ------------------------------------------------------------------ the dropdown
@@ -169,7 +169,7 @@ class TestPropsTriesEveryEngine:
             raise ra.Unresolved(f"{e} not here")
         monkeypatch.setattr(ra, "resolve", resolve)
         r = run(ra.props())
-        assert r.status_code == 503 and b"maya not here" in r.body
+        assert r.status_code == 503 and b"deepseek not here" in r.body   # the last engine asked
 
 
 # ------------------------------------------------------------------ the switch's wait

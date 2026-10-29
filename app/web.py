@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from . import db
+from . import db, engine_registry
 from . import strata_models
 from .engine_colors import engine_tint
 from .gpu_activity import curve
@@ -23,6 +23,8 @@ templates.env.globals["badge_categories"] = db.BADGE_CATEGORIES
 templates.env.globals["badge_labels"] = db.BADGE_LABELS
 templates.env.globals["engine_tint"] = engine_tint
 templates.env.globals["curve"] = curve
+# Engines that are Strata's server (Load / Unload, the soft handover): the Qwen install and DeepSeek.
+templates.env.globals["strata_protocol"] = engine_registry.STRATA_PROTOCOL
 
 
 def _fmt_ts(v) -> str:

@@ -19,7 +19,7 @@
      hx-include on the forms is what carries it. It sits AFTER the buttons and names the
      handover it modifies: a bare "unload instead of stop" read as an orphan when the
      word "stop" appeared on no button in the row. #}
-  {% set strata_live = engines | selectattr('engine', 'equalto', 'strata') | selectattr('running') | list %}
+  {% set strata_live = engines | selectattr('engine', 'in', strata_protocol) | selectattr('running') | list %}
   <div class="mt-3 border-t border-slate-200 dark:border-slate-800 pt-2.5">
     <div id="engine-switch-toast" class="empty:hidden mb-2"></div>
     <div class="flex flex-wrap items-center gap-2">

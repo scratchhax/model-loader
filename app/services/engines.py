@@ -106,7 +106,7 @@ def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
     engine = engine_for(name)
     if timeout is None:
         timeout = READY_TIMEOUT_S.get(engine, _READY_TIMEOUT_DEFAULT_S)
-    strata = engine == "strata"
+    strata = engine_registry.speaks_strata(engine)
     spec = engine_registry.get(engine)
     url = f"http://{name}:{port}{spec.ready_path if spec else '/v1/models'}"
     deadline = time.time() + timeout
@@ -181,7 +181,7 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
     # no-op there and /load is the ask. (A running llama target needs nothing; _wait_ready
     # confirms it either way.)
     running_targets = {n for n in targets if holders.get(n, {}).get("running")}
-    plan_unload = [r for r in others if soft and r["engine"] == "strata" and r["running"]]
+    plan_unload = [r for r in others if soft and engine_registry.speaks_strata(r["engine"]) and r["running"]]
     plan_stop = [r for r in others if r not in plan_unload]
     _switch_state.clear()
     _switch_state.update(engine=engine, phase="stopping", msg="", t0=time.time(),
@@ -236,7 +236,7 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
                     # Up but parked (the only way a target is both this engine's and already
                     # running): /load is the ask, and _wait_ready below - which polls /health
                     # on Strata - is what proves it.
-                    if engine_for(name) == "strata":
+                    if engine_registry.speaks_strata(engine_for(name)):
                         ok, msg = strata_load(name)
                         if not ok:
                             _switch_state.update(phase="failed", msg=f"could not load {name}: {msg}")
