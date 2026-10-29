@@ -43,10 +43,16 @@ def _power_settings() -> dict:
     return out
 
 
+# The strip's curves span a fixed stretch of clock time, so they scroll rather than re-slice
+# (gpu_activity.timed_columns). Four minutes: the 240-reading histories at a 1 s cadence.
+_CURVE_WINDOW_S = 240.0
+
+
 def _power_context() -> dict:
     cfg = _power_settings()
     roll = hw.power_rollup(cfg["power_baseline_w"], cfg["psu_efficiency"])
     watts, temps = hw.power_history()
+    watts_ts, temps_ts = hw.power_series()
     # Pinned to the configured ceilings, so the height of each line is the headroom. Scaled to
     # its own window instead, a quiet box and a box about to trip the UPS would look identical.
     return {
@@ -56,9 +62,10 @@ def _power_context() -> dict:
         "power_spark": hw.sparkline(watts, cfg["power_crit_w"]) if len(watts) > 2 else "",
         "temp_spark": hw.sparkline(temps, cfg["temp_crit_c"]) if len(temps) > 2 else "",
         "gpu_cap": power_cap.status(),
-        # The same series as curves for the overview's smooth sparklines, on the same ceilings.
-        "power_curve": curve(watts, cfg["power_crit_w"]),
-        "temp_curve": curve(temps, cfg["temp_crit_c"]),
+        # The same series as curves for the overview's smooth sparklines, on the same ceilings,
+        # over a fixed four minutes of clock time (240 readings at the strip's 1 s poll).
+        "power_curve": curve(watts_ts, cfg["power_crit_w"], window_s=_CURVE_WINDOW_S),
+        "temp_curve": curve(temps_ts, cfg["temp_crit_c"], window_s=_CURVE_WINDOW_S),
     }
 
 
@@ -119,14 +126,16 @@ def _host_stats_context() -> dict:
     # same picture - the argument the power panel already makes for its own sparklines.
     lh = hw.host_load_history()
     rh = hw.host_ram_history()
+    lh_ts, rh_ts = hw.host_series()
     return {"host": {
         "load": load,
         "load_spark": hw.sparkline(lh, 100.0) if len(lh) > 2 else "",
         "ram_spark": hw.sparkline(rh, ram_total or None) if len(rh) > 2 else "",
         "hist_n": len(lh),
-        "load_curve": curve(lh, 100.0),
+        "load_curve": curve(lh_ts, 100.0, window_s=_CURVE_WINDOW_S),
         # Drawn as USED, so the line rises as the box fills, the same direction as the ring.
-        "ram_curve": curve([ram_total - r for r in rh], ram_total or None) if ram_total else None,
+        "ram_curve": (curve([(t, ram_total - r) for t, r in rh_ts], ram_total, window_s=_CURVE_WINDOW_S)
+                      if ram_total else None),
         "load_warn": load["pct"] >= _LOAD_WARN_PCT and load["pct"] < _LOAD_CRIT_PCT,
         "load_crit": load["pct"] >= _LOAD_CRIT_PCT,
 

@@ -895,6 +895,12 @@ def power_history() -> tuple[list[float], list[float]]:
         return [w for _t, w, _c, _l in _power_history], [c for _t, _w, c, _l in _power_history]
 
 
+def power_series() -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """power_history() with each reading's timestamp, for the time-slotted curves."""
+    with _POWER_HIST_LOCK:
+        return [(t, w) for t, w, _c, _l in _power_history], [(t, c) for t, _w, c, _l in _power_history]
+
+
 # Published by host-sensors.service into the LIVE instance's data directory. A second instance
 # has its own data directory and therefore cannot see it, which showed up as "CPU power not
 # reporting" on an otherwise working box - the reading was fine, the file was simply elsewhere.
@@ -1169,6 +1175,13 @@ def host_ram_history() -> list[float]:
     """MemAvailable in GiB, oldest first."""
     with _HOST_HIST_LOCK:
         return [r for _ts, _p, r in _host_history]
+
+
+def host_series() -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """(load %, MemAvailable GiB) with each reading's timestamp, for the time-slotted curves."""
+    with _HOST_HIST_LOCK:
+        return [(t, p) for t, p, _r in _host_history], [(t, r) for t, _p, r in _host_history]
+
 def host_disk_gb(path: Path | str) -> tuple[float, float]:
     """(free, total) GiB for the filesystem holding `path`. (0.0, 0.0) if it cannot be read.
 

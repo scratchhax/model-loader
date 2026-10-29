@@ -149,12 +149,14 @@ from .speed import (  # noqa: F401
     _speed_prev,
     _tps_history,
     ctx_history,
+    ctx_series,
     inference_speed,
     prefill_history,
     slot_columns,
     slot_density,
     test_prompt,
     tps_history,
+    tps_series,
 )
 
 from .logs import (  # noqa: F401
