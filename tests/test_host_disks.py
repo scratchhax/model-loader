@@ -76,6 +76,33 @@ def test_another_disk_is_named_for_its_mount_point(tmp_path):
     assert [d["label"] for d in disks] == ["models", "docker", "scratch"]
 
 
+# glados: ZFS datasets each get a device number, but /models and /data draw on one pool (tank)
+# and Docker on another (fast).
+GLADOS = """\
+951 942 0:47 /models /models rw,noatime - zfs tank rw,xattr
+952 942 0:54 /llama/ml-data /data rw,noatime - zfs tank/services rw,xattr
+953 942 0:48 /containers/x/resolv.conf /etc/resolv.conf rw,noatime - zfs fast/docker rw,xattr
+954 942 0:48 /containers/x/hostname /etc/hostname rw,noatime - zfs fast/docker rw,xattr
+955 942 0:48 /containers/x/hosts /etc/hosts rw,noatime - zfs fast/docker rw,xattr
+"""
+
+
+def test_zfs_datasets_of_one_pool_are_one_disk(tmp_path):
+    usage = _usage({"/models": (10745, 10955), "/etc/resolv.conf": (2698, 2698)})
+    disks = hw.host_disks("/models", _mounts(tmp_path, GLADOS), usage)
+    assert [(d["label"], d["paths"]) for d in disks] == [
+        ("models", ["/models", "/data"]),
+        ("docker", ["/etc/resolv.conf", "/etc/hostname", "/etc/hosts"]),
+    ]
+
+
+def test_btrfs_subvolumes_of_one_device_are_one_disk(tmp_path):
+    text = ("1 0 0:41 /@models /models rw - btrfs /dev/nvme0n1p2 rw\n"
+            "2 0 0:42 /@data /data rw - btrfs /dev/nvme0n1p2 rw\n")
+    disks = hw.host_disks("/models", _mounts(tmp_path, text), _usage({"/models": (100, 1000)}))
+    assert [d["paths"] for d in disks] == [["/models", "/data"]]
+
+
 def test_escaped_mount_points_are_decoded(tmp_path):
     text = "1 0 8:1 / /mnt/big\\040disk rw - ext4 /dev/sda1 rw\n"
     assert _mounts(tmp_path, text) == [("8:1", "/mnt/big disk")]

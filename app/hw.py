@@ -1206,7 +1206,13 @@ def _unescape_mount(s: str) -> str:
 
 
 def _read_mounts(mountinfo: str = "/proc/self/mountinfo") -> list[tuple[str, str]]:
-    """(device major:minor, mount point) for every real filesystem this process can see."""
+    """(disk key, mount point) for every real filesystem this process can see.
+
+    The key is what shares free space. Usually that is the device (major:minor), but every ZFS
+    dataset and btrfs subvolume gets a device number of its own while drawing on one pool: on
+    glados /models (tank) and /data (tank/services) read as two disks with the same 10.7 TB
+    free. So ZFS is keyed by pool name and btrfs by its backing device.
+    """
     try:
         lines = Path(mountinfo).read_text().splitlines()
     except OSError:
@@ -1217,7 +1223,12 @@ def _read_mounts(mountinfo: str = "/proc/self/mountinfo") -> list[tuple[str, str
         f, r = left.split(), right.split()
         if not sep or len(f) < 5 or not r or r[0] not in _REAL_FS:
             continue
-        out.append((f[2], _unescape_mount(f[4])))
+        key = f[2]
+        if r[0] == "zfs" and len(r) > 1:
+            key = "zfs:" + r[1].split("/", 1)[0]
+        elif r[0] == "btrfs" and len(r) > 1:
+            key = "btrfs:" + r[1]
+        out.append((key, _unescape_mount(f[4])))
     return out
 
 
