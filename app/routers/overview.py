@@ -53,6 +53,9 @@ def _host_line() -> str:
 # expensive thing on the hero's path. Cached briefly so the fast poll spends its time on the
 # ~1 ms slot read that actually moves.
 _HERO_BACKENDS_TTL = 1.5
+# The hero's tok/s and context curves span this much clock time (gpu_activity.timed_columns):
+# speed.py keeps 240 readings at the 500 ms poll.
+_HERO_WINDOW_S = 120.0
 _hero_backends: tuple[float, list] | None = None
 
 
@@ -330,9 +333,14 @@ async def _hero_context() -> dict:
             "cx_samples": 0 if hero_loading else len(cx),
             # The same three series as the page's smooth curves, on the same scales (each
             # against its own window peak, which the tiles print). Blank mid-load, as above.
-            "tps_curve": None if hero_loading else gpu_activity.curve(tps, tps_peak or None),
+            # tok/s and context over a fixed two minutes of clock time (240 readings at the hero's
+            # 500 ms poll), so they scroll instead of re-slicing; prefill is one reading per request
+            # and keeps its sequence.
+            "tps_curve": (None if hero_loading else
+                          gpu_activity.curve(services.tps_series(b.name), tps_peak or None, window_s=_HERO_WINDOW_S)),
             "pp_curve": None if hero_loading else gpu_activity.curve(pp, pp_peak or None),
-            "cx_curve": None if hero_loading else gpu_activity.curve(cx, cx_peak or None),
+            "cx_curve": (None if hero_loading else
+                         gpu_activity.curve(services.ctx_series(b.name), cx_peak or None, window_s=_HERO_WINDOW_S)),
             "hero_loading": hero_loading,
             "hero_loading_s": b.loading_since if hero_loading else 0.0,
             "hero_foreign": hero_foreign,

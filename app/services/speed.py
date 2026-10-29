@@ -295,6 +295,11 @@ def tps_history(container_name: str) -> list[float]:
     return [v for _ts, v in _tps_history.get(container_name, [])]
 
 
+def tps_series(container_name: str) -> list[tuple[float, float]]:
+    """tps_history() with timestamps, for the time-slotted curve."""
+    return list(_tps_history.get(container_name, []))
+
+
 def _record_tps(container_name: str, value: float) -> None:
     hist = _tps_history.setdefault(container_name, [])
     now = time.time()
@@ -332,6 +337,11 @@ _ctx_history: dict[str, list[tuple[float, float]]] = {}
 def ctx_history(container_name: str) -> list[float]:
     """Recent context-in-use readings for a backend, in tokens, oldest first."""
     return [v for _ts, v in _ctx_history.get(container_name, [])]
+
+
+def ctx_series(container_name: str) -> list[tuple[float, float]]:
+    """ctx_history() with timestamps, for the time-slotted curve."""
+    return list(_ctx_history.get(container_name, []))
 
 
 def _record_ctx(container_name: str, tokens: float) -> None:

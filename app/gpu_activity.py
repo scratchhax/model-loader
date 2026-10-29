@@ -21,6 +21,7 @@ pipeline actually needs to know.
 from __future__ import annotations
 
 import json
+import math
 import os
 import statistics
 import threading
@@ -327,74 +328,125 @@ def _smooth(points: list[tuple[float, float]], lo: float, hi: float) -> str:
 _W, _H, _PAD = 100.0, 32.0, 1.5
 
 
+def timed_columns(series: list[tuple[float, float]], window_s: float, cols: int = 60,
+                  now: float | None = None) -> list[tuple[float, float]]:
+    """A (ts, value) series as [(x, mean)] across a FIXED time window ending at `now`, x in 0..100.
+
+    The columns are slots of clock time (ts // width), not slices of whatever the buffer holds.
+    Slicing the buffer moved every boundary by one sample each second, so every column's mean
+    changed on every poll: the whole line shimmered, a quiet stretch never sat still, and the
+    newest column, built from a sample or two, flapped at the right edge. A finished slot now
+    never changes again; only its x moves, by its age, so the line scrolls left like a ticker.
+
+    The slot still filling is not drawn as a column. The right edge is the mean of the last
+    slot-width of samples instead, which moves a little each second rather than jumping. At the
+    left edge the line is cut at x = 0 between the slot leaving the window and the next one, so
+    it slides out rather than losing a column at a time. Slots with no samples are skipped, and
+    the line joins across them.
+    """
+    if not series:
+        return []
+    now = series[-1][0] if now is None else now
+    width = window_s / cols
+    start = now - window_s
+    cur = math.floor(now / width)
+    sums: dict[int, float] = {}
+    counts: dict[int, int] = {}
+    for ts, v in series:
+        if ts < start - width:
+            continue
+        c = math.floor(ts / width)
+        if c >= cur:
+            continue
+        sums[c] = sums.get(c, 0.0) + v
+        counts[c] = counts.get(c, 0) + 1
+    pts = [(((c + 0.5) * width - start) / window_s * _W, sums[c] / counts[c]) for c in sorted(sums)]
+    live = [v for ts, v in series if ts > now - width]
+    if live:
+        pts.append((_W, sum(live) / len(live)))
+    while len(pts) >= 2 and pts[1][0] <= 0:
+        pts.pop(0)
+    if len(pts) >= 2 and pts[0][0] < 0:
+        (x0, v0), (x1, v1) = pts[0], pts[1]
+        pts[0] = (0.0, v0 + (v1 - v0) * (0.0 - x0) / (x1 - x0))
+    return pts
+
+
+_TIMELINE_WINDOW_S = _TIMELINE_MAX * _TIMELINE_INTERVAL_S
+
+
 def sparklines(samples: list[CardSample], buckets: int = 60) -> dict:
     """The timeline as one smooth line per tenant, plus the card's own util, in a 100 x 32 box.
 
-    Each column is a MEAN over its samples: NVIDIA's pmon reading is a 2 s sample, so the raw
-    1 s series is mostly repeats and zeros, and a mean says how much of that stretch of time the
-    tenant had the card. At least two samples per column, or a short window (after a restart)
-    draws a comb. Fixed 0-100% scale, so a line's height means the same thing every frame.
+    Each column is a MEAN over a 15 s slot of clock time (timed_columns): NVIDIA's pmon reading
+    is a 2 s sample, so the raw 1 s series is mostly repeats and zeros, and a mean says how much
+    of that stretch the tenant had the card. The x axis is the whole 15-minute window whatever
+    has been recorded, so after a restart the line starts part-way across rather than stretching
+    a minute over the full width. Fixed 0-100% scale, so a height means the same every frame.
 
     Lines, not a stack: tenants rarely overlap on one card, and when they do a line each says
     who was doing what without one band's height depending on the band beneath it.
     """
     if len(samples) < 4:
         return {"lines": [], "card": None, "span_s": 0}
-    buckets = max(2, min(buckets, len(samples) // 2))
-    t0, t1 = samples[0].ts, samples[-1].ts
-    span = max(1.0, t1 - t0)
-    col = lambda s: min(buckets - 1, int((s.ts - t0) / span * buckets))  # noqa: E731
-    counts = [0] * buckets
-    util = [0.0] * buckets
-    per: dict[str, list[float]] = {}
-    for s in samples:
-        i = col(s)
-        counts[i] += 1
-        util[i] += s.util
-        for label, pct in s.share.items():
-            per.setdefault(label, [0.0] * buckets)[i] += pct
-    xs = [i * _W / (buckets - 1) for i in range(buckets)]
+    now = samples[-1].ts
     y = lambda v: _H - _PAD - min(100.0, max(0.0, v)) / 100.0 * (_H - 2 * _PAD)  # noqa: E731
 
-    def shape(vals: list[float]) -> dict:
-        means = [v / c if c else 0.0 for v, c in zip(vals, counts)]
-        pts = [(x, y(m)) for x, m in zip(xs, means)]
+    def shape(series: list[tuple[float, float]]) -> dict | None:
+        cols = timed_columns(series, _TIMELINE_WINDOW_S, buckets, now)
+        if len(cols) < 2:
+            return None
+        pts = [(x, y(v)) for x, v in cols]
         line = _smooth(pts, _PAD, _H - _PAD)
-        return {"line": line, "area": f"{line} L{_W:.2f},{_H:.2f} L0,{_H:.2f} Z",
-                "now": round(means[-1]), "peak": round(max(means)),
+        return {"line": line, "area": f"{line} L{_W:.2f},{_H:.2f} L{pts[0][0]:.2f},{_H:.2f} Z",
+                "now": round(cols[-1][1]), "peak": round(max(v for _x, v in cols)),
                 "end_y": round(pts[-1][1], 2)}
 
+    labels = {label for s in samples for label in s.share}
     lines = []
-    for label, vals in per.items():
-        sh = shape(vals)
-        if sh["peak"] < 1:
+    for label in labels:
+        sh = shape([(s.ts, float(s.share.get(label, 0))) for s in samples])
+        if sh is None or sh["peak"] < 1:
             continue
         lines.append({"label": label, "kind": kind_for(label), **sh})
-    lines.sort(key=lambda ln: -ln["peak"])
-    return {"lines": lines, "card": shape(util), "span_s": int(span)}
+    lines.sort(key=lambda ln: (-ln["peak"], ln["label"]))
+    return {"lines": lines, "card": shape([(s.ts, s.util) for s in samples]),
+            "span_s": int(_TIMELINE_WINDOW_S)}
 
 
-def curve(values, top: float | None = None, points: int = 60) -> dict | None:
+def curve(values, top: float | None = None, points: int = 60, window_s: float | None = None) -> dict | None:
     """Any series as the overview's one chart shape: a smooth line and the area under it, in a
     100 x 32 box. None for fewer than three values, so a template can test it directly.
 
     `top` pins the scale (a limit, a total, 100%) so the height means the same thing every
     frame; without it the series is drawn against its own peak, which is right only for rates
-    with no meaningful ceiling (tok/s), and the caller should then print that peak. Long series
-    are averaged down to `points` columns: the line is drawn at card width, and 240 points in
-    a few hundred pixels is noise rather than detail.
+    with no meaningful ceiling (tok/s), and the caller should then print that peak.
+
+    With `window_s`, `values` is a (ts, value) series and is drawn over that fixed time window
+    in clock-time slots (timed_columns), so it scrolls instead of shimmering. Without it, the
+    values are a plain sequence (prefill: one reading per request, with no time axis to keep)
+    and a long one is averaged down to `points` columns.
     """
-    vals = [float(v) for v in (values or []) if v is not None]
-    if len(vals) < 3:
-        return None
-    if len(vals) > points:
-        k = len(vals) / points
-        chunks = [vals[int(i * k):int((i + 1) * k)] or [vals[int(i * k)]] for i in range(points)]
-        vals = [sum(c) / len(c) for c in chunks]
+    if window_s:
+        series = [(float(t), float(v)) for t, v in (values or []) if v is not None]
+        if len(series) < 3:
+            return None
+        cols = timed_columns(series, window_s, points)
+        if len(cols) < 2:
+            return None
+        xs, vals = [x for x, _v in cols], [v for _x, v in cols]
+    else:
+        vals = [float(v) for v in (values or []) if v is not None]
+        if len(vals) < 3:
+            return None
+        if len(vals) > points:
+            k = len(vals) / points
+            chunks = [vals[int(i * k):int((i + 1) * k)] or [vals[int(i * k)]] for i in range(points)]
+            vals = [sum(c) / len(c) for c in chunks]
+        xs = [i * _W / (len(vals) - 1) for i in range(len(vals))]
     ceil = top if top and top > 0 else (max(vals) or 1.0)
-    n = len(vals)
     y = lambda v: _H - _PAD - min(1.0, max(0.0, v / ceil)) * (_H - 2 * _PAD)  # noqa: E731
-    pts = [(i * _W / (n - 1), y(v)) for i, v in enumerate(vals)]
+    pts = [(x, y(v)) for x, v in zip(xs, vals)]
     line = _smooth(pts, _PAD, _H - _PAD)
-    return {"line": line, "area": f"{line} L{_W:.2f},{_H:.2f} L0,{_H:.2f} Z",
+    return {"line": line, "area": f"{line} L{_W:.2f},{_H:.2f} L{xs[0]:.2f},{_H:.2f} Z",
             "last": vals[-1], "peak": max(vals)}

@@ -109,44 +109,83 @@ class TestComfy:
         assert not st.ok and st.error == "OSError"
 
 
+class TestTimedColumns:
+    """Clock-time slots: a finished slot never changes, the line scrolls by age (2026-10-29: the
+    old buffer slicing re-averaged every column on every poll, so lines shimmered and never sat flat)."""
+
+    T0 = 1_000_000.0          # an arbitrary wall-clock start, not aligned to a slot
+
+    def _series(self, n, f=lambda i: (i * 37) % 101):
+        return [(self.T0 + i, float(f(i))) for i in range(n)]
+
+    def test_a_finished_slot_never_changes_it_only_moves(self):
+        s = self._series(600)
+        before = ga.timed_columns(s[:400], 900, 60)
+        after = ga.timed_columns(s[:401], 900, 60)
+        # interior columns (not the cut left edge, not the rolling right edge): same means, x one second further left
+        inner_b = {round(v, 9): x for x, v in before[1:-1]}
+        moved = [(x, v) for x, v in after[1:-1] if round(v, 9) in inner_b]
+        assert len(moved) >= len(before) - 4
+        assert all(abs(inner_b[round(v, 9)] - x - 100.0 / 900) < 1e-9 for x, v in moved)
+
+    def test_a_constant_stretch_is_exactly_flat(self):
+        cols = ga.timed_columns(self._series(900, lambda i: 7.0), 900, 60)
+        assert {v for _x, v in cols} == {7.0}
+
+    def test_the_right_edge_is_a_rolling_mean_at_x_100(self):
+        s = self._series(300)
+        cols = ga.timed_columns(s, 900, 60)
+        last15 = [v for t, v in s if t > s[-1][0] - 15]
+        assert cols[-1][0] == 100.0 and abs(cols[-1][1] - sum(last15) / len(last15)) < 1e-9
+
+    def test_the_left_edge_is_cut_at_zero(self):
+        cols = ga.timed_columns(self._series(2000), 900, 60)
+        assert cols[0][0] == 0.0 and all(x > 0 for x, _v in cols[1:])
+
+    def test_after_a_restart_the_line_starts_part_way(self):
+        cols = ga.timed_columns(self._series(60), 900, 60)
+        assert cols[0][0] > 85          # one minute of a fifteen-minute window: the right end only
+
+    def test_empty(self):
+        assert ga.timed_columns([], 900) == []
+
+
 class TestSparklines:
     def _samples(self, shares, util=0.0):
-        return [ga.CardSample(ts=float(i), util=util, vram_gb=0, share=s) for i, s in enumerate(shares)]
+        return [ga.CardSample(ts=1_000_000.0 + i, util=util, vram_gb=0, share=s) for i, s in enumerate(shares)]
 
     def test_too_short(self):
         assert ga.sparklines(self._samples([{}] * 3))["lines"] == []
 
     def test_idle_tenant_draws_no_line_but_the_card_does(self):
-        out = ga.sparklines(self._samples([{}] * 8, util=40.0))
-        assert out["lines"] == [] and out["span_s"] == 7
-        assert out["card"]["now"] == 40
+        out = ga.sparklines(self._samples([{}] * 120, util=40.0))
+        assert out["lines"] == [] and out["span_s"] == 900
+        assert out["card"]["now"] == 40 and out["card"]["peak"] == 40
 
     def test_one_line_per_tenant_busiest_first(self):
         ga._kinds_seen.update({"llama-gpu0": "llm", "comfy": "image"})
-        shares = [{"llama-gpu0": 30}] * 4 + [{"comfy": 90}] * 4
-        out = ga.sparklines(self._samples(shares), buckets=4)
+        shares = [{"llama-gpu0": 30}] * 120 + [{"comfy": 90}] * 120
+        out = ga.sparklines(self._samples(shares))
         assert [ln["label"] for ln in out["lines"]] == ["comfy", "llama-gpu0"]
         assert [ln["kind"] for ln in out["lines"]] == ["image", "llm"]
         comfy, llama = out["lines"]
-        assert comfy["peak"] == 90 and comfy["now"] == 90 and llama["now"] == 0
-
-    def test_two_samples_per_column(self):
-        # 8 samples asked into 60 columns would leave most columns empty (a comb).
-        out = ga.sparklines(self._samples([{"x": 50}] * 8), buckets=60)
-        assert out["lines"][0]["line"].count("C") == 3     # 4 columns -> 3 curve segments
+        assert comfy["peak"] == 90 and comfy["now"] == 90 and llama["now"] == 0 and llama["peak"] == 30
 
     def test_curve_never_leaves_the_box(self):
-        out = ga.sparklines(self._samples([{"x": 0}, {"x": 100}] * 6), buckets=12)
-        nums = [float(v) for seg in out["lines"][0]["line"].replace("M", " ").replace("C", " ").split()
-                for v in seg.split(",")[1:]]
-        assert min(nums) >= ga._PAD - 0.01 and max(nums) <= ga._H - ga._PAD + 0.01
+        # whole slots of 0% then 100%: the sharpest steps the smoothing ever has to turn
+        out = ga.sparklines(self._samples(([{"x": 0}] * 15 + [{"x": 100}] * 15) * 10))
+        line = out["lines"][0]["line"]
+        nums = [float(v) for seg in line.replace("M", " ").replace("C", " ").split() for v in seg.split(",")[1:]]
+        assert nums and min(nums) >= ga._PAD - 0.01 and max(nums) <= ga._H - ga._PAD + 0.01
 
 
 class TestCurve:
     def test_too_few(self):
         assert ga.curve([1, 2]) is None and ga.curve(None) is None
+        assert ga.curve([(1.0, 1.0), (2.0, 2.0)], window_s=60) is None
 
-    def test_long_series_are_averaged_down(self):
+    def test_a_plain_sequence_is_averaged_down(self):
+        # prefill: one reading per request, no time axis
         cv = ga.curve(list(range(240)), top=240, points=60)
         assert cv["line"].count("C") == 59 and cv["peak"] < 240 and cv["last"] > 230
 
@@ -154,6 +193,13 @@ class TestCurve:
         # 300 W against a 600 W limit sits mid-box; against its own peak it would touch the top.
         flat = ga.curve([300] * 5, top=600)["line"]
         assert ga.curve([300] * 5)["line"] != flat and "16.00" in flat
+
+    def test_a_timed_series_scrolls_and_sits_flat(self):
+        s = [(1_000_000.0 + i, 300.0) for i in range(240)]
+        cv = ga.curve(s, top=600, window_s=240)
+        ys = {seg.split(",")[1] for seg in cv["line"].replace("M", " ").replace("C", " ").split()}
+        assert ys == {"16.00"}           # a constant reading is a level line, every point
+        assert cv["area"].endswith("Z") and cv["last"] == 300.0
 
 
 def _wire(monkeypatch, comfy=None):
