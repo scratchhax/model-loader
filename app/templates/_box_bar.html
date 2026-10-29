@@ -17,6 +17,9 @@
 
   On a phone the strip stays ONE row that scrolls sideways instead of wrapping: wrapped it was
   250px tall, and pinned under the header that is a third of the screen gone for good.
+
+  From lg up it wraps instead, and at lg-to-xl the two curves are dropped: with a disk per host
+  filesystem the strip needs ~1,090px, and a 1,024px window wrapped the disks onto a second row.
 #}
 {% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
 {% set crit = p.wall_w >= power_crit_w %}
@@ -52,7 +55,7 @@
       </div>
       <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }}{% if not p.host_ok %} · <span class="text-amber-600 dark:text-amber-400">no CPU data</span>{% endif %}</div>
     </div>
-    <div class="hidden w-24 shrink-0 sm:block xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
   </div>
 
   {# ---- heat ---- #}
@@ -65,7 +68,7 @@
       </div>
       <div class="mt-0.5 font-mono text-[10px] text-slate-500">{{ p.hottest_label or 'hottest' }}</div>
     </div>
-    <div class="hidden w-24 shrink-0 sm:block xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
   </div>
 
   <span class="hidden h-7 w-px bg-slate-200 dark:bg-slate-800 lg:block" aria-hidden="true"></span>
