@@ -114,7 +114,7 @@ def test_the_power_card_names_the_card_that_is_not_capped(web, box):  # noqa: F8
     _card(box, "0000:08:00.0", 300)
     power_cap.set_desired(210)
     _age(60)
-    html = web.get("/power").text
+    html = web.get("/boxbar").text
     assert "GPU power cap not held" in html and "card 1 at 300 W" in html and "set to 210 W" in html
 
 
@@ -123,4 +123,4 @@ def test_no_warning_when_the_cards_hold_the_cap(web, box):  # noqa: F811
     _card(box, "0000:08:00.0", 210)
     power_cap.set_desired(210)
     _age(60)
-    assert "GPU power cap not held" not in web.get("/power").text
+    assert "GPU power cap not held" not in web.get("/boxbar").text

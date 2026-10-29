@@ -87,7 +87,7 @@ def test_pages_render_on_an_empty_box(web, url, marker):
     assert marker in r.text
 
 
-@pytest.mark.parametrize("url", ["/hero", "/gpu-strip", "/power", "/hoststats"])
+@pytest.mark.parametrize("url", ["/hero", "/gpu-strip", "/cards", "/boxbar"])
 def test_polling_partials_render(web, url):
     assert web.get(url).status_code == 200
 
