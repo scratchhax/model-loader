@@ -62,8 +62,11 @@
 {# First, because the cards are what the box is: a chat model, an image pipeline and a TTS
    server are all tenants of the same hardware, and the old order led with one of them and
    left the others as a residual in its meter. 1 s, matching the samplers behind it. #}
+{# Filled by its own poll, not pre-rendered: the first paint waited on every probe behind these
+   panels, and while an engine loads those take seconds (4.5 s for "/" on 2026-10-30). The
+   placeholder holds the space so the page does not jump when the panels land a moment later. #}
 <div class="mt-4" hx-get="/cards" hx-trigger="load, every 1s" hx-swap="innerHTML">
-  {% include "_cards.html" %}
+  <div class="flex min-h-[18rem] items-center justify-center rounded-2xl border border-slate-200 text-[11px] text-slate-500 dark:border-slate-800">reading the cards…</div>
 </div>
 
 
@@ -71,7 +74,7 @@
 {# The one tenant with a deep readout. 500 ms: the slot read behind it is ~1 ms, and the token
    counter it exposes moves every few milliseconds during generation. #}
 <div id="llm" class="mt-4 scroll-mt-40" hx-get="/hero" hx-trigger="load, every 500ms" hx-swap="innerHTML">
-  {% include "_hero.html" %}
+  <div class="flex min-h-[12rem] items-center justify-center rounded-2xl border border-slate-200 text-[11px] text-slate-500 dark:border-slate-800">reading the engine…</div>
 </div>
 
 {# ---------------- calm layer: the inventory ---------------- #}

@@ -85,8 +85,9 @@ READY_TIMEOUT_S = {n: e.ready_timeout_s for n, e in engine_registry.ENGINES.item
 _READY_TIMEOUT_DEFAULT_S = engine_registry.DEFAULT_READY_TIMEOUT_S
 
 
-def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
-    """Poll one backend until it is actually serving. (ready, note).
+def _wait_ready(name: str, timeout: float | None = None, quiet: bool = False) -> tuple[bool, str]:
+    """Poll one backend until it is actually serving. (ready, note). `quiet` leaves the switch's
+    status alone (the slow-start watcher must not turn "slow" back into "loading").
 
     `docker start` returning is not "serving", and the gap is not small: Strata reads ~55 GB of
     experts into RAM before its port opens, and a llama router takes 10-40 s depending on the
@@ -120,6 +121,9 @@ def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
                     return True, ""
         except (httpx.HTTPError, ValueError, AttributeError):
             pass
+        if quiet:
+            time.sleep(2.0)
+            continue
         _switch_state.update(phase="loading",
                              msg=f"{name} up {int(time.time() - _switch_state.get('t0', time.time()))}s, "
                                  + ("model not loaded yet" if strata
@@ -127,6 +131,31 @@ def _wait_ready(name: str, timeout: float | None = None) -> tuple[bool, str]:
                                     else "port not answering yet"))
         time.sleep(2.0)
     return False, f"{name} started but {url} did not answer within {int(timeout)}s"
+
+
+# How long a "slow" start is still watched for, after the switch itself has given up waiting.
+_SLOW_WATCH_S = 3600.0
+
+
+def _watch_slow_start(name: str, t0) -> None:
+    """Keep watching a start the switch called slow, and close it out as done when it answers.
+
+    "Slow" ended the switch's wait but not the start: DeepSeek re-tuning after an engine update
+    took 15 min (2026-10-30), served, and the banner said "still loading" for good. This runs
+    after the switch lock is released, so another switch is never blocked by it, and it touches
+    the state only while that state is still THIS switch (same t0, still slow).
+    """
+    def _run() -> None:
+        deadline = time.time() + _SLOW_WATCH_S
+        while time.time() < deadline:
+            if _switch_state.get("t0") != t0 or _switch_state.get("phase") != "slow":
+                return
+            ready, _ = _wait_ready(name, timeout=30.0, quiet=True)
+            if ready:
+                if _switch_state.get("t0") == t0 and _switch_state.get("phase") == "slow":
+                    _switch_state.update(phase="done", msg="", t1=time.time())
+                return
+    threading.Thread(target=_run, daemon=True, name=f"slow-start-{name}").start()
 
 
 def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tuple[bool, str]:
@@ -263,6 +292,7 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
                     # "slow", not "failed": the container is up and may still come good. Saying
                     # it failed would send someone looking for a crash that has not happened.
                     _switch_state.update(phase="slow", msg=note)
+                    _watch_slow_start(name, _switch_state.get("t0"))
                     return
             _switch_state.update(phase="done", msg="", t1=time.time())
         except Exception as e:  # noqa: BLE001 - a thread that dies silently leaves the panel lying

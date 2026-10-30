@@ -703,17 +703,16 @@ def _box_contexts() -> dict:
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     snap = await asyncio.to_thread(_models_snapshot_cached)
-    backends = await services.snapshot_llama_backends()
     # What downloaded last does not tell you anything about what the box is doing now, so the
     # list is gone from this page; only a download still in flight is worth a line.
     active = sum(1 for j in manager.snapshot() if j.status in ("queued", "downloading"))
-    ctx = {"request": request, "snap": snap, "backends": backends,
+    # The cards and the hero are NOT computed here: their own polls fill them a moment after the
+    # first paint. Pre-rendering them made the page wait on every engine probe behind them, which
+    # is seconds while an engine is mid-load.
+    ctx = {"request": request, "snap": snap,
            "ini_sections": ini.list_sections(),
-           "active_downloads": active, "host_line": _host_line(), "cards_above": True}
-    ctx.update(await _hero_context())
-    ctx.update(await asyncio.to_thread(_cards_context, await _llm_activity()))
-    ctx["parked_engines"] = {services.engine_for(b.name) for b in backends
-                             if getattr(b, "unloaded_model", None)}
+           "active_downloads": active, "host_line": await asyncio.to_thread(_host_line),
+           "cards_above": True}
     ctx.update(await asyncio.to_thread(_box_contexts))
     return templates.TemplateResponse("dashboard.html", ctx)
 
