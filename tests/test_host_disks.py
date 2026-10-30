@@ -153,3 +153,18 @@ def test_the_strip_draws_a_cell_per_disk(monkeypatch, web):  # noqa: F811
     cell1 = html.split('id="bar-disk-1"')[1].split(">")[0]
     cell0 = html.split('id="bar-disk-0"')[1].split(">")[0]
     assert "bg-red-500/10" in cell1 and "bg-red-500/10" not in cell0
+
+
+def test_the_arena_is_the_largest_strata_container(monkeypatch):
+    # "Unload instead of stop" leaves the displaced engine running but parked; the first container
+    # to answer was the parked Qwen at ~0 while DeepSeek pinned ~100 GB (2026-10-30).
+    from types import SimpleNamespace
+
+    def ctr(nbytes):
+        return SimpleNamespace(exec_run=lambda *a, **k: SimpleNamespace(exit_code=0, output=str(nbytes).encode()))
+
+    by_label = {"ai-lab.engine=strata": [ctr(52_000_000)], "ai-lab.engine=deepseek": [ctr(100 * 1024 ** 3)]}
+    client = SimpleNamespace(containers=SimpleNamespace(list=lambda filters: by_label.get(filters["label"], [])))
+    monkeypatch.setattr(hw, "_client", lambda: client)
+    monkeypatch.setattr(hw, "_strata_arena_cache", (0.0, 0.0))
+    assert hw.strata_arena_gb() == 100.0
