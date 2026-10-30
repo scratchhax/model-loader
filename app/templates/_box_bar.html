@@ -37,9 +37,9 @@
 {%- endmacro %}
 {# Each cell's text is one line per row: never wraps, and an ellipsis if a value ever outgrows a cell
    (the title carries the full figures). In the portrait grid a ring cell is ~160px, and the RAM line
-   "ram 94% · 99 pinned" wrapped onto two. #}
+   "ram 94% · 99 pinned" wrapped onto two; the tighter gap and padding there are what let it fit. #}
 {% macro cell(id, crit, warn, span='tallscreen:col-span-2') -%}
-  id="{{ id }}" class="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 transition-colors duration-700 ease-out {{ span }} {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
+  id="{{ id }}" class="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 tallscreen:gap-1.5 tallscreen:px-1.5 transition-colors duration-700 ease-out {{ span }} {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
 {%- endmacro %}
 {% macro mini_ring(id, pct, color) -%}
 <div class="relative h-9 w-9 shrink-0">
