@@ -73,7 +73,42 @@
       </div>
     </div>
 
-    <div class="mt-3 flex items-center gap-5">
+    {# ---- the card's last 15 minutes, as the BACKGROUND of the ring and headline ---- #}
+    {# The owner's idea: a standalone chart under the ring wasted a band of the card, and as a
+       backdrop it runs the full width at the height of the whole block. One smooth line per tenant,
+       fixed 0-100%, the card's own util dashed. Faded under the left of the card, where the ring
+       and the words sit, so it never fights them for contrast; full strength from about two thirds
+       across, where the newest minutes are. #}
+    {% set sp = p.spark %}
+    <div class="relative mt-3">
+      <div aria-hidden="true"
+           class="pointer-events-none absolute inset-0 [mask-image:linear-gradient(to_right,rgba(0,0,0,0.4)_0%,rgba(0,0,0,0.4)_40%,#000_68%)]">
+        {% if sp.card %}
+        <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="block h-full w-full overflow-visible">
+          <defs>
+            {% for ln in sp.lines %}
+            <linearGradient id="gpu-grad-{{ i }}-{{ loop.index }}" x1="0" y1="0" x2="0" y2="1" class="{{ kind_text(ln.kind) }}">
+              <stop offset="0%" stop-color="currentColor" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="currentColor" stop-opacity="0"/>
+            </linearGradient>
+            {% endfor %}
+          </defs>
+          <line x1="0" y1="16" x2="100" y2="16" class="stroke-slate-200/70 dark:stroke-slate-800/70" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>
+          <line x1="0" y1="31.5" x2="100" y2="31.5" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>
+          <path d="{{ sp.card.line }}" fill="none" class="stroke-slate-400/70 dark:stroke-slate-500/70" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+          {% for ln in sp.lines %}
+          <path d="{{ ln.area }}" fill="url(#gpu-grad-{{ i }}-{{ loop.index }})"/>
+          <path d="{{ ln.line }}" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
+                vector-effect="non-scaling-stroke" class="{{ kind_text(ln.kind) }}"/>
+          {% endfor %}
+        </svg>
+        {% endif %}
+      </div>
+      {% if sp.span_s %}
+      <span class="absolute right-0 top-0 text-[10px] tabular-nums text-slate-500">last {% if sp.span_s >= 60 %}{{ sp.span_s // 60 }} min{% else %}{{ sp.span_s }} s{% endif %}</span>
+      {% endif %}
+
+    <div class="relative flex min-h-[10rem] items-center gap-5 pb-2 tallscreen:min-h-[20rem]">
       {# ---- ring gauge: util on the inner arc, VRAM by tenant around the outside ---- #}
       <div class="relative h-32 w-32 shrink-0 tallscreen:h-44 tallscreen:w-44"
            title="inner arc: {{ '%.0f' % c.util_pct }}% util · outer ring: {{ '%.1f' % c.vram_used_gb }} of {{ '%.0f' % c.vram_total_gb }} GB VRAM, by tenant">
@@ -142,47 +177,17 @@
       </div>
     </div>
 
-    {# ---- sparklines: who ran on this card, one smooth line per tenant, fixed 0-100% ---- #}
-    {% set sp = p.spark %}
-    <div class="mt-4">
-      <div class="flex items-baseline justify-between text-[10px] text-slate-500">
-        <span class="flex flex-wrap items-center gap-x-3">
-          <span class="uppercase tracking-[0.12em]">compute</span>
-          {% for ln in sp.lines %}
-          <span class="inline-flex items-center gap-1"><span class="h-0.5 w-3 rounded-full {{ kind_bg(ln.kind) }}"></span><span class="font-mono">{{ ln.label }}</span> <span class="tabular-nums">peak {{ ln.peak }}%</span></span>
-          {% endfor %}
-          {% if sp.card %}<span class="inline-flex items-center gap-1"><span class="w-3 border-t border-dashed border-slate-400 dark:border-slate-500"></span>card util</span>{% endif %}
-        </span>
-        <span class="shrink-0 tabular-nums">{% if sp.span_s %}last {% if sp.span_s >= 60 %}{{ sp.span_s // 60 }} min{% else %}{{ sp.span_s }} s{% endif %}{% endif %}</span>
-      </div>
-      {% if sp.card %}
-      <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="mt-1.5 block h-20 w-full overflow-visible tallscreen:h-60" role="img"
-           aria-label="compute share by tenant over the last {{ sp.span_s }} seconds">
-        <defs>
-          {% for ln in sp.lines %}
-          <linearGradient id="gpu-grad-{{ i }}-{{ loop.index }}" x1="0" y1="0" x2="0" y2="1" class="{{ kind_text(ln.kind) }}">
-            <stop offset="0%" stop-color="currentColor" stop-opacity="0.35"/>
-            <stop offset="100%" stop-color="currentColor" stop-opacity="0"/>
-          </linearGradient>
-          {% endfor %}
-        </defs>
-        <line x1="0" y1="16" x2="100" y2="16" class="stroke-slate-200/70 dark:stroke-slate-800/70" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>
-        <line x1="0" y1="31.5" x2="100" y2="31.5" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>
-        <path d="{{ sp.card.line }}" fill="none" class="stroke-slate-400/70 dark:stroke-slate-500/70" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
-        {% for ln in sp.lines %}
-        <path d="{{ ln.area }}" fill="url(#gpu-grad-{{ i }}-{{ loop.index }})"/>
-        <path d="{{ ln.line }}" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
-              vector-effect="non-scaling-stroke" class="{{ kind_text(ln.kind) }}">
-          <title>{{ ln.label }}: {{ ln.now }}% now, peak {{ ln.peak }}%</title>
-        </path>
-        {% endfor %}
-      </svg>
-      {% if not sp.lines %}
-      <div class="-mt-12 mb-6 text-center text-[10px] text-slate-500">nothing ran on this card in this window</div>
-      {% endif %}
-      {% else %}
-      <div class="mt-1.5 flex h-20 items-center justify-center text-[10px] text-slate-500 tallscreen:h-60">collecting…</div>
-      {% endif %}
+    </div>{# the background block #}
+
+    {# ---- the background chart's legend ---- #}
+    <div class="mt-2 flex flex-wrap items-center gap-x-3 text-[10px] text-slate-500"
+         aria-label="compute share by tenant over the last {{ sp.span_s }} seconds">
+      <span class="uppercase tracking-[0.12em]">compute</span>
+      {% for ln in sp.lines %}
+      <span class="inline-flex items-center gap-1" title="{{ ln.label }}: {{ ln.now }}% now, peak {{ ln.peak }}%"><span class="h-0.5 w-3 rounded-full {{ kind_bg(ln.kind) }}"></span><span class="font-mono">{{ ln.label }}</span> <span class="tabular-nums">peak {{ ln.peak }}%</span></span>
+      {% endfor %}
+      {% if sp.card %}<span class="inline-flex items-center gap-1"><span class="w-3 border-t border-dashed border-slate-400 dark:border-slate-500"></span>card util</span>{% endif %}
+      {% if not sp.card %}<span>collecting…</span>{% elif not sp.lines %}<span>nothing ran on this card in this window</span>{% endif %}
     </div>
 
     {# ---- tenants: each in its own terms ---- #}
