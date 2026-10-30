@@ -199,9 +199,9 @@
         </div>
         {% if spark is mapping %}
         {# The page's one chart shape (_viz.html), so these read as the same family as the cards. #}
-        <div class="mt-1.5">{{ area(spark, 'hero-' ~ (label | replace(' ', '-')), ('text-' ~ tint ~ '-500 dark:text-' ~ tint ~ '-400') if active else 'text-slate-400 dark:text-slate-600', 'h-8') }}</div>
+        <div class="mt-1.5">{{ area(spark, 'hero-' ~ (label | replace(' ', '-')), ('text-' ~ tint ~ '-500 dark:text-' ~ tint ~ '-400') if active else 'text-slate-400 dark:text-slate-600', 'h-8 tallscreen:h-24') }}</div>
         {% elif spark %}
-        <svg viewBox="0 0 100 20" class="mt-1 block h-6 w-full {% if active %}text-{{ tint }}-500 dark:text-{{ tint }}-400{% else %}text-slate-400 dark:text-slate-600{% endif %}" preserveAspectRatio="none">
+        <svg viewBox="0 0 100 20" class="mt-1 block h-6 w-full tallscreen:h-20 {% if active %}text-{{ tint }}-500 dark:text-{{ tint }}-400{% else %}text-slate-400 dark:text-slate-600{% endif %}" preserveAspectRatio="none">
           <polyline fill="none" stroke="currentColor" stroke-width="1.5"
                     vector-effect="non-scaling-stroke" points="{{ spark }}"/>
         </svg>

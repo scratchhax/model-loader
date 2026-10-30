@@ -15,6 +15,12 @@
       darkMode: 'class',
       theme: {
         extend: {
+          // A tall monitor: portrait AND at least lg wide. The overview is left open on a 1440x2560
+          // portrait screen, where the landscape layout ended halfway down. Phones are portrait too,
+          // and the width floor keeps this off them.
+          screens: {
+            tallscreen: { raw: '(orientation: portrait) and (min-width: 1024px)' },
+          },
           fontFamily: {
             sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
             mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
