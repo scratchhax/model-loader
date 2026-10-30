@@ -42,7 +42,9 @@
 
 {% if panels %}
 <div id="gpu-tenant-toast" class="empty:hidden mb-2"></div>
-<div class="grid gap-4 {% if panels | length > 1 %}lg:grid-cols-2{% endif %}">
+{# On a tall portrait monitor the cards stack, each full width with a chart three times the height:
+   side by side they left half the screen empty below the inventory. #}
+<div class="grid gap-4 {% if panels | length > 1 %}lg:grid-cols-2 tallscreen:grid-cols-1{% endif %}">
   {% for p in panels %}
   {% set c = p.card %}
   {% set i = c.index %}
@@ -73,7 +75,7 @@
 
     <div class="mt-3 flex items-center gap-5">
       {# ---- ring gauge: util on the inner arc, VRAM by tenant around the outside ---- #}
-      <div class="relative h-32 w-32 shrink-0"
+      <div class="relative h-32 w-32 shrink-0 tallscreen:h-44 tallscreen:w-44"
            title="inner arc: {{ '%.0f' % c.util_pct }}% util · outer ring: {{ '%.1f' % c.vram_used_gb }} of {{ '%.0f' % c.vram_total_gb }} GB VRAM, by tenant">
         <svg viewBox="0 0 120 120" class="h-full w-full -rotate-90">
           <circle cx="60" cy="60" r="52" fill="none" stroke-width="9" class="stroke-slate-200 dark:stroke-slate-800/80"/>
@@ -90,7 +92,7 @@
                   class="stroke-emerald-500 dark:stroke-emerald-400 transition-all duration-700 ease-out drop-shadow-[0_0_5px_rgba(52,211,153,0.75)] {% if util < 0.5 %}opacity-0{% endif %}"/>
         </svg>
         <div class="absolute inset-0 flex flex-col items-center justify-center">
-          <span class="font-mono text-2xl font-semibold leading-none tabular-nums text-slate-900 dark:text-white">{{ '%.0f' % c.util_pct }}<span class="text-xs font-normal text-slate-500">%</span></span>
+          <span class="font-mono text-2xl font-semibold leading-none tabular-nums text-slate-900 dark:text-white tallscreen:text-4xl">{{ '%.0f' % c.util_pct }}<span class="text-xs font-normal text-slate-500">%</span></span>
           <span class="mt-1 text-[9px] uppercase tracking-[0.14em] text-slate-500">util</span>
           <span class="mt-1 font-mono text-[10px] tabular-nums {% if hot %}text-amber-600 dark:text-amber-300{% else %}text-slate-500 dark:text-slate-400{% endif %}">{{ '%.1f' % c.vram_used_gb }}/{{ '%.0f' % c.vram_total_gb }} GB</span>
         </div>
@@ -154,7 +156,7 @@
         <span class="shrink-0 tabular-nums">{% if sp.span_s %}last {% if sp.span_s >= 60 %}{{ sp.span_s // 60 }} min{% else %}{{ sp.span_s }} s{% endif %}{% endif %}</span>
       </div>
       {% if sp.card %}
-      <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="mt-1.5 block h-20 w-full overflow-visible" role="img"
+      <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="mt-1.5 block h-20 w-full overflow-visible tallscreen:h-60" role="img"
            aria-label="compute share by tenant over the last {{ sp.span_s }} seconds">
         <defs>
           {% for ln in sp.lines %}
@@ -179,7 +181,7 @@
       <div class="-mt-12 mb-6 text-center text-[10px] text-slate-500">nothing ran on this card in this window</div>
       {% endif %}
       {% else %}
-      <div class="mt-1.5 flex h-20 items-center justify-center text-[10px] text-slate-500">collecting…</div>
+      <div class="mt-1.5 flex h-20 items-center justify-center text-[10px] text-slate-500 tallscreen:h-60">collecting…</div>
       {% endif %}
     </div>
 

@@ -20,6 +20,10 @@
 
   From lg up it wraps instead, and at lg-to-xl the two curves are dropped: with a disk per host
   filesystem the strip needs ~1,090px, and a 1,024px window wrapped the disks onto a second row.
+
+  On a tall portrait screen (`tallscreen`, base.html) it is a grid instead: power and heat share
+  the first row with wide curves, the rings take a fifth each below. The owner's portrait monitor
+  renders ~960px wide at 150% scaling, where the one-row phone layout cut the strip off at the right.
 #}
 {% set warn = p.wall_w >= power_warn_w and p.wall_w < power_crit_w %}
 {% set crit = p.wall_w >= power_crit_w %}
@@ -31,8 +35,8 @@
 {% macro value_tone(crit, warn) -%}
   {%- if crit %}text-red-600 dark:text-red-300{% elif warn %}text-amber-600 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif -%}
 {%- endmacro %}
-{% macro cell(id, crit, warn) -%}
-  id="{{ id }}" class="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 transition-colors duration-700 ease-out {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
+{% macro cell(id, crit, warn, span='tallscreen:col-span-2') -%}
+  id="{{ id }}" class="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 transition-colors duration-700 ease-out {{ span }} {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
 {%- endmacro %}
 {% macro mini_ring(id, pct, color) -%}
 <div class="relative h-9 w-9 shrink-0">
@@ -43,10 +47,10 @@
 {% set tc = tone(tcrit, twarn, 'text-sky-500 dark:text-sky-400') %}
 {% set swap_pct = (100.0 * host.swap_used / host.swap_total) if host.swap_total > 0 else 0 %}
 
-<div class="flex flex-nowrap items-center justify-between gap-x-3 gap-y-1 overflow-x-auto rounded-2xl [scrollbar-width:none] lg:flex-wrap lg:overflow-visible border border-slate-200 bg-white/90 px-3 py-1.5 text-slate-800 shadow-[0_8px_24px_-16px_rgba(0,0,0,0.5)] backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 dark:text-slate-200">
+<div class="flex flex-nowrap items-center justify-between gap-x-3 gap-y-1 overflow-x-auto rounded-2xl [scrollbar-width:none] lg:flex-wrap lg:overflow-visible tallscreen:grid tallscreen:grid-cols-10 tallscreen:gap-x-2 tallscreen:overflow-visible border border-slate-200 bg-white/90 px-3 py-1.5 text-slate-800 shadow-[0_8px_24px_-16px_rgba(0,0,0,0.5)] backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 dark:text-slate-200">
 
   {# ---- power ---- #}
-  <div {{ cell('bar-power', crit, warn) }}
+  <div {{ cell('bar-power', crit, warn, 'tallscreen:col-span-5') }}
        title="{{ '%.0f' % p.measured_w }} W measured ({{ '%.0f' % p.gpu_w }} W GPUs{% if p.cpu_w is not none %} + {{ '%.0f' % p.cpu_w }} W CPU{% endif %}) plus a {{ '%.0f' % p.baseline_w }} W allowance for board, RAM, fans and drives, divided by {{ '%.0f' % (p.psu_efficiency * 100) }}% PSU efficiency{% if p.gpu_src == 'backends' %} - GPU watts are one backend's own view; a card no backend was given is missing{% endif %}{% if not p.host_ok %} - CPU power is UNAVAILABLE, host-sensors.service is not publishing{% endif %}. The line is scaled to the {{ power_crit_w | int }} W limit.">
     <span class="{{ pc }}">{{ icon('zap', 14) }}</span>
     <div>
@@ -55,11 +59,11 @@
       </div>
       <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }}{% if not p.host_ok %} · <span class="text-amber-600 dark:text-amber-400">no CPU data</span>{% endif %}</div>
     </div>
-    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32 tallscreen:block tallscreen:w-auto tallscreen:min-w-0 tallscreen:flex-1">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
   </div>
 
   {# ---- heat ---- #}
-  <div {{ cell('bar-temp', tcrit, twarn) }}
+  <div {{ cell('bar-temp', tcrit, twarn, 'tallscreen:col-span-5') }}
        title="hottest sensor: {{ p.hottest_label or '—' }}. GPU {{ '%.0f' % p.gpu_temp_max_c if p.gpu_temp_max_c else '—' }} · CPU {{ '%.0f' % p.cpu_temp_c if p.cpu_temp_c else '—' }} · NVMe {{ '%.0f' % p.nvme_temp_max_c if p.nvme_temp_max_c else '—' }} °C. Warn {{ temp_warn_c | int }}, critical {{ temp_crit_c | int }}; the line is scaled to critical.">
     <span class="{{ tc }}">{{ icon('thermometer', 14) }}</span>
     <div>
@@ -68,10 +72,10 @@
       </div>
       <div class="mt-0.5 font-mono text-[10px] text-slate-500">{{ p.hottest_label or 'hottest' }}</div>
     </div>
-    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
+    <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32 tallscreen:block tallscreen:w-auto tallscreen:min-w-0 tallscreen:flex-1">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
   </div>
 
-  <span class="hidden h-7 w-px bg-slate-200 dark:bg-slate-800 lg:block" aria-hidden="true"></span>
+  <span class="hidden h-7 w-px bg-slate-200 dark:bg-slate-800 lg:block tallscreen:hidden" aria-hidden="true"></span>
 
   {# ---- CPU ---- #}
   <div {{ cell('bar-load', host.load_crit, host.load_warn) }}
@@ -136,7 +140,7 @@
      because that is the case that trips the UPS; amber when it is merely different. #}
   {% if gpu_cap and gpu_cap.off %}
   {% set over = gpu_cap.off | selectattr('cap_w', 'gt', gpu_cap.want) | list %}
-  <div class="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-snug
+  <div class="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-snug tallscreen:col-span-10
               {% if over %}bg-red-500/15 text-red-700 dark:text-red-300{% else %}bg-amber-500/15 text-amber-700 dark:text-amber-300{% endif %}"
        title="amd-power-cap.service applies the cap at boot and whenever it is changed in the alert settings. On the host: systemctl status amd-power-cap; journalctl -t amd-power-cap -b">
     {{ icon('alert-triangle', 12) }}
@@ -145,6 +149,6 @@
       set to {{ gpu_cap.want }} W</span>
   </div>
   {% elif gpu_cap and gpu_cap.settling %}
-  <div class="px-2 text-[10px] text-slate-500">applying the {{ gpu_cap.want }} W GPU cap…</div>
+  <div class="px-2 text-[10px] text-slate-500 tallscreen:col-span-10">applying the {{ gpu_cap.want }} W GPU cap…</div>
   {% endif %}
 </div>
