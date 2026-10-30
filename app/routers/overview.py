@@ -672,9 +672,37 @@ async def cards_partial(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("_cards.html", ctx)
 
 
+# The models folder's census for the inventory panel (GGUF count, disk free). It walks and sizes
+# every file, which is milliseconds on a quiet box and an unknown on one where an engine is
+# cold-loading 80+ GB off the same array - and it ran ON the event loop, where a stall holds up
+# every poll on the page too. Now in a thread, and cached: the counts move on a download, not a
+# poll.
+_MODELS_SNAP_TTL_S = 30.0
+_models_snap: tuple[float, object] | None = None
+
+
+def _models_snapshot_cached():
+    global _models_snap
+    if _models_snap and time.time() - _models_snap[0] < _MODELS_SNAP_TTL_S:
+        return _models_snap[1]
+    snap = services.snapshot_models_dir()
+    _models_snap = (time.time(), snap)
+    return snap
+
+
+def _box_contexts() -> dict:
+    """The box strip's and the alert settings' contexts, for the first paint. In a thread: they
+    read /proc and statvfs and docker-exec into Strata for its pinned arena, and that exec is
+    exactly the call that can hang while the engine is mid-load."""
+    out = _power_context()
+    out.update(_host_stats_context())
+    out.update(_power_settings_context())
+    return out
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
-    snap = services.snapshot_models_dir()
+    snap = await asyncio.to_thread(_models_snapshot_cached)
     backends = await services.snapshot_llama_backends()
     # What downloaded last does not tell you anything about what the box is doing now, so the
     # list is gone from this page; only a download still in flight is worth a line.
@@ -686,9 +714,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     ctx.update(await asyncio.to_thread(_cards_context, await _llm_activity()))
     ctx["parked_engines"] = {services.engine_for(b.name) for b in backends
                              if getattr(b, "unloaded_model", None)}
-    ctx.update(_power_context())
-    ctx.update(_host_stats_context())
-    ctx.update(_power_settings_context())
+    ctx.update(await asyncio.to_thread(_box_contexts))
     return templates.TemplateResponse("dashboard.html", ctx)
 
 

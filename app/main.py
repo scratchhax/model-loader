@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -88,6 +89,24 @@ async def _same_site_only(request: Request, call_next):
                                 content={"detail": f"refused: this request came from {why}, "
                                                    f"not from Model Loader"})
     return await call_next(request)
+
+
+# A page that is slow while an engine loads cannot be diagnosed after the fact: by the time anyone
+# looks, the load is over and every route answers in milliseconds (2026-10-30, a DeepSeek -> Qwen
+# switch with a 7.5-minute cold load). So any request over this is written to the log with its
+# path and time, which is where the next slow load will say what it was waiting on.
+_SLOW_REQUEST_S = 1.0
+
+
+@app.middleware("http")
+async def _log_slow_requests(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    took = time.perf_counter() - t0
+    if took >= _SLOW_REQUEST_S:
+        print(f"model-loader: slow request {request.method} {request.url.path} {took:.2f}s "
+              f"-> {response.status_code}", flush=True)
+    return response
 
 
 @app.on_event("startup")
