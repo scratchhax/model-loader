@@ -639,7 +639,25 @@ def set_container_running(name: str, start: bool) -> tuple[bool, str]:
         # StopTimeout, so a hardcoded value here would ignore whatever the service declared in
         # compose. Each service knows its own shutdown cost (comfyui's bash PID 1 never passes
         # the signal on, so it always waits out its grace period; compose sets that to 5 s).
-        c.stop()
+        try:
+            c.stop()
+        except (DockerException, OSError) as e:
+            # docker-py gives up reading the stop call after ~70 s, while the daemon keeps
+            # stopping: a container granted longer (Strata and strata-ds 120 s, glados' comfy
+            # 120 s) made the engine switch report "could not stop" and start nothing, then
+            # exit anyway a minute later (2026-10-30, glados). A timed-out stop is not a
+            # refused one: watch it out to the container's own grace plus a margin.
+            if "timed out" not in str(e).lower():
+                raise
+            grace = int((c.attrs.get("Config") or {}).get("StopTimeout") or 10)
+            deadline = time.time() + grace + 30
+            while True:
+                c.reload()
+                if c.status != "running":
+                    break
+                if time.time() >= deadline:
+                    return False, f"{name} still running {grace + 30} s after the stop request"
+                time.sleep(2.0)
         return True, f"{name} stopped and its VRAM released"
     except (DockerException, OSError) as e:
         return False, f"{name}: {e}"

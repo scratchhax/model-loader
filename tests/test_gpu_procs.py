@@ -121,3 +121,47 @@ class TestEvictedMs:
     def test_unknown_pid_is_zero(self, tmp_path, monkeypatch):
         monkeypatch.setattr(gp, "_KFD_PROC", tmp_path)
         assert gp._evicted_ms(99) == 0
+
+
+class TestSlowStop:
+    """docker-py stops reading a stop call at ~70 s while the daemon keeps stopping. A container
+    granted 120 s (Strata, strata-ds, glados' comfy) made a switch report failure, start nothing,
+    and then exit anyway (2026-10-30)."""
+
+    class _C:
+        def __init__(self, polls_until_stopped, err="UnixHTTPConnectionPool: Read timed out. (read timeout=70)"):
+            self.status, self.attrs = "running", {"Config": {"StopTimeout": 120}}
+            self._left, self._err = polls_until_stopped, err
+
+        def stop(self):
+            raise OSError(self._err)
+
+        def reload(self):
+            self._left -= 1
+            if self._left <= 0:
+                self.status = "exited"
+
+    def _wire(self, monkeypatch, c):
+        from types import SimpleNamespace
+        from app import gpu_procs
+        monkeypatch.setattr(gpu_procs, "docker_client",
+                            lambda: SimpleNamespace(containers=SimpleNamespace(get=lambda n: c)))
+        monkeypatch.setattr(gpu_procs.time, "sleep", lambda s: None)
+        return gpu_procs
+
+    def test_a_timed_out_stop_that_completes_is_a_stop(self, monkeypatch):
+        gp = self._wire(monkeypatch, self._C(polls_until_stopped=3))
+        ok, msg = gp.set_container_running("comfy", start=False)
+        assert ok and "stopped" in msg
+
+    def test_one_that_never_stops_fails_after_its_grace(self, monkeypatch):
+        gp = self._wire(monkeypatch, self._C(polls_until_stopped=10**9))
+        clock = iter(range(0, 10**6, 10))
+        monkeypatch.setattr(gp.time, "time", lambda: float(next(clock)))
+        ok, msg = gp.set_container_running("comfy", start=False)
+        assert not ok and "150 s after the stop request" in msg
+
+    def test_any_other_error_is_still_an_error(self, monkeypatch):
+        gp = self._wire(monkeypatch, self._C(polls_until_stopped=1, err="permission denied"))
+        ok, msg = gp.set_container_running("comfy", start=False)
+        assert not ok and "permission denied" in msg
