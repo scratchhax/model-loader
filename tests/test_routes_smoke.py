@@ -174,3 +174,20 @@ def test_readonly_guard_blocks_posts_but_not_gets(web, monkeypatch):
     r = web.post("/downloads/clear")
     assert r.status_code == 403 and "read-only" in r.json()["detail"]
     assert web.get("/").status_code == 200
+
+
+def test_slow_requests_are_logged(web, monkeypatch, capsys):  # noqa: F811
+    # A page that is slow mid-load cannot be diagnosed later: the next one must say what it was.
+    from app import main
+    monkeypatch.setattr(main, "_SLOW_REQUEST_S", 0.0)
+    web.get("/boxbar")
+    assert "model-loader: slow request GET /boxbar" in capsys.readouterr().out
+
+
+def test_the_models_census_is_cached(monkeypatch):
+    from app.routers import overview
+    calls = []
+    monkeypatch.setattr(overview, "_models_snap", None)
+    monkeypatch.setattr(overview.services, "snapshot_models_dir", lambda: calls.append(1) or "snap")
+    assert overview._models_snapshot_cached() == "snap" and overview._models_snapshot_cached() == "snap"
+    assert calls == [1]

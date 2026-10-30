@@ -40,6 +40,42 @@
   {%- if s < 60 %}{{ '%.0f' % s }} s{% elif s < 3600 %}{{ '%.0f' % (s / 60) }} min{% elif s < 172800 %}{{ '%.0f' % (s / 3600) }} h{% else %}{{ '%.0f' % (s / 86400) }} d{% endif -%}
 {%- endmacro %}
 
+{# ---- an engine switch in progress, said where it will be seen ---- #}
+{# The switch's phase used to be a line of small amber text at the end of the Engine row, under the
+   cards. A DeepSeek -> Qwen switch on 2026-10-30 spent ~3 min waiting for an answer to finish and
+   7.5 min cold-loading, and the page looked idle throughout. Named step, its detail, and how long
+   it has run; for 30 s after it finishes, how long it took. Same id every poll, so the colour eases. #}
+{% set sw = engine_switch or {} %}
+{% set sw_live = sw.phase and sw.phase not in ('done', '') %}
+{% set sw_done = sw.phase == 'done' and sw.t1 is number and (now - sw.t1) < 30 %}
+{% macro mmss(s) -%}{{ (s // 60) | int }}:{{ '%02d' % ((s % 60) | int) }}{%- endmacro %}
+{% if sw_live or sw_done %}
+{% set fail = sw.phase == 'failed' %}
+<div id="engine-switch-banner"
+     class="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-2xl border px-5 py-3 transition-colors duration-700 ease-out
+            {% if fail %}border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300
+            {% elif sw_done %}border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300
+            {% else %}border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300{% endif %}">
+  <span class="text-sm font-semibold">
+    {%- if sw_done %}{{ engine_label(sw.engine) }} is serving
+    {%- elif fail %}Switch to {{ engine_label(sw.engine) }} failed
+    {%- else %}Switching to {{ engine_label(sw.engine) }}{% endif -%}
+  </span>
+  <span class="text-sm">
+    {%- if sw_done %}the switch took {{ mmss(sw.t1 - sw.t0) }}
+    {%- elif sw.phase == 'unloading' %}waiting for the current answer to finish, then unloading
+    {%- elif sw.phase == 'stopping' %}stopping the engine that has the cards
+    {%- elif sw.phase == 'draining' %}waiting for the cards to free up
+    {%- elif sw.phase == 'starting' %}starting {{ engine_label(sw.engine) }}
+    {%- elif sw.phase == 'loading' %}loading the model
+    {%- elif sw.phase == 'slow' %}still loading, slower than usual
+    {%- elif not fail %}{{ sw.phase }}{% endif -%}
+  </span>
+  {% if sw.msg and not sw_done %}<span class="font-mono text-[11px] opacity-80">{{ sw.msg }}</span>{% endif %}
+  {% if sw_live and sw.t0 is number %}<span class="ml-auto font-mono text-sm tabular-nums">{{ mmss(now - sw.t0) }}</span>{% endif %}
+</div>
+{% endif %}
+
 {% if panels %}
 <div id="gpu-tenant-toast" class="empty:hidden mb-2"></div>
 {# On a tall portrait monitor the cards stack, each full width with a chart three times the height:
@@ -160,6 +196,10 @@
             {% endif %}
           </div>
           {% endfor %}
+        {% elif sw_live %}
+          {# Mid-switch nothing is "working", and "idle" was the wrong word for a card waiting on an engine. #}
+          <div class="text-base text-amber-600 dark:text-amber-300">switching to {{ engine_label(sw.engine) }}</div>
+          <div class="mt-0.5 text-[11px] text-slate-500">{{ sw.msg or sw.phase }}</div>
         {% else %}
           <div class="text-base text-slate-500 dark:text-slate-400">idle</div>
           {% if p.rows %}<div class="mt-0.5 text-[11px] text-slate-500">{{ p.rows | length }} resident, nothing running</div>{% endif %}

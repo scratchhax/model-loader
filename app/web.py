@@ -25,6 +25,7 @@ templates.env.globals["engine_tint"] = engine_tint
 templates.env.globals["curve"] = curve
 # Engines that are Strata's server (Load / Unload, the soft handover): the Qwen install and DeepSeek.
 templates.env.globals["strata_protocol"] = engine_registry.STRATA_PROTOCOL
+templates.env.globals["engine_label"] = lambda n: (engine_registry.get(n).label if engine_registry.get(n) else (n or ""))
 
 
 def _fmt_ts(v) -> str:

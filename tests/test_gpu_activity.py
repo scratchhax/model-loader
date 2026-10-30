@@ -268,6 +268,39 @@ class TestCardsContext:
         assert "<img" not in html                         # no thumbnails: they blinked on every poll
         assert "quinn-train" in html and "restore" in html
 
+    # An engine switch, said above the cards (2026-10-30: a DeepSeek -> Qwen switch spent ~3 min on
+    # an unload and 7.5 min loading, and the page looked idle throughout).
+    def _switch_html(self, monkeypatch, sw, now):
+        from app.web import templates
+        _wire(monkeypatch)
+        ctx = overview._cards_context({})
+        ctx.update(engine_switch=sw, now=now)
+        return templates.env.get_template("_cards.html").render(**ctx, parked_engines=set())
+
+    def test_a_switch_in_progress_is_named_with_its_step_and_time(self, monkeypatch):
+        html = self._switch_html(monkeypatch, {"engine": "strata", "phase": "unloading", "t0": 1000.0,
+                                               "msg": "strata-ds unloads once any answer in progress finishes"}, 1095.0)
+        assert 'id="engine-switch-banner"' in html and "Switching to Strata" in html
+        assert "waiting for the current answer to finish, then unloading" in html and "1:35" in html
+        assert "switching to Strata" in html                            # the cards say so too
+        assert 'dark:text-slate-400">idle</div>' not in html            # not the idle headline
+
+    def test_loading_and_failure(self, monkeypatch):
+        html = self._switch_html(monkeypatch, {"engine": "deepseek", "phase": "loading", "t0": 0.0,
+                                               "msg": "strata-ds up 40s, model not loaded yet"}, 455.0)
+        assert "Switching to DeepSeek" in html and "loading the model" in html and "7:35" in html
+        html = self._switch_html(monkeypatch, {"engine": "llama", "phase": "failed", "t0": 0.0,
+                                               "msg": "could not stop strata: boom"}, 10.0)
+        assert "Switch to llama.cpp failed" in html and "could not stop strata: boom" in html
+        assert "bg-red-500/10" in html
+
+    def test_a_finished_switch_says_so_briefly_then_goes(self, monkeypatch):
+        done = {"engine": "strata", "phase": "done", "t0": 1000.0, "t1": 1452.0, "msg": ""}
+        html = self._switch_html(monkeypatch, done, 1460.0)
+        assert "Strata is serving" in html and "the switch took 7:32" in html
+        assert 'id="engine-switch-banner"' not in self._switch_html(monkeypatch, done, 1500.0)
+        assert 'id="engine-switch-banner"' not in self._switch_html(monkeypatch, {}, 1500.0)
+
     def test_renders_with_nothing(self):
         e = Environment(loader=FileSystemLoader(str(TEMPLATES)))
         assert "No GPU readings yet" in e.get_template("_cards.html").render(panels=[], now=time.time())

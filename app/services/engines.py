@@ -193,12 +193,18 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
         try:
             from .. import gpu_procs
             for r in plan_unload:
+                # An unload waits for an answer in flight, and an answer can run minutes (a
+                # DeepSeek reply of 5,740 tokens held a switch for ~3 min on 2026-10-30 while the
+                # page said only "stopping"). Say so, so a wait reads as a wait.
+                _switch_state.update(phase="unloading",
+                                     msg=f"{r['name']} unloads once any answer in progress finishes")
                 ok, msg = strata_unload(r["name"])
                 if not ok:
                     _switch_state.update(phase="failed",
                                          msg=f"could not unload {r['name']}: {msg}")
                     return
             for r in plan_stop:
+                _switch_state.update(phase="stopping", msg=f"stopping {r['name']}")
                 ok, msg = gpu_procs.set_container_running(r["name"], start=False)
                 if not ok:
                     _switch_state.update(phase="failed", msg=f"could not stop {r['name']}: {msg}")
@@ -230,7 +236,7 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
                             "something outside docker is holding them")
                     return
 
-            _switch_state.update(phase="starting", msg="")
+            _switch_state.update(phase="starting", msg=f"starting {', '.join(sorted(targets))}")
             for name in sorted(targets):
                 if name in running_targets:
                     # Up but parked (the only way a target is both this engine's and already
