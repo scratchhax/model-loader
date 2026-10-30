@@ -218,6 +218,26 @@ def latest_image_version(client: httpx.Client, repo: str, flavor: str) -> str:
 
 # ------------------------------------------------------------------------------- the check
 
+_DSV41_ASSET_RE = re.compile(r"^strata-dsv41-(\d+(?:\.\d+)+)-(.+)\.tar\.gz$")
+
+
+def latest_dsv41(client: httpx.Client, repo: str, flavor: str) -> str:
+    """Upstream's newest DeepSeek engine package (strata-dsv41) for this flavor, from the release
+    assets ("linux-x86_64-hip-rx9070"). Packages ship inside Strata releases but are versioned on
+    their own (0.2.8 carries 0.1.54), and setup takes them from the feed whatever the image is."""
+    r = client.get(f"https://api.github.com/repos/{repo}/releases", params={"per_page": 10})
+    r.raise_for_status()
+    best = ""
+    for rel in r.json():
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        for a in rel.get("assets") or []:
+            m = _DSV41_ASSET_RE.match(a.get("name") or "")
+            if m and m.group(2) == flavor and (not best or _vkey(m.group(1)) > _vkey(best)):
+                best = m.group(1)
+    return best
+
+
 def check(docker, http: httpx.Client | None = None) -> dict:
     """One full check: {checked_at, engines: [row]}. Network failures land in a row's `error`."""
     own = http is None
@@ -274,10 +294,20 @@ def check(docker, http: httpx.Client | None = None) -> dict:
             except (httpx.HTTPError, ValueError, KeyError) as err:
                 row["error"] = f"{type(err).__name__}: {err}"[:200]
             rows.append(row)
+        # DeepSeek's engine package, for the pin control (deepseek_engine.py). Only where one is
+        # installed: its flavor says which package upstream would hand this card.
+        from . import deepseek_engine
+        ds_latest = ""
+        inst = deepseek_engine.installed()
+        if inst:
+            try:
+                ds_latest = latest_dsv41(http, "Niko1221/Strata", inst[0]["flavor"])
+            except (httpx.HTTPError, ValueError, KeyError):
+                ds_latest = ""
     finally:
         if own:
             http.close()
-    return {"checked_at": time.time(), "engines": rows}
+    return {"checked_at": time.time(), "engines": rows, "deepseek_engine_latest": ds_latest}
 
 
 def cached() -> dict:
