@@ -1,6 +1,7 @@
-{# Engine updates: what runs here against what upstream has. Read-only on purpose - every engine's
-   upgrade has its own checks and rollback (the runbook column), and this only says when to look.
-   While a check runs, the card re-asks every 2 s; otherwise it is static until reloaded. #}
+{# Engine updates: what runs here against what upstream has. Read-only for upgrades on purpose - every
+   engine's upgrade has its own checks and rollback (the runbook column), and this only says when to
+   look. The one control is DeepSeek's engine pin below, which upgrades nothing: it decides whether
+   the container may update ITSELF at a start. While a check runs, the card re-asks every 2 s. #}
 <div id="engine-updates"
      {% if checking %}hx-get="/updates" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}
      class="rounded-2xl border border-slate-200 bg-white px-5 py-4 text-slate-800 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200">
@@ -44,6 +45,47 @@
   {% elif not checking %}
   <p class="text-[11px] text-slate-500 dark:text-slate-400">Not checked yet.</p>
   {% endif %}
+
+  {# ---- DeepSeek's engine: pinned, or taking upstream's at each start (deepseek_engine.py) ---- #}
+  {# The one control in this card. It upgrades nothing: it decides whether the DeepSeek container's own
+     setup may swap its engine at the next start, which it did unasked on 2026-10-30 (0.1.52 -> 0.1.54)
+     and then re-tuned for ~13 min. #}
+  {% if ds and ds.installed %}
+  <div class="mt-3 border-t border-slate-100 pt-2.5 dark:border-slate-800">
+    <div class="flex items-center justify-between gap-2">
+      <span class="text-sm font-medium">DeepSeek engine</span>
+      {% if ds.pinned %}
+        <span class="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800 dark:bg-sky-500/10 dark:text-sky-300">pinned</span>
+      {% else %}
+        <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">follows upstream</span>
+      {% endif %}
+    </div>
+    <div class="mt-0.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+      {{ (ds.pinned or ds.newest).version }}{% if ds.latest and ds.latest != (ds.pinned or ds.newest).version %} · upstream {{ ds.latest }}{% elif ds.latest %} · upstream's newest{% endif %}
+    </div>
+    <div class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+      {% if ds.pinned and ds.behind %}Upstream has {{ ds.latest }}: unpin to take it at DeepSeek's next start (it re-tunes once, ~13 min).
+      {% elif ds.pinned %}Stays on {{ ds.pinned.version }}: no newer engine is fetched at a start.
+      {% elif ds.pin_missing %}<span class="text-amber-700 dark:text-amber-300">The pinned version is no longer installed; DeepSeek follows upstream until you pin again.</span>
+      {% else %}Each start takes upstream's newest engine; a new one re-tunes once (~13 min).{% endif %}
+    </div>
+    {% if ds.wired == false %}
+    <div class="mt-0.5 text-[11px] text-amber-700 dark:text-amber-300"
+         title="The pin is read by strata/entrypoint-ds.sh, which the strata-ds service has to be recreated with once.">
+      The DeepSeek container does not read this setting yet: it needs one recreate.</div>
+    {% endif %}
+    <div class="mt-1.5 flex items-center gap-2">
+      <form hx-post="/updates/deepseek-pin" hx-target="#engine-updates" hx-swap="outerHTML" class="contents">
+        <input type="hidden" name="folder" value="{% if not ds.pinned %}{{ ds.newest.folder }}{% endif %}">
+        <button class="rounded-md border border-slate-300 px-2 py-0.5 text-[11px] hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-700">
+          {% if ds.pinned %}Unpin{% else %}Pin {{ ds.newest.version }}{% endif %}</button>
+      </form>
+      <span class="text-[10px] text-slate-500">applies at DeepSeek's next start</span>
+    </div>
+    {% if ds_note %}<div class="mt-1 text-[11px] {% if ds_ok %}text-emerald-700 dark:text-emerald-300{% else %}text-red-700 dark:text-red-300{% endif %}">{{ ds_note }}</div>{% endif %}
+  </div>
+  {% endif %}
+
   <div class="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
     <span>{% if checking %}checking…{% elif checked %}checked {{ checked }}{% endif %}</span>
     <button hx-post="/updates/check" hx-target="#engine-updates" hx-swap="outerHTML"
