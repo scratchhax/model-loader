@@ -35,6 +35,9 @@
 {% macro value_tone(crit, warn) -%}
   {%- if crit %}text-red-600 dark:text-red-300{% elif warn %}text-amber-600 dark:text-amber-300{% else %}text-slate-900 dark:text-slate-100{% endif -%}
 {%- endmacro %}
+{# Each cell's text is one line per row: never wraps, and an ellipsis if a value ever outgrows a cell
+   (the title carries the full figures). In the portrait grid a ring cell is ~160px, and the RAM line
+   "ram 94% · 99 pinned" wrapped onto two. #}
 {% macro cell(id, crit, warn, span='tallscreen:col-span-2') -%}
   id="{{ id }}" class="flex min-w-0 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 transition-colors duration-700 ease-out {{ span }} {% if crit %}bg-red-500/10{% elif warn %}bg-amber-500/10{% else %}bg-transparent{% endif %}"
 {%- endmacro %}
@@ -53,11 +56,11 @@
   <div {{ cell('bar-power', crit, warn, 'tallscreen:col-span-5') }}
        title="{{ '%.0f' % p.measured_w }} W measured ({{ '%.0f' % p.gpu_w }} W GPUs{% if p.cpu_w is not none %} + {{ '%.0f' % p.cpu_w }} W CPU{% endif %}) plus a {{ '%.0f' % p.baseline_w }} W allowance for board, RAM, fans and drives, divided by {{ '%.0f' % (p.psu_efficiency * 100) }}% PSU efficiency{% if p.gpu_src == 'backends' %} - GPU watts are one backend's own view; a card no backend was given is missing{% endif %}{% if not p.host_ok %} - CPU power is UNAVAILABLE, host-sensors.service is not publishing{% endif %}. The line is scaled to the {{ power_crit_w | int }} W limit.">
     <span class="{{ pc }}">{{ icon('zap', 14) }}</span>
-    <div>
-      <div class="flex items-baseline gap-1 leading-none">
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-1 whitespace-nowrap leading-none">
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(crit, warn) }}">{{ '%.0f' % p.wall_w }}</span><span class="text-[10px] text-slate-500">W</span>
       </div>
-      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }}{% if not p.host_ok %} · <span class="text-amber-600 dark:text-amber-400">no CPU data</span>{% endif %}</div>
+      <div class="mt-0.5 truncate text-[10px] tabular-nums text-slate-500">{{ '%.0f' % (100.0 * p.wall_w / power_crit_w) if power_crit_w else 0 }}% of {{ power_crit_w | int }}{% if not p.host_ok %} · <span class="text-amber-600 dark:text-amber-400">no CPU data</span>{% endif %}</div>
     </div>
     <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32 tallscreen:block tallscreen:w-auto tallscreen:min-w-0 tallscreen:flex-1">{% if power_curve %}{{ area(power_curve, 'bar-power-line', pc, 'h-7') }}{% endif %}</div>
   </div>
@@ -66,11 +69,11 @@
   <div {{ cell('bar-temp', tcrit, twarn, 'tallscreen:col-span-5') }}
        title="hottest sensor: {{ p.hottest_label or '—' }}. GPU {{ '%.0f' % p.gpu_temp_max_c if p.gpu_temp_max_c else '—' }} · CPU {{ '%.0f' % p.cpu_temp_c if p.cpu_temp_c else '—' }} · NVMe {{ '%.0f' % p.nvme_temp_max_c if p.nvme_temp_max_c else '—' }} °C. Warn {{ temp_warn_c | int }}, critical {{ temp_crit_c | int }}; the line is scaled to critical.">
     <span class="{{ tc }}">{{ icon('thermometer', 14) }}</span>
-    <div>
-      <div class="flex items-baseline gap-1 leading-none">
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-1 whitespace-nowrap leading-none">
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(tcrit, twarn) }}">{% if p.hottest_c is not none %}{{ '%.0f' % p.hottest_c }}{% else %}—{% endif %}</span><span class="text-[10px] text-slate-500">°C</span>
       </div>
-      <div class="mt-0.5 font-mono text-[10px] text-slate-500">{{ p.hottest_label or 'hottest' }}</div>
+      <div class="mt-0.5 truncate font-mono text-[10px] text-slate-500">{{ p.hottest_label or 'hottest' }}</div>
     </div>
     <div class="hidden w-24 shrink-0 sm:block lg:hidden xl:block 2xl:w-32 tallscreen:block tallscreen:w-auto tallscreen:min-w-0 tallscreen:flex-1">{% if temp_curve %}{{ area(temp_curve, 'bar-temp-line', tc, 'h-7') }}{% endif %}</div>
   </div>
@@ -81,11 +84,11 @@
   <div {{ cell('bar-load', host.load_crit, host.load_warn) }}
        title="load {{ '%.2f' % host.load.load1 }} · {{ '%.2f' % host.load.load5 }} · {{ '%.2f' % host.load.load15 }} (1, 5, 15 min) against {{ host.load.cores }} cores">
     {{ mini_ring('bar-load-ring', host.load.pct, tone(host.load_crit, host.load_warn, 'text-emerald-500 dark:text-emerald-400')) }}
-    <div>
-      <div class="flex items-baseline gap-1 leading-none">
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-1 whitespace-nowrap leading-none">
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(host.load_crit, host.load_warn) }}">{{ '%.0f' % host.load.pct if host.load.ok else '—' }}</span><span class="text-[10px] text-slate-500">% cpu</span>
       </div>
-      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">load {{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</div>
+      <div class="mt-0.5 truncate text-[10px] tabular-nums text-slate-500">load {{ '%.2f' % host.load.load1 if host.load.ok else '—' }}</div>
     </div>
   </div>
 
@@ -93,11 +96,11 @@
   <div {{ cell('bar-ram', host.ram_crit, host.ram_warn) }}
        title="{{ '%.0f' % host.ram_avail }} GB available of {{ '%.0f' % host.ram_total }} GB{% if host.arena > 0 %}, {{ '%.0f' % host.arena }} GB pinned by Strata's expert arena (not reclaimable){% endif %}">
     {{ mini_ring('bar-ram-ring', host.ram_used_pct, tone(host.ram_crit, host.ram_warn, 'text-sky-500 dark:text-sky-400')) }}
-    <div>
-      <div class="flex items-baseline gap-1 leading-none">
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-1 whitespace-nowrap leading-none">
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(host.ram_crit, host.ram_warn) }}">{{ '%.0f' % host.ram_avail }}</span><span class="text-[10px] text-slate-500">GB free</span>
       </div>
-      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">ram {{ '%.0f' % host.ram_used_pct }}%{% if host.arena > 0 %} · {{ '%.0f' % host.arena }} pinned{% endif %}</div>
+      <div class="mt-0.5 truncate text-[10px] tabular-nums text-slate-500">ram {{ '%.0f' % host.ram_used_pct }}%{% if host.arena > 0 %} · {{ '%.0f' % host.arena }} pinned{% endif %}</div>
     </div>
   </div>
 
@@ -105,15 +108,15 @@
   <div {{ cell('bar-swap', false, host.swap_warn) }}
        title="{% if host.swap_total > 0 %}{{ '%.1f' % host.swap_used }} of {{ '%.0f' % host.swap_total }} GB swap in use{% else %}No swap: a model sized past available RAM is an OOM kill, not a slow run{% endif %}">
     {{ mini_ring('bar-swap-ring', swap_pct, tone(false, host.swap_warn, 'text-violet-500 dark:text-violet-400')) }}
-    <div>
-      <div class="flex items-baseline gap-1 leading-none">
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-1 whitespace-nowrap leading-none">
         {% if host.swap_total > 0 %}
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(false, host.swap_warn) }}">{{ '%.1f' % host.swap_used }}</span><span class="text-[10px] text-slate-500">GB</span>
         {% else %}
         <span class="font-mono text-lg font-semibold text-slate-900 dark:text-slate-100">none</span>
         {% endif %}
       </div>
-      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">swap{% if host.swap_total > 0 %} {{ '%.0f' % swap_pct }}%{% endif %}</div>
+      <div class="mt-0.5 truncate text-[10px] tabular-nums text-slate-500">swap{% if host.swap_total > 0 %} {{ '%.0f' % swap_pct }}%{% endif %}</div>
     </div>
   </div>
 
@@ -123,15 +126,15 @@
   <div {{ cell('bar-disk-' ~ loop.index0, d.crit, d.warn) }}
        title="{{ d.label }}: {{ '%.0f' % d.free }} GB free of {{ '%.0f' % d.total }} GB. Seen in the container at {{ d.paths | join(', ') }}">
     {{ mini_ring('bar-disk-ring-' ~ loop.index0, d.used_pct, tone(d.crit, d.warn, 'text-indigo-500 dark:text-indigo-400')) }}
-    <div>
-      <div class="flex items-baseline gap-1 leading-none">
+    <div class="min-w-0">
+      <div class="flex items-baseline gap-1 whitespace-nowrap leading-none">
         {% if d.free >= 1000 %}
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(d.crit, d.warn) }}">{{ '%.1f' % (d.free / 1024) }}</span><span class="text-[10px] text-slate-500">TB free</span>
         {% else %}
         <span class="font-mono text-lg font-semibold tabular-nums {{ value_tone(d.crit, d.warn) }}">{{ '%.0f' % d.free }}</span><span class="text-[10px] text-slate-500">GB free</span>
         {% endif %}
       </div>
-      <div class="mt-0.5 text-[10px] tabular-nums text-slate-500">{{ d.label }} {{ '%.0f' % d.used_pct }}%</div>
+      <div class="mt-0.5 truncate text-[10px] tabular-nums text-slate-500">{{ d.label }} {{ '%.0f' % d.used_pct }}%</div>
     </div>
   </div>
   {% endfor %}
