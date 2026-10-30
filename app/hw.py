@@ -1328,14 +1328,16 @@ def strata_arena_gb() -> float:
             from . import engine_registry
             running = [c for e in engine_registry.STRATA_PROTOCOL
                        for c in client.containers.list(filters={"label": f"ai-lab.engine={e}"})]
+            # The largest, not the first: a switch with "unload instead of stop" leaves the
+            # displaced one RUNNING but parked (near 0 GB), and taking whichever answered first
+            # reported the parked Qwen's 0 while DeepSeek pinned ~100 GB (2026-10-30).
             for c in running:
                 r = c.exec_run(
                     timed_shell("awk '/^anon /{print $2; exit} /^rss /{print $2; exit}' "
                                 "/sys/fs/cgroup/memory.stat 2>/dev/null"),
                     demux=False)
                 if r.exit_code == 0 and r.output:
-                    gb = int(r.output.decode(errors="replace").strip() or 0) / 1024 ** 3
-                    break
+                    gb = max(gb, int(r.output.decode(errors="replace").strip() or 0) / 1024 ** 3)
         except (DockerException, ValueError, AttributeError):
             gb = 0.0
     _strata_arena_cache = (now, round(gb, 1))
