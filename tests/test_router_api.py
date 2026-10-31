@@ -443,3 +443,42 @@ class TestRetention:
         out = ra.compact(now)
         assert out["raw_deleted"] == 1
         assert ra.totals(0)["requests"] == 0
+
+
+# ------------------------------------------------------------------ swap_progress
+
+class TestSwapProgress:
+    """A request that triggered a switch waits while the switch moves and fails only when it
+    has stopped. 2026-10-30: a soft park's "unloading" phase was not in _LIVE_PHASES, so a chat
+    asking for Qwen was told "nothing is switching" while DeepSeek parked and Qwen loaded."""
+
+    @staticmethod
+    def _progress(monkeypatch, state):
+        async def unresolved(asked):
+            raise ra.Unresolved("strata is up but its engine is not loaded")
+
+        async def fake_state():
+            return state
+
+        monkeypatch.setattr(ra, "resolve", unresolved)
+        monkeypatch.setattr(ra, "switch_state", fake_state)
+        return run(ra.swap_progress("strata", time.time() + 600)())
+
+    def test_every_phase_the_app_writes_is_live_or_terminal(self):
+        import pathlib, re
+        app = pathlib.Path(ra.__file__).parent
+        written = {m for f in app.rglob("*.py")
+                   for m in re.findall(r'phase="([a-z]+)"', f.read_text(encoding="utf-8"))}
+        terminal = {"done", "failed", "slow"}
+        assert "unloading" in written
+        assert written - terminal <= set(ra._LIVE_PHASES), written - terminal - set(ra._LIVE_PHASES)
+
+    def test_unloading_waits_and_says_so(self, monkeypatch):
+        status, line = self._progress(monkeypatch, {"engine": "strata", "phase": "unloading",
+                                                    "unloaded": ["strata-ds"]})
+        assert status == "waiting"
+        assert "Parking strata-ds" in line and "strata" in line
+
+    def test_idle_still_fails_fast(self, monkeypatch):
+        status, line = self._progress(monkeypatch, {})
+        assert status == "failed" and line.startswith("Nothing is switching")
