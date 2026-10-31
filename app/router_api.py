@@ -983,7 +983,12 @@ async def switch_state() -> dict:
         return {}
 
 
-_LIVE_PHASES = ("stopping", "draining", "starting", "loading")
+# Every phase services.engines writes while a switch is still moving. Miss one and a request that
+# triggered the switch is told "nothing is switching" mid-switch: "unloading" (a soft park waiting
+# out an answer in flight) was missed on 2026-10-30, and a chat that asked for Qwen got that failure
+# while DeepSeek parked and Qwen loaded behind it. tests/test_router_api.py checks this list
+# against the phases the app actually writes.
+_LIVE_PHASES = ("unloading", "stopping", "draining", "starting", "loading")
 
 
 async def swap_in_flight_for(asked: str) -> bool:

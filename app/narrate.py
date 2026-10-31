@@ -168,6 +168,9 @@ def phase_line(state: dict) -> str:
     msg = str(state.get("msg") or "").strip()
     engine = str(state.get("engine") or "the engine")
 
+    if phase == "unloading":
+        who = ", ".join(state.get("unloaded") or ()) or "the current engine"
+        return f"Parking {who} to free the cards for {engine}, once any answer in progress finishes."
     if phase == "stopping":
         giving = list(state.get("unloaded") or ()) or list(state.get("stopped") or ())
         who = ", ".join(giving) if giving else "the current engine"
