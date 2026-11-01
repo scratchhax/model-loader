@@ -65,6 +65,14 @@ class TestCards:
         assert "duration-1000 ease-linear" in arc and "emerald" not in arc
         assert 'id="gpu-util-num-0" data-count>37<' in html
 
+    def test_the_legend_shows_the_heat_line_not_a_dashed_one(self, monkeypatch):
+        _wire(monkeypatch)
+        monkeypatch.setattr(overview.gpu_activity, "sparklines", lambda _s: {
+            "lines": [], "card": {"line": "M0,0", "area": "", "now": 0, "peak": 0}, "span_s": 60})
+        html = templates.env.get_template("_cards.html").render(**overview._cards_context(LLM), parked_engines=set())
+        legend = html.split("card util")[0][-300:]
+        assert heat(1) in legend and "border-dashed" not in legend
+
     def test_vram_segments_move_linearly_too(self, monkeypatch):
         html = _cards_html(monkeypatch)
         seg = html.split('id="gpu-ring-0-llama-gpu0"')[1].split(">")[0]
