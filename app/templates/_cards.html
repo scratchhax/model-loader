@@ -220,7 +220,7 @@
       {% for ln in sp.lines %}
       <span class="inline-flex items-center gap-1" title="{{ ln.label }}: {{ ln.now }}% now, peak {{ ln.peak }}%"><span class="h-0.5 w-3 rounded-full {{ kind_bg(ln.kind) }}"></span><span class="font-mono">{{ ln.label }}</span> <span class="tabular-nums">peak {{ ln.peak }}%</span></span>
       {% endfor %}
-      {% if sp.card %}<span class="inline-flex items-center gap-1"><span class="w-3 border-t border-dashed border-slate-400 dark:border-slate-500"></span>card util</span>{% endif %}
+      {% if sp.card %}<span class="inline-flex items-center gap-1"><span class="h-0.5 w-3 rounded-full" style="background: linear-gradient(90deg, {{ heat(0.2) }}, {{ heat(1) }})"></span>card util</span>{% endif %}
       {% if not sp.card %}<span>collecting…</span>{% elif not sp.lines %}<span>nothing ran on this card in this window</span>{% endif %}
     </div>
 
