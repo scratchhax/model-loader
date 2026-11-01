@@ -121,6 +121,17 @@ A models directory grows monotonically and a flat alphabetical list stops being 
 
 Everything that is identical on every row has been taken off the row. The per-backend **offered on** toggles, the rating editor and the path on disk are one model at a time by nature, so they live in a drawer behind the caret rather than on the line — which is what turned a page where eleven models ran to 2,100px into one that fits on a screen.
 
+### Reading it from somewhere else
+
+Everything the pages show is also served as read-only JSON under **`/api/v1`**, for a wall dashboard, Home Assistant or a script. `GET /api/v1` lists the endpoints. The ones worth knowing:
+
+- **`/api/v1/status`**: the whole Overview in one call: the loaded model and its throughput, every card and who is on it, power, heat, RAM, disks and the engine switch.
+- **`/api/v1/series`**: the histories behind the sparklines as raw `[timestamp, value]` pairs: tok/s and context per backend, compute per card and tenant, power, load and RAM.
+- **`/api/v1/router?range=7d`**: the Router tab's totals, activity buckets, conversations and recent requests.
+- `/containers`, `/downloads`, `/models`, `/benchmarks`, `/updates` and `/maya`: those pages' figures.
+
+Each endpoint is built from the same code its page renders from, so the two cannot disagree, and nothing is probed that the page would not probe: polling `/status` costs what an open Overview tab costs. Pre-drawn chart shapes are left out (the numbers behind them are in `/series`), and so is anything that could carry a secret, such as Open WebUI's connection list or a download's URL. Calling it changes nothing on the box.
+
 ## Security posture
 
 **This is a personal, LAN-only tool. There is no authentication.** It mounts `/var/run/docker.sock`, which is root-equivalent on the host — anyone who can reach the port can `docker exec` into any container. Do not expose port 8090 to the internet. Do not run this on a shared machine. If you need multi-user, add a reverse-proxy with auth in front, and understand that authenticated users still get docker-socket-level power.

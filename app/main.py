@@ -10,6 +10,7 @@ from . import db, gpu_activity, hw, services
 from . import strata as strata_engine
 from . import router_api
 from .config import settings
+from .routers import api as api_router
 from .routers import badges as badges_router
 from .routers import benchmark as benchmark_router
 from .routers import config as config_router
@@ -226,3 +227,8 @@ app.include_router(strata_router.router)
 # ---------- Router ----------
 
 app.include_router(router_tab_router.router)
+
+
+# ---------- JSON API (read-only, for dashboards and scripts) ----------
+
+app.include_router(api_router.router)
