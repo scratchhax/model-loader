@@ -1,0 +1,299 @@
+{#
+  LIVE MOTION for the overview. The panels are server-rendered and swapped by HTMX every second
+  (every half second for the hero), which on its own moves things in steps: a chart redrawn by
+  the server shifts left once per poll, and an eased transition that finishes before the next
+  poll leaves the screen still for the rest of the interval - move, pause, move.
+
+  The rule here is the owner's: if readings arrive every second, a change takes one second, at a
+  steady speed, so motion from one reading runs straight into the next.
+
+    * Time charts are drawn in the browser, every frame, from /api/v1/series (polled each
+      second). Their element is hx-preserve, so the panel swap around it leaves it alone. Each
+      line ends at "now"; its leading edge travels to every newest reading over one interval.
+    * Numbers marked data-count count from the old value to the new one over their panel's poll
+      interval, hooked on HTMX's swap.
+    * Rings and bars move through CSS transitions whose duration is their panel's poll interval,
+      linear (in the templates, not here).
+
+  Colour: a tenant's KIND colour says who; the HEAT ramp (slate, indigo, violet, orange) says how
+  hard something works against its ceiling. Charts pinned to a ceiling draw in heat. The same
+  ramp is app.web.heat() on the server, for the ring arcs.
+
+  The frame loop also runs off a timer when animation frames stall, which some kiosk browsers do
+  to pages they think are in the background; a frozen chart is worse than a slower one.
+#}
+<script>
+(() => {
+  "use strict";
+  const SERIES_URL = "/api/v1/series";
+  const SERIES_MS = 1000;
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const HEAT = {{ heat_stops | tojson }};
+  const KINDS = { llm: "text-sky-500", image: "text-fuchsia-500", audio: "text-lime-400", other: "text-slate-400 dark:text-slate-500" };
+
+  function heatColor(f) {
+    f = Math.min(1, Math.max(0, f || 0));
+    for (let i = 1; i < HEAT.length; i++) {
+      const [f1, c1] = HEAT[i];
+      if (f <= f1) {
+        const [f0, c0] = HEAT[i - 1];
+        const t = (f - f0) / (f1 - f0);
+        return `rgb(${c0.map((v, j) => Math.round(v + (c1[j] - v) * t)).join(",")})`;
+      }
+    }
+    return `rgb(${HEAT[HEAT.length - 1][1].join(",")})`;
+  }
+
+  // Catmull-Rom through the points, control points clamped so a curve never dips under its floor.
+  function smooth(pts, lo, hi) {
+    if (pts.length < 2) return "";
+    const c = (v) => Math.min(hi, Math.max(lo, v));
+    let d = `M${pts[0][0].toFixed(2)},${pts[0][1].toFixed(2)}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+      const c1 = [p1[0] + (p2[0] - p0[0]) / 6, c(p1[1] + (p2[1] - p0[1]) / 6)];
+      const c2 = [p2[0] - (p3[0] - p1[0]) / 6, c(p2[1] - (p3[1] - p1[1]) / 6)];
+      d += ` C${c1[0].toFixed(2)},${c1[1].toFixed(2)} ${c2[0].toFixed(2)},${c2[1].toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+    }
+    return d;
+  }
+
+  // The window drawn as one point per `width` seconds: the samplers run at 1 Hz, so on short
+  // windows every reading is kept, and a long window (the cards' 15 minutes) averages a few.
+  function bucketize(series, width) {
+    const sums = new Map(), counts = new Map();
+    for (const [ts, v] of series || []) {
+      if (v == null || !isFinite(v)) continue;
+      const b = Math.floor(ts / width);
+      sums.set(b, (sums.get(b) || 0) + v);
+      counts.set(b, (counts.get(b) || 0) + 1);
+    }
+    return [...sums.keys()].sort((a, b) => a - b).map((b) => [(b + 0.5) * width, sums.get(b) / counts.get(b)]);
+  }
+
+  // The box's clock, from the series' own timestamp, so a skew between it and this browser
+  // cannot shift the charts.
+  let offset = null;
+  let moveMs = SERIES_MS;
+  const clock = () => Date.now() / 1000 + (offset ?? 0);
+
+  let seq = 0;
+  class Chart {
+    constructor(el, spec) {
+      this.el = el;
+      this.spec = spec;
+      this.windowS = spec.window || 120;
+      this.width = Math.max(1, this.windowS / 300);
+      this.h = 32;
+      this.scale = null;
+      this.layers = new Map();
+      this.id = `live${++seq}`;
+      const svg = document.createElementNS(SVGNS, "svg");
+      svg.setAttribute("viewBox", `0 0 100 ${this.h}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.setAttribute("class", "block h-full w-full overflow-visible");
+      svg.setAttribute("aria-hidden", "true");
+      const grad = (id, a) => `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="${this.h}" x2="0" y2="0">${HEAT.map(([f, c]) =>
+        `<stop offset="${f}" stop-color="rgb(${c.join(",")})" stop-opacity="${a}"/>`).join("")}</linearGradient>`;
+      svg.innerHTML = `<defs>${grad(`${this.id}h`, 1)}${grad(`${this.id}hf`, 0.22)}
+        <linearGradient id="${this.id}cc" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity="0.32"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+        <line x1="0" y1="${this.h - 0.5}" x2="100" y2="${this.h - 0.5}" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+      this.svg = svg;
+      el.replaceChildren(svg);
+    }
+    // style: "heat", "current" (the element's text colour), or a kind name.
+    set(id, series, { style = "current", fill = true, width = 2 } = {}) {
+      let L = this.layers.get(id);
+      if (!L) {
+        const area = document.createElementNS(SVGNS, "path");
+        const line = document.createElementNS(SVGNS, "path");
+        for (const [k, v] of [["fill", "none"], ["stroke-width", width], ["stroke-linejoin", "round"], ["stroke-linecap", "round"], ["vector-effect", "non-scaling-stroke"]]) line.setAttribute(k, v);
+        this.svg.appendChild(area);
+        this.svg.appendChild(line);
+        L = { area, line };
+        this.layers.set(id, L);
+      }
+      if (L.style !== style) {
+        L.style = style;
+        if (style === "heat") {
+          L.line.setAttribute("stroke", `url(#${this.id}h)`); L.line.removeAttribute("class");
+          L.area.setAttribute("fill", `url(#${this.id}hf)`); L.area.removeAttribute("class");
+        } else {
+          const cls = style === "current" ? "" : (KINDS[style] || KINDS.other);
+          L.line.setAttribute("stroke", "currentColor"); L.line.setAttribute("class", cls);
+          L.area.setAttribute("fill", `url(#${this.id}cc)`); L.area.setAttribute("class", cls);
+        }
+      }
+      L.fill = fill;
+      L.pts = bucketize(series, this.width);
+      L.seen = true;
+      // The leading edge travels to each newest reading over one interval, from wherever it is
+      // drawn now, so a new level takes as long to reach as it took to arrive.
+      const last = L.pts[L.pts.length - 1];
+      if (last && (!L.head || last[0] !== L.head.ts || last[1] !== L.head.to)) {
+        const from = L.head ? this.headValue(L, performance.now()) : last[1];
+        L.head = { ts: last[0], from, to: last[1], t0: performance.now(), dur: moveMs };
+      }
+    }
+    headValue(L, t) {
+      const hd = L.head;
+      const p = Math.min(1, (t - hd.t0) / hd.dur);
+      return hd.from + (hd.to - hd.from) * p;
+    }
+    sweep() {
+      for (const [id, L] of this.layers) {
+        if (!L.seen) { L.area.remove(); L.line.remove(); this.layers.delete(id); }
+        L.seen = false;
+      }
+    }
+    frame(t) {
+      const now = clock();
+      const start = now - this.windowS;
+      const h = this.h, pad = 1.5;
+      const top = this.spec.topValue;
+      if (top) this.scale = top;
+      else {
+        let peak = 0;
+        for (const L of this.layers.values()) for (const [ts, v] of L.pts) if (ts >= start && v > peak) peak = v;
+        const target = Math.max(1e-9, peak) * 1.05;
+        this.scale = this.scale == null ? target : this.scale + (target - this.scale) * 0.08;
+      }
+      const s = this.scale || 1;
+      const y = (v) => h - pad - (Math.min(s, Math.max(0, v)) / s) * (h - 2 * pad);
+      for (const L of this.layers.values()) {
+        const pts = [];
+        const n = L.pts.length;
+        for (let i = 0; i < n - 1; i++) {
+          const p = L.pts[i];
+          if (p[0] >= start - 3 * this.width) pts.push([((p[0] - start) / this.windowS) * 100, y(p[1])]);
+        }
+        if (n && L.head && now - L.head.ts < 15) pts.push([100, y(this.headValue(L, t))]);
+        else if (n) pts.push([((L.pts[n - 1][0] - start) / this.windowS) * 100, y(L.pts[n - 1][1])]);
+        const d = smooth(pts, pad, h - pad);
+        L.line.setAttribute("d", d);
+        L.area.setAttribute("d", d && L.fill ? `${d} L${pts[pts.length - 1][0].toFixed(2)},${h} L${pts[0][0].toFixed(2)},${h} Z` : "");
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------- mounting and feeding
+
+  const charts = new Map();   // element -> Chart
+  function mount() {
+    for (const el of document.querySelectorAll("[data-live-chart]")) {
+      if (!charts.has(el)) charts.set(el, new Chart(el, JSON.parse(el.dataset.liveChart)));
+    }
+    for (const el of charts.keys()) if (!el.isConnected) charts.delete(el);
+  }
+
+  // Things a chart needs that change with the panel around it (which backend leads the hero,
+  // the tenants' kinds, a ceiling) ride on a NON-preserved element the chart names, so they are
+  // read fresh from each swap.
+  function ctxOf(spec) {
+    const el = spec.ctx && document.getElementById(spec.ctx);
+    return el ? el.dataset : {};
+  }
+
+  let data = null;
+  function feed() {
+    if (!data) return;
+    for (const ch of charts.values()) {
+      const spec = ch.spec, ctx = ctxOf(spec);
+      if (spec.src === "card") {
+        const samples = (data.cards || {})[spec.key] || [];
+        const kinds = ctx.kinds ? JSON.parse(ctx.kinds) : {};
+        spec.topValue = 100;
+        ch.set("card", samples.map((s) => [s.ts, s.util]), { style: "heat", width: 1.5 });
+        const labels = new Set();
+        for (const s of samples) for (const k of Object.keys(s.share || {})) labels.add(k);
+        for (const label of labels) {
+          ch.set(`t:${label}`, samples.map((s) => [s.ts, (s.share || {})[label] || 0]), { style: kinds[label] || "other" });
+        }
+      } else if (spec.src === "backend") {
+        const b = ((data.backends || {})[ctx.backend] || {});
+        ch.set(spec.metric, b[spec.metric] || [], { style: "current" });
+      } else if (spec.src === "power" || spec.src === "temp") {
+        spec.topValue = parseFloat(ctx.top) || null;
+        ch.set(spec.src, (data.power || {})[spec.src === "power" ? "watts" : "temp_c"] || [], { style: "heat" });
+      }
+      ch.sweep();
+    }
+  }
+
+  let lastOk = 0;
+  async function poll() {
+    try {
+      const r = await fetch(SERIES_URL, { cache: "no-store" });
+      if (r.ok) {
+        data = await r.json();
+        const off = data.ts - Date.now() / 1000;
+        offset = offset == null ? off : offset + (off - offset) * 0.2;
+        const now = performance.now();
+        if (lastOk) moveMs = Math.min(4000, Math.max(300, moveMs + ((now - lastOk) - moveMs) * 0.3));
+        lastOk = now;
+        mount();
+        feed();
+      }
+    } catch (e) { /* the next poll tries again; the charts hold their last state */ }
+    setTimeout(poll, SERIES_MS);
+  }
+
+  // ---------------------------------------------------------------------- counting numbers
+
+  // Elements with data-count and a stable id count from what was on screen to the new value over
+  // their panel's poll interval. The interval is read off the swapping element's hx-trigger.
+  const tweens = new Map();   // element -> {from, to, t0, dur, dec, sep}
+  const shown = new Map();    // id -> value on screen just before a swap
+  const parseNum = (s) => {
+    const m = String(s).replace(/,/g, "").match(/-?\d+(\.\d+)?/);
+    return m ? parseFloat(m[0]) : null;
+  };
+  function intervalOf(elt) {
+    const trig = (elt && elt.getAttribute && elt.getAttribute("hx-trigger")) || "";
+    const m = trig.match(/every\s+(\d+(?:\.\d+)?)(ms|s)/);
+    return m ? parseFloat(m[1]) * (m[2] === "s" ? 1000 : 1) : 1000;
+  }
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    for (const el of e.detail.target.querySelectorAll("[data-count][id]")) {
+      const tw = tweens.get(el);
+      shown.set(el.id, tw ? tw.at : parseNum(el.textContent));
+    }
+  });
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const dur = intervalOf(e.detail.elt);
+    for (const el of e.detail.target.querySelectorAll("[data-count][id]")) {
+      const text = el.textContent.trim();
+      const to = parseNum(text), from = shown.get(el.id);
+      if (to == null || from == null || from === to) continue;
+      const dec = (text.match(/\.(\d+)/) || [, ""])[1].length;
+      tweens.set(el, { from, to, at: from, t0: performance.now(), dur, dec, sep: text.includes(","), text });
+      el.textContent = fmt(from, dec, text.includes(","));
+    }
+    shown.clear();
+    mount();
+    feed();
+  });
+  const fmt = (v, dec, sep) => sep ? v.toLocaleString(undefined, { minimumFractionDigits: dec, maximumFractionDigits: dec }) : v.toFixed(dec);
+
+  // ---------------------------------------------------------------------- the frame loop
+
+  let lastFrame = 0;
+  function draw(t) {
+    lastFrame = t;
+    for (const [el, tw] of tweens) {
+      if (!el.isConnected) { tweens.delete(el); continue; }
+      const p = Math.min(1, (t - tw.t0) / tw.dur);
+      tw.at = tw.from + (tw.to - tw.from) * p;
+      el.textContent = p >= 1 ? tw.text : fmt(tw.at, tw.dec, tw.sep);
+      if (p >= 1) tweens.delete(el);
+    }
+    for (const ch of charts.values()) if (ch.el.isConnected) ch.frame(t);
+  }
+  function animate(t) { draw(t); requestAnimationFrame(animate); }
+  setInterval(() => { const t = performance.now(); if (t - lastFrame > 400) draw(t); }, 100);
+
+  mount();
+  requestAnimationFrame(animate);
+  poll();
+})();
+</script>

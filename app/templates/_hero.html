@@ -1,5 +1,5 @@
 {% from "_icons.html" import icon %}
-{% from "_viz.html" import area %}
+{% from "_viz.html" import area, live as live_chart %}
 {#
   NOW SERVING - the main page's hero. Polled every 2s.
 
@@ -51,6 +51,9 @@
   <div id="hero-wash-amber" aria-hidden="true"
        class="pointer-events-none absolute -inset-px bg-gradient-to-br from-amber-500/[0.12] via-transparent to-transparent transition-opacity duration-1000 ease-out {% if hero_glow == 'amber' %}opacity-100{% else %}opacity-0{% endif %}"></div>
 
+  {# Which backend the live tok/s and context charts follow (_live.html). On a swapped element,
+     so it changes the moment the hero leads with a different backend. #}
+  <span id="hero-live-ctx" data-backend="{{ hero_backend }}" hidden></span>
   <div class="relative">
     <div class="flex items-start justify-between gap-4">
       <div class="min-w-0">
@@ -179,14 +182,17 @@
       {# `spark_unit` exists because the two lines count different things: "out" is sampled on a
          timer, "in" is one point per prompt. Calling both "samples" in the peak tooltip would
          make the sparse line look like a dropped-out continuous one. #}
+      {# `live_metric` draws the line in the browser instead (_live.html): continuous, with the
+         leading edge moving between readings. `count_id` makes the value count to each reading. #}
       {% macro readout(value, unit, label, active, tint, spark, spark_peak, spark_n, tip='',
-                       spark_unit='samples') %}
+                       spark_unit='samples', live_metric=none, count_id=none) %}
       <div class="rounded-xl border px-3 py-2.5 transition-colors duration-500
                   {% if active %}border-{{ tint }}-500/40 bg-{{ tint }}-500/[0.07]{% else %}border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/60{% endif %}"
            {% if tip %}title="{{ tip }}"{% endif %}>
         <div class="flex items-baseline gap-1">
           <span class="font-mono text-2xl font-semibold tabular-nums leading-none
-                       {% if active %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-700 dark:text-slate-300{% endif %}">{{ value }}</span>
+                       {% if active %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-700 dark:text-slate-300{% endif %}"
+                {%- if count_id %} id="{{ count_id }}" data-count{% endif %}>{{ value }}</span>
           <span class="text-[10px] text-slate-500">{{ unit }}</span>
         </div>
         <div class="mt-1 flex items-baseline justify-between gap-2">
@@ -197,7 +203,9 @@
           <span class="text-[9px] tabular-nums text-slate-400 dark:text-slate-600" title="the sparkline is drawn against this peak, over the last {{ spark_n }} {{ spark_unit }}">peak {{ '%.0f' % spark_peak }}</span>
           {% endif %}
         </div>
-        {% if spark is mapping %}
+        {% if live_metric %}
+        <div class="mt-1.5">{{ live_chart('hero-live-' ~ live_metric, {'src': 'backend', 'metric': live_metric, 'window': 120, 'ctx': 'hero-live-ctx'}, 'h-8 tallscreen:h-24', ('text-' ~ tint ~ '-500 dark:text-' ~ tint ~ '-400') if active else 'text-slate-400 dark:text-slate-600') }}</div>
+        {% elif spark is mapping %}
         {# The page's one chart shape (_viz.html), so these read as the same family as the cards. #}
         <div class="mt-1.5">{{ area(spark, 'hero-' ~ (label | replace(' ', '-')), ('text-' ~ tint ~ '-500 dark:text-' ~ tint ~ '-400') if active else 'text-slate-400 dark:text-slate-600', 'h-8 tallscreen:h-24') }}</div>
         {% elif spark %}
@@ -211,7 +219,7 @@
 
       {{ readout('%.1f' % speed.gen_tps if (speed and speed.gen_tps) else '—', 'tok/s', 'out',
                  speed and speed.state == 'generating', 'emerald',
-                 tps_curve or tps_spark, tps_peak, tps_samples) }}
+                 tps_curve or tps_spark, tps_peak, tps_samples, live_metric='tps', count_id='hero-tps-num') }}
       {# The "in" line's sparkline is SPARSE where "out" above it is continuous: one point per
          completed prefill rather than one per poll. A prefill happens once per request and the
          only trustworthy figure is the one the engine reports afterwards, so sampling it on the
@@ -221,7 +229,8 @@
       {{ readout('%.0f' % speed.prefill_tps if (speed and speed.prefill_tps) else '—', 'tok/s', 'in',
                  speed and speed.state == 'prefill', 'sky',
                  pp_curve or pp_spark, pp_peak, pp_samples,
-                 'one point per prompt read, newest last - not a continuous line like out', 'prompts') }}
+                 'one point per prompt read, newest last - not a continuous line like out', 'prompts',
+                 count_id='hero-pp-num') }}
        {# Continuous like "out": a slot holds its context between requests, so every poll is a
           true reading. The peak is in TOKENS while the headline is in k, which the tooltip
           says, because rounding the peak to k would print "peak 0" on a short conversation.
@@ -239,7 +248,8 @@
        {% set ctx_tint = 'rose' if ns.fill >= 90 else ('amber' if ns.fill >= 75 else ('emerald' if ctx_live else 'slate')) %}
        {{ readout((speed.ctx_used / 1000) | round(1) if (speed and speed.ctx_used) else '—', 'k tok', 'context in use',
                   ctx_live, ctx_tint, cx_curve or cx_spark, cx_peak, cx_samples,
-                  'how full the window has been over the last few minutes; the peak is in tokens. Green while a generation is live, amber at 75% and rose at 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.') }}
+                  'how full the window has been over the last few minutes; the peak is in tokens. Green while a generation is live, amber at 75% and rose at 90% of the context budget of the live conversation closest to its ceiling - currently ' ~ ns.fill ~ '%.',
+                  live_metric='ctx', count_id='hero-ctx-num') }}
 
       {# ---- speculation's scorecard ----
          Only drawn when the RUNNING instance was spawned with a spec-type — the claim is what
@@ -344,7 +354,7 @@
     <div class="mt-3">
       <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
            title="{{ '{:,}'.format(speed.ctx_used) }} of {{ '{:,}'.format(speed.ctx_total) }} tokens in use{% if speed.ctx_cached %}, {{ '{:,}'.format(speed.ctx_cached) }} reused from cache rather than re-read{% endif %}">
-        <div class="flex h-full transition-all duration-700 ease-out">
+        <div class="flex h-full transition-all duration-500 ease-linear">
           <div class="h-full bg-slate-500" style="width: {{ cached_pct }}%"></div>
           <div class="h-full bg-sky-500" style="width: {{ (used_pct - cached_pct) if used_pct > cached_pct else 0 }}%"></div>
         </div>
@@ -436,7 +446,7 @@
         <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-{{ tint }}-{{ '400' if solo_live else '700' }}"></span>
         <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-400 dark:text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-          <div class="h-full bg-{{ tint }}-{{ '500/70' if solo_live else '600/40' }} transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
+          <div class="h-full bg-{{ tint }}-{{ '500/70' if solo_live else '600/40' }} transition-all duration-500 ease-linear" style="width: {{ s.ctx_pct }}%"></div>
         </div>
         <span class="w-24 shrink-0 text-right {{ 'text-slate-500' if solo_live else 'text-slate-400 dark:text-slate-600' }}">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-300 dark:text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>
       </div>
@@ -456,7 +466,7 @@
         <span class="w-11 shrink-0 text-right {% if s.state == 'generating' %}text-{{ tint }}-600 dark:text-{{ tint }}-300{% else %}text-slate-400 dark:text-slate-600{% endif %}">{{ '%.1f' % s.gen_tps if s.gen_tps else '—' }}</span>
         {% endif %}
         <div class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-          <div class="h-full bg-{{ tint }}-500/70 transition-all duration-700 ease-out" style="width: {{ s.ctx_pct }}%"></div>
+          <div class="h-full bg-{{ tint }}-500/70 transition-all duration-500 ease-linear" style="width: {{ s.ctx_pct }}%"></div>
         </div>
         {% if roomy %}
         <span class="w-24 shrink-0 text-right text-slate-500">{{ '{:,}'.format(s.ctx_used) }}<span class="text-slate-300 dark:text-slate-700"> / {{ '{:,}'.format(s.ctx_total) }}</span></span>

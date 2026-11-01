@@ -6,8 +6,17 @@
 
   Both take a stable id. The panels re-render every second; HTMX's settle step carries an element
   with the same id from its old attributes to its new ones, which is what lets the ring sweep and
-  the colour fade instead of jumping.
+  the colour fade instead of jumping. The sweep takes the whole second, linear, so it runs into
+  the next reading rather than finishing early and pausing.
+
+  `live` is the third shape: a time chart drawn in the browser by _live.html, every frame, from
+  /api/v1/series. It scrolls continuously and its leading edge moves between readings, which a
+  chart re-rendered by the server once a second cannot. hx-preserve keeps it across the swap.
 #}
+
+{% macro live(id, spec, h='h-12', color='') -%}
+<div id="{{ id }}" hx-preserve="true" class="block {{ h }} w-full {{ color }}" data-live-chart='{{ spec | tojson }}'></div>
+{%- endmacro %}
 
 {% macro area(cv, id, color, h='h-12') -%}
 <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="block {{ h }} w-full overflow-visible {{ color }}" aria-hidden="true">
@@ -24,12 +33,14 @@
 </svg>
 {%- endmacro %}
 
-{% macro ring(id, pct, color, size='h-16 w-16', width=10) -%}
+{# `color` is a text-* class; pass `stroke` (an rgb() from heat()) to colour by level instead. #}
+{% macro ring(id, pct, color, size='h-16 w-16', width=10, stroke=none) -%}
 {% set p = [[pct or 0, 0] | max, 100] | min %}
 <svg viewBox="0 0 120 120" class="{{ size }} shrink-0 -rotate-90" aria-hidden="true">
   <circle cx="60" cy="60" r="50" fill="none" stroke-width="{{ width }}" class="stroke-slate-200 dark:stroke-slate-800/80"/>
-  <circle id="{{ id }}" cx="60" cy="60" r="50" fill="none" stroke-width="{{ width }}" stroke-linecap="round" stroke="currentColor"
+  <circle id="{{ id }}" cx="60" cy="60" r="50" fill="none" stroke-width="{{ width }}" stroke-linecap="round"
+          {% if stroke %}style="stroke: {{ stroke }}"{% else %}stroke="currentColor"{% endif %}
           stroke-dasharray="{{ '%.2f' % (p * 3.1416) }} 314.16"
-          class="{{ color }} transition-all duration-700 ease-out {% if p < 0.5 %}opacity-0{% endif %}"/>
+          class="{{ '' if stroke else color }} transition-all duration-1000 ease-linear {% if p < 0.5 %}opacity-0{% endif %}"/>
 </svg>
 {%- endmacro %}
