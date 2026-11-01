@@ -23,6 +23,29 @@ templates.env.globals["badge_categories"] = db.BADGE_CATEGORIES
 templates.env.globals["badge_labels"] = db.BADGE_LABELS
 templates.env.globals["engine_tint"] = engine_tint
 templates.env.globals["curve"] = curve
+
+# The HEAT ramp: how hard something works against its ceiling (GPU compute, power, heat, load,
+# RAM, disk), slate when idle through indigo and violet to orange at the limit. Kept apart from
+# the tenant colours, which say WHO is on a card and never HOW MUCH. _live.html draws the charts
+# from these same stops, so a ring and the line beside it agree.
+HEAT_STOPS = ((0.0, (71, 85, 105)), (0.35, (99, 102, 241)), (0.65, (192, 132, 252)), (1.0, (251, 146, 60)))
+
+
+def heat(frac) -> str:
+    """A fraction of a ceiling (clamped to 0..1) as an rgb() colour on the heat ramp."""
+    try:
+        f = min(1.0, max(0.0, float(frac or 0.0)))
+    except (TypeError, ValueError):
+        f = 0.0
+    for (f0, c0), (f1, c1) in zip(HEAT_STOPS, HEAT_STOPS[1:]):
+        if f <= f1:
+            t = (f - f0) / (f1 - f0)
+            return "rgb(%d,%d,%d)" % tuple(round(a + (b - a) * t) for a, b in zip(c0, c1))
+    return "rgb(%d,%d,%d)" % HEAT_STOPS[-1][1]
+
+
+templates.env.globals["heat"] = heat
+templates.env.globals["heat_stops"] = [[f, list(c)] for f, c in HEAT_STOPS]
 # Engines that are Strata's server (Load / Unload, the soft handover): the Qwen install and DeepSeek.
 templates.env.globals["strata_protocol"] = engine_registry.STRATA_PROTOCOL
 templates.env.globals["engine_label"] = lambda n: (engine_registry.get(n).label if engine_registry.get(n) else (n or ""))

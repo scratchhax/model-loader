@@ -261,8 +261,9 @@ class TestCardsContext:
     def test_renders(self, monkeypatch):
         _wire(monkeypatch, comfy=ga.parse_comfy(ACTIVE, DONE))
         ctx = overview._cards_context(LLM)
-        e = Environment(loader=FileSystemLoader(str(TEMPLATES)))
-        html = e.get_template("_cards.html").render(**ctx, parked_engines=set())
+        # The app's own environment: the cards colour compute with its heat() global.
+        from app.web import templates
+        html = templates.env.get_template("_cards.html").render(**ctx, parked_engines=set())
         assert "GPU 0" in html and "GPU 1" in html
         assert "64 tok/s" in html and "rendering" in html and "2 queued" in html
         assert "<img" not in html                         # no thumbnails: they blinked on every poll

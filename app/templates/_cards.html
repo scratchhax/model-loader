@@ -115,30 +115,19 @@
        fixed 0-100%, the card's own util dashed. Faded under the left of the card, where the ring
        and the words sit, so it never fights them for contrast; full strength from about two thirds
        across, where the newest minutes are. #}
+    {# Drawn in the browser (_live.html) so it scrolls and its leading edge moves continuously:
+       the card's own compute in heat (how hard), each tenant's share in its kind colour (who).
+       The chart element is hx-preserve, so this panel's swap every second leaves it alone; the
+       tenants' kinds ride on the wrapper, which IS swapped, so they stay current. #}
     {% set sp = p.spark %}
+    {% set kinds = {} %}
+    {% for ln in sp.lines %}{% set _ = kinds.update({ln.label: ln.kind}) %}{% endfor %}
+    {% for r in p.rows %}{% set _ = kinds.update({r.label: r.kind}) %}{% endfor %}
     <div class="relative mt-3">
-      <div aria-hidden="true"
+      <div id="gpu-live-ctx-{{ i }}" data-kinds="{{ kinds | tojson | forceescape }}" aria-hidden="true"
            class="pointer-events-none absolute inset-0 [mask-image:linear-gradient(to_right,rgba(0,0,0,0.4)_0%,rgba(0,0,0,0.4)_40%,#000_68%)]">
-        {% if sp.card %}
-        <svg viewBox="0 0 100 32" preserveAspectRatio="none" class="block h-full w-full overflow-visible">
-          <defs>
-            {% for ln in sp.lines %}
-            <linearGradient id="gpu-grad-{{ i }}-{{ loop.index }}" x1="0" y1="0" x2="0" y2="1" class="{{ kind_text(ln.kind) }}">
-              <stop offset="0%" stop-color="currentColor" stop-opacity="0.35"/>
-              <stop offset="100%" stop-color="currentColor" stop-opacity="0"/>
-            </linearGradient>
-            {% endfor %}
-          </defs>
-          <line x1="0" y1="16" x2="100" y2="16" class="stroke-slate-200/70 dark:stroke-slate-800/70" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>
-          <line x1="0" y1="31.5" x2="100" y2="31.5" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" vector-effect="non-scaling-stroke"/>
-          <path d="{{ sp.card.line }}" fill="none" class="stroke-slate-400/70 dark:stroke-slate-500/70" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
-          {% for ln in sp.lines %}
-          <path d="{{ ln.area }}" fill="url(#gpu-grad-{{ i }}-{{ loop.index }})"/>
-          <path d="{{ ln.line }}" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
-                vector-effect="non-scaling-stroke" class="{{ kind_text(ln.kind) }}"/>
-          {% endfor %}
-        </svg>
-        {% endif %}
+        <div id="gpu-live-{{ i }}" hx-preserve="true" class="h-full w-full"
+             data-live-chart='{"src": "card", "key": "{{ i }}", "window": 900, "ctx": "gpu-live-ctx-{{ i }}"}'></div>
       </div>
       {% if sp.span_s %}
       <span class="absolute right-0 top-0 text-[10px] tabular-nums text-slate-500">last {% if sp.span_s >= 60 %}{{ sp.span_s // 60 }} min{% else %}{{ sp.span_s }} s{% endif %}</span>
@@ -153,17 +142,22 @@
           {% for s in p.ring %}
           <circle id="gpu-ring-{{ i }}-{{ s.label }}" cx="60" cy="60" r="52" fill="none" stroke-width="9"
                   stroke-dasharray="{{ s.dash }} {{ ring_c }}" stroke-dashoffset="{{ s.offset }}"
-                  class="{{ kind_text(s.kind) }} transition-all duration-700 ease-out {% if s.label == 'other' %}opacity-60{% endif %}" stroke="currentColor">
+                  class="{{ kind_text(s.kind) }} transition-all duration-1000 ease-linear {% if s.label == 'other' %}opacity-60{% endif %}" stroke="currentColor">
             <title>{{ s.label }}: {{ '%.2f' % s.gb }} GB</title>
           </circle>
           {% endfor %}
           <circle cx="60" cy="60" r="40" fill="none" stroke-width="6" class="stroke-slate-100 dark:stroke-slate-900"/>
+          {# Compute in HEAT, not a fixed green: the arc warms as it grows, so a card at 100%
+             reads differently from one at 4% even before the number is read. The move takes the
+             whole poll (1 s, linear), so it runs into the next reading instead of pausing. #}
+          {% set hc = heat(util / 100) %}
           <circle id="gpu-util-{{ i }}" cx="60" cy="60" r="40" fill="none" stroke-width="6" stroke-linecap="round"
                   stroke-dasharray="{{ '%.2f' % (util * 2.5133) }} 251.33"
-                  class="stroke-emerald-500 dark:stroke-emerald-400 transition-all duration-700 ease-out drop-shadow-[0_0_5px_rgba(52,211,153,0.75)] {% if util < 0.5 %}opacity-0{% endif %}"/>
+                  style="stroke: {{ hc }}; filter: drop-shadow(0 0 5px {{ hc }})"
+                  class="transition-all duration-1000 ease-linear {% if util < 0.5 %}opacity-0{% endif %}"/>
         </svg>
         <div class="absolute inset-0 flex flex-col items-center justify-center">
-          <span class="font-mono text-2xl font-semibold leading-none tabular-nums text-slate-900 dark:text-white tallscreen:text-4xl">{{ '%.0f' % c.util_pct }}<span class="text-xs font-normal text-slate-500">%</span></span>
+          <span class="font-mono text-2xl font-semibold leading-none tabular-nums text-slate-900 dark:text-white tallscreen:text-4xl"><span id="gpu-util-num-{{ i }}" data-count>{{ '%.0f' % c.util_pct }}</span><span class="text-xs font-normal text-slate-500">%</span></span>
           <span class="mt-1 text-[9px] uppercase tracking-[0.14em] text-slate-500">util</span>
           <span class="mt-1 font-mono text-[10px] tabular-nums {% if hot %}text-amber-600 dark:text-amber-300{% else %}text-slate-500 dark:text-slate-400{% endif %}">{{ '%.1f' % c.vram_used_gb }}/{{ '%.0f' % c.vram_total_gb }} GB</span>
         </div>
@@ -188,7 +182,7 @@
               </span></span>
             </div>
             {% if r.llm and r.llm.state == 'generating' %}
-            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ '%.0f' % r.llm.tps }}<span class="ml-1 text-xs font-normal text-slate-500">tok/s</span></div>
+            <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}"><span id="gpu-tps-{{ i }}-{{ r.label }}" data-count>{{ '%.0f' % r.llm.tps }}</span><span class="ml-1 text-xs font-normal text-slate-500">tok/s</span></div>
             {% elif r.llm and r.llm.state == 'prefill' %}
             <div class="mt-1 pl-[18px] font-mono text-3xl font-semibold leading-none tabular-nums {{ kind_text(r.kind) }}">{{ r.llm.prefill_pct }}<span class="ml-1 text-xs font-normal text-slate-500">% of the prompt</span></div>
             {% elif r.comfy and r.comfy.busy %}
