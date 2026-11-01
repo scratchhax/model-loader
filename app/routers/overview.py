@@ -576,14 +576,16 @@ async def _llm_activity() -> dict[str, dict]:
     return out
 
 
-def _cards_context(llm: dict[str, dict]) -> dict:
+def _cards_context(llm: dict[str, dict], strip: dict | None = None) -> dict:
     """One panel per card: who holds it, who is working on it, and what that work is.
 
     Built on _gpu_strip_context rather than beside it, so the card list, the host renumbering,
     the eject/restore rows and the engine switch all come from the one place that already gets
-    them right; this adds the per-tenant view and the timeline on top.
+    them right; this adds the per-tenant view and the timeline on top. A caller that needs the
+    strip as well (the JSON API) passes the one it built, so it is not computed twice.
     """
-    strip = _gpu_strip_context()
+    if strip is None:
+        strip = _gpu_strip_context()
     cards = strip["cards"]
     tenants = _gpu_tenants()
     ejectable = {e["name"]: e for e in strip["ejectable"]}
