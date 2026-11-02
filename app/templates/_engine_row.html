@@ -34,6 +34,10 @@
           Maya serves the model its config names; the choice is one of the
           <strong>installed models</strong>. Installing another means running Maya's setup again
           (see the maya service in docker-compose.yaml).
+        {% elif e == 'deepseek' %}
+          {# Its own container with one model in it, so the alias always means that model. #}
+          DeepSeek runs the one model its container was set up with, on Strata's DeepSeek engine;
+          asking for <span class="font-mono">deepseek</span> always gets that model.
         {% else %}
           llama.cpp loads on demand, so this takes effect on the next request asking for
           <span class="font-mono">llama</span>.
