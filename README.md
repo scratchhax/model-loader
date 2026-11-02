@@ -2,11 +2,11 @@
 
 A browser UI for managing llama.cpp GGUF models and containers on a personal homelab box. FastAPI + HTMX + Alpine + Tailwind, no build step, one Docker container.
 
-![The Model Loader overview page: estimated power at the wall and the hottest device in the box, each with a sparkline drawn against a configured ceiling; then the model being served — here Strata's qwen3.8-flash-next-unsloth-ud-iq4_xs, marked GENERATING — with four readouts: tokens/sec out with its own sparkline, tokens/sec in, how much of the 256k context window is in use, and this engine's expert cache hit rate at 99.8%, plus the host RAM line naming the expert arena Strata pins; then one panel per GPU breaking VRAM down against utilisation, temperature, power and fan speed; then "on the cards", listing every process holding a card with its compute occupancy and per-card VRAM, an Engine row for handing the GPUs between llama.cpp and a second engine, and eject/restore chips for GPU tenants that are not backends; then backend and storage summaries](docs/model_loader.png)
+![The Model Loader overview page in dark mode. Across the top: power at the wall (413 W of a 600 W ceiling) and the hottest device (an NVMe drive at 92 °C), each with a sparkline, over CPU, RAM, swap and disk rings. Then one panel per GPU, here two AI PRO R9700s, each with a utilisation ring, the engine holding it (strata, generating at 44 tok/s), its VRAM split by tenant, and fifteen minutes of compute per tenant against card utilisation. Then the stopped tenants with restore chips and the Engine row that hands the cards between deepseek, llama, maya and strata. Then Now Serving: Strata's Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_S, reading a prompt, with tok/s out and in, 142.5k tokens of context in use and a 99.9% expert cache hit rate, the context window bar, one row per slot with its own context, and the conversation cache. At the bottom, model and disk counts and the engine update checks for Strata, Maya, llama.cpp and the DeepSeek engine](docs/model_loader.png)
 
 ## What it does
 
-- **Search + download GGUFs from Hugging Face** — parallel-range downloader (8 chunks by default), live per-chunk speed sparklines, resume-on-restart, HF token stored locally for gated repos.
+- **Search + download GGUFs from Hugging Face** — one stream per file and one file at a time by default (both raisable from the Downloads page, up to 8 byte-range streams), live per-stream speed readouts, SHA-256 checked against what Hugging Face publishes, resume-on-restart, HF token stored locally for gated repos.
 - **Manage `models.ini`** (the llama-server `--models-preset` file) with a 98-field form organized into 10 tiers (Core → Reasoning → Sampling → Server → …). Tooltips on every field. Atomic writes with 10 rolling backups.
 - **Autoconfig** — reads a GGUF's metadata + probes your live GPU VRAM, then picks `ctx-size`, `n-gpu-layers`, RoPE extension, cache quant, the prompt-cache budget and reasoning-effort flags that actually fit. Handles single-GPU, multi-GPU (`-sm layer`), hybrid attention+SSM (Qwen 3.5/3.6), sliding-window attention (Gemma), and MoE (GPT-OSS, Qwen3-Coder). For MoE models that overflow VRAM it stops guessing and hands placement to llama.cpp's own `--fit`, which is both safer and measurably faster than the split we used to compute. For a model that ships a vision projector, **vision is a switch**: turn it off and autoconfig stops reserving the projector's VRAM and shows you the context that buys.
 - **Per-slot detail when a model runs `parallel > 1`** — the headline tokens/sec is the machine's, summed over the slots that are generating, and a strip underneath gives each slot its own rate and context. They diverge more than you would expect: two slots decoding 400 tokens each in the same batch held 38.5 and 27.4 tok/s for seven seconds, because speculative decoding gets the draft head accepted far more often on code than on prose. The strip's rows shrink and wrap as the slot count grows, so eight slots still fit beside the sparkline.
@@ -28,15 +28,17 @@ A browser UI for managing llama.cpp GGUF models and containers on a personal hom
 
 ### Downloading
 
-![The Downloads page: two concurrent jobs, each split into eight byte-range chunks with an individual speed readout, an aggregate throughput sparkline and an ETA](docs/downloader.png)
+![Two jobs on the Downloads page, run with streams per file raised to 8 and two files at once: each shows its byte-range streams with their own speed readout, plus an aggregate throughput sparkline and an ETA](docs/downloader.png)
 
-Each file is fetched as eight concurrent byte-range requests, so a single slow chunk doesn't gate the whole transfer — the per-chunk readouts make that visible, and they are rarely even. Jobs survive a restart of Model Loader and resume from the last completed chunk rather than starting over.
+By default a file comes down as **one stream, one file at a time**. Two files of eight streams each is sixteen connections, which is enough to knock a home connection onto its backup line, so the polite setting is the default. The two pickers at the top of the Downloads page raise either one, up to eight byte-range streams per file, and apply to jobs already queued. With more than one stream, a single slow range doesn't gate the whole transfer; the per-stream readouts make that visible, and they are rarely even.
+
+Every file is checked against the SHA-256 Hugging Face publishes for it, and the row says `sha256 ok` when it matched; a mismatch throws the file away and fails the job. Unfinished jobs are re-queued when Model Loader restarts and resume from the bytes they already have, single-stream or parallel.
 
 The two jobs above are one action: downloading a multimodal model auto-queues the matching `mmproj` projector from the same repo into the same directory, because the model is not much use without it.
 
 ### Autoconfig, in practice
 
-![The Autoconfig panel: measured generation and prompt speed from real requests with a table comparing the configurations actually run, then a concurrent-sessions picker, a vision toggle, four priority presets (Fast, Balanced, Long context, Custom) each showing context size and KV cost, a part-to-whole meter splitting the recommended configuration's VRAM into model weights, context, overhead and compute buffers with a second bar showing how much of the model would sit in host RAM, and a per-backend table marking which context sizes fit and which do not](docs/model_performance_selector.png)
+![The Autoconfig panel for Qwen3.8-Flash-Next-UD-Q3_K_XL, an 84 GB MoE: measured generation and prompt speed from real requests and a table comparing the three configurations that actually ran; a concurrent-sessions picker; a vision toggle; a warning that the recommendation is only a preview until it is filled in and saved, listing exactly what would change; four priority presets (Fast, Balanced, Long context, Custom) with context size and KV cost; a part-to-whole bar splitting VRAM into weights, context, overhead and compute buffers, with a second bar showing 40.9 GB of experts spilling to host RAM; the per-backend table of which context sizes fit; and the recommendation itself, 2 × 256K per session on llama-9700x2](docs/model_performance_selector.png)
 
 Pick how many chats will hit the model at once, then pick a priority. Each preset shows what you are trading: context size against GPU layers against speed. The table underneath marks every context size as fitting or not on each backend, and names the cost when it doesn't — `9L on CPU` means nine layers had to move off the GPU to make that context fit.
 
@@ -50,7 +52,7 @@ The same meter is drawn live on the overview, per card, from what is actually lo
 
 ### The models.ini editor
 
-![The models.ini page: one card per section showing every set option as a chip — model path, ctx-size, ngl, cache types, flash-attn, speculative decoding settings — with Show CLI, Client config, Edit and Delete per section](docs/models_ini.png)
+![The models.ini page: llama's routing row at the top (which backend, which model the llama alias loads next, and auto-switch), then one card per section showing every set option as a chip (model path, ctx-size, ngl, cache types, parallel, reasoning, speculative decoding settings) with its shape badge and Show CLI, Client config, Edit and Delete](docs/models_ini.png)
 
 One card per section, with every option you have set shown as a chip, so the whole file is readable at a glance rather than by scrolling a text editor. **Copy CLI** renders the section as the equivalent `llama-server` command line, which is useful for reproducing a config outside Model Loader or pasting into a bug report.
 
@@ -61,7 +63,7 @@ One card per section, with every option you have set shown as a chip, so the who
 
 ### Benchmarking
 
-![The Benchmark page: stat panels for fastest generation, quickest first token and peak VRAM, above charts for generation speed and first-token latency by model](docs/benchmarks.png)
+![A benchmark run's detail page: stat panels for fastest generation (215.2 tok/s), quickest first token (39 ms) and peak VRAM, above charts of generation speed, time to first token and VRAM headroom for six models across five prompts, and the start of the per-request table](docs/benchmarks.png)
 
 Two engines, because they answer different questions and neither can answer the other's.
 
@@ -89,7 +91,7 @@ This is deliberately manual, and an automated version was built as far as the sc
 
 ### Routing models to backends
 
-![The Models directory grouped by family: headings like gemma-4-26B-A4B-it and gemma-4-E4B-it-qat, each with a model count and total size, and one line per served model carrying its MoE or dense shape, quant, placement, modality icons, state and your "good at" ratings. Under each file sits any models.ini section that serves it under another name - wheatley-voice, voice-cpu - marked "same file" instead of a size. The voice-cpu row is expanded to show its drawer: the per-backend "offered on" toggles, its own rating editor, the path on disk, a link to edit the section, and a note that it shares its weights with gemma-4-E4B-it-qat-UD-Q4_K_XL](docs/models_available.png)
+![The Models directory grouped by family, with free and used space across the top and a toolbar to filter, group, sort and narrow by state. Each heading (flint, gemma-4-26B-A4B-it, gemma-4-E4B-it-qat) carries a model count and total size, and each served model gets a line with its MoE or dense shape, quant, placement, modality and MTP icons, state and your "good at" ratings. Sections that serve a file under another name, wheatley-voice and voice-cpu, sit under it marked "same file" instead of a size. The voice-cpu row is expanded to show its drawer: its own rating editor, the path on disk with its projector and draft head, links to the file and its section, and a note that it shares its weights with gemma-4-E4B-it-qat-UD-Q4_K_XL](docs/models_available.png)
 
 Every llama.cpp backend reads the same `models.ini`, which means by default every backend offers every model — including the CPU one being asked for a 27B. The **offered on** toggles fix that per model: expand a row and click a backend to include or exclude it, and Model Loader writes the change into OpenWebUI's per-connection whitelist.
 
@@ -134,7 +136,7 @@ Each endpoint is built from the same code its page renders from, so the two cann
 
 ## Security posture
 
-**This is a personal, LAN-only tool. There is no authentication.** It mounts `/var/run/docker.sock`, which is root-equivalent on the host — anyone who can reach the port can `docker exec` into any container. Do not expose port 8090 to the internet. Do not run this on a shared machine. If you need multi-user, add a reverse-proxy with auth in front, and understand that authenticated users still get docker-socket-level power.
+**This is a personal, LAN-only tool. There is no authentication.** It mounts `/var/run/docker.sock`, which is root-equivalent on the host — anyone who can reach the port can `docker exec` into any container. Do not expose port 8090, or the router's 8086, to the internet. Do not run this on a shared machine. If you need multi-user, add a reverse-proxy with auth in front, and understand that authenticated users still get docker-socket-level power.
 
 ## Requirements
 
@@ -302,6 +304,50 @@ relationship it has with `models.ini`. Point the service at it with `env_file:` 
 from the entry point on every start: compose bakes `env_file` in at *create* time, so without the
 second half a change needs a recreate and a plain restart silently keeps the old value.
 
+### One endpoint for every engine: the router
+
+![The Router tab: the endpoint to point clients at, then one row per engine (strata, llama, maya, deepseek) saying how that engine picks its model, with its default, a backend pin where there is a choice of server, and an auto-switch toggle. Below that, which backends are reachable right now, a recording switch, a time range picker, totals for requests, failures, prompt tokens, tokens reused from cache, output tokens and average time to first token, hourly charts of tokens and requests, and the conversations table](docs/router.png)
+
+Clients bind to model ids, and on a box where engines take turns on the cards the ids are not
+stable: switching from llama.cpp to Strata changes every usable id at once. So Model Loader
+runs a second process, an OpenAI-compatible router on port `8086`, where **the engine name is a
+model id**. Ask for `strata`, `llama`, `maya` or `deepseek` and you get whatever that engine is
+serving now; a saved Open WebUI workspace model or IDE config keeps working across a switch.
+Real ids are listed and served too, for when you mean one specific model.
+
+- **What it speaks.** `/v1/chat/completions`, `/v1/completions`, `/v1/models`, and the
+  Anthropic-shaped `/v1/messages` for engines that serve it. The same paths without `/v1`, plus
+  llama.cpp's `/health` and `/props`, are there for clients that expect a bare llama-server.
+- **Which backend.** When several backends offer the same id, a CPU one always goes last and a
+  purpose-named one (voice, asr) comes after the general server, so a 27B never quietly lands
+  on CPU inference. Pin an engine to one container on the Router tab when the ranking guesses
+  wrong.
+- **Which model.** Per engine, and it means different things. llama.cpp loads on demand, so its
+  default is simply what the `llama` alias loads next. Strata cannot load on demand, so its
+  choice is one of the installed packs and applies at its next start. Maya and DeepSeek serve
+  the one model their container was set up with.
+- **Auto-switch, off by default, per engine.** With it on, asking for an engine that is not
+  holding the cards hands them over, through the same switch the Engine row uses. It refuses,
+  and says which rule stopped it, while another engine has a request in flight, while a switch
+  is already running, within a settle period after the last one (60 s by default, so two
+  clients that disagree cannot flap the box), or while a backend is starting outside Model
+  Loader. The router never starts or stops anything itself; the UI process owns lifecycle.
+- **The wait is narrated.** A switch can take a minute or more, and an empty bubble that long
+  looks like a hang. For OpenAI-shaped streams the router answers at once and streams the
+  switch's own progress ("31.4 GB still held") until the engine is up, then relays the real
+  answer in the same response. Those status lines are stripped back out of the history on the
+  next turn, so they never reach a model's chat template. Anthropic-shaped requests get a 503
+  that says why instead.
+- **Every request is recorded**, as the client saw it: engine, model, tokens in, tokens reused
+  from cache, tokens out, time to first token, total time and status, including the failures a
+  log never shows. The OpenAI protocol has no conversation id, so requests are grouped by a hash
+  of the conversation's opening, which every turn resends verbatim. Detail is kept for 14 days,
+  then hourly rollups to 90 and daily to 365, and the tab says what it is actually holding.
+  Recording can be switched off.
+
+The router has no authentication of its own, the same as the UI; keep port `8086` on the LAN.
+See [Install](#install) for running it.
+
 ## Install
 
 The fastest path — `bootstrap.sh` adds the `model-loader` service to your existing compose file and brings it up.
@@ -345,16 +391,40 @@ Paste this block into your `docker-compose.yaml`:
 
 Then `docker compose up -d --build model-loader`.
 
+**To run the router as well**, publish its port and start both processes. They share the
+container and its database, but stay separate processes so a long prefill can never stall the
+UI's polling:
+
+```yaml
+    init: true
+    ports:
+      - "8090:8090"
+      - "8086:8086"
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        trap 'kill -TERM $$(jobs -p) 2>/dev/null; wait' TERM INT
+        uvicorn app.main:app --host 0.0.0.0 --port 8090 &
+        uvicorn app.router_api:app --host 0.0.0.0 --port 8086 &
+        wait -n
+```
+
+`bash`, not `sh`: `wait -n` is a bash builtin. It exits as soon as either process dies, so a dead
+half restarts the container instead of leaving it up and broken. Then point clients at
+`http://<host>:8086/v1`.
+
 ## First-run walkthrough
 
 1. **Dashboard** (`/`) — you should see your llama.cpp containers listed under Backends with live GPU stats. If not, the container isn't running or its image isn't a `ghcr.io/ggml-org/llama.cpp:*` tag; use `LLAMA_CONTAINERS` env to force a whitelist.
 2. **Settings** (`/settings`) — paste a Hugging Face token here if you want to download gated models. Stored in the app's sqlite at `/data/model_loader.db`.
 3. **Search** (`/search`) — search HuggingFace, expand any repo, click Download on the GGUF file(s) you want. If the repo has a matching `*mmproj*.gguf` (vision projector), it's auto-queued into the same subdirectory.
-4. **Downloads** (`/downloads`) — live progress with per-chunk speed sparklines. Cancel, retry, or clear finished.
+4. **Downloads** (`/downloads`) — live progress, per-stream speed, SHA-256 verification. Cancel, retry, or clear finished; raise streams per file or files at once if your connection can take it.
 5. **Models** (`/models`) — everything you've downloaded. Click a model to open its detail page (metadata, quant, size, chat template, README).
 6. **Config** (`/config`) — one section per model in `models.ini`. For a new model, click **Autoconfig**; it fills in every field based on live hardware probe + GGUF metadata. Review the diff before saving: Fill also *clears* the keys Autoconfig wants unset, so a hand-tuned value inside its domain will go. Anything outside that domain is untouched.
 7. **Benchmark** (`/benchmark`) — pick a backend, some models and some prompts. A run evicts and reloads each model in turn, so expect the box to stall for the duration. Afterwards, read each response and rate the model on what you see.
-8. **Containers** (`/containers`) — restart, view logs (with grep filter), see OpenWebUI drift and one-click reconcile. If a model's load fails, the card names it and **Diagnose** reads that model's log and names the likely cause with a fix.
+8. **Router** (`/router`): if you run the router, point clients at `http://<host>:8086/v1` and ask for an engine name. Turn on auto-switch for the engines you want a client's model picker to be able to wake.
+9. **Containers** (`/containers`) — restart, view logs (with grep filter), see OpenWebUI drift and one-click reconcile. If a model's load fails, the card names it and **Diagnose** reads that model's log and names the likely cause with a fix.
 
 ## Configuration (environment variables)
 
@@ -367,8 +437,9 @@ All optional. Defaults in `app/config.py`.
 | `DATA_DIR` | `/data` | Sqlite state — HF token, prompts, avatar cache, download history. |
 | `LLAMA_CONTAINERS` | *(empty)* | Comma-separated whitelist. Empty = auto-discover any `ghcr.io/ggml-org/llama.cpp:*` container. |
 | `GPU_VRAM` | *(empty)* | Per-container VRAM overrides, e.g. `llama-7900xt:20,llama-5070:12`. Auto-probes via `nvidia-smi` / `rocm-smi` if unset. Useful when the reported total is wrong (some AMD stacks under-report). |
-| `MAX_CONCURRENT_DOWNLOADS` | `2` | Parallel download job cap. |
-| `BIND_PORT` | `8090` | HTTP port. |
+| `HOST_RAM_RESERVE_GB` | `32` | RAM held back for the OS and everything else before deciding whether a model fits in system memory. Raise it on a busy host. |
+| `ROUTER_PORT` | `8086` | The port the router listens on, as shown on the Router tab and used when pointing Open WebUI at it. The listen port itself is the router's `uvicorn --port`. |
+| `ROUTER_READONLY` | `false` | For a second instance against the same engines: it observes and routes but refuses every control that would start, stop or switch anything. Never set it on the instance that owns the box. |
 
 ## Multi-GPU
 
@@ -410,6 +481,9 @@ Browser (HTMX + Alpine + Tailwind CDN)
 FastAPI (app/main.py) ──── Jinja2 templates (app/templates/)
    │
    ├── app/routers/     one APIRouter module per nav section (included by main.py)
+   ├── app/router_api.py  the :8086 inference router (a second FastAPI app, same image)
+   ├── app/narrate.py     status lines streamed while a switch brings an engine up
+   ├── app/engine_registry.py  every engine declared once: readiness, parking, colours
    ├── app/web.py       shared Jinja env + toast/chip response builders
    ├── app/fit.py       shared VRAM/RAM placement math (search estimates, config)
    ├── app/services/    docker SDK, models-dir helpers, engine switching, OpenWebUI
@@ -418,7 +492,7 @@ FastAPI (app/main.py) ──── Jinja2 templates (app/templates/)
    ├── app/hw.py          background sampler (nvidia-smi / rocm-smi via docker exec)
    ├── app/hf.py          HF Hub API (search, repo tree, avatar cache)
    ├── app/gguf_meta.py   hand-rolled GGUF v3 metadata reader
-   ├── app/downloader.py  parallel-range download engine + sqlite job history
+   ├── app/downloader.py  range download engine, SHA-256 check, sqlite job history
    ├── app/ini.py         models.ini schema + parser + atomic writes
    ├── app/bench.py       benchmark harness + llama-bench driver
    ├── app/telemetry.py   per-request timings scraped from llama-server logs
@@ -428,7 +502,7 @@ FastAPI (app/main.py) ──── Jinja2 templates (app/templates/)
    └── app/migrate_layout.py  one-shot flat → per-model-subdir migration
 ```
 
-No frontend build step. No JS bundler. Everything ships from CDN or Jinja. Total footprint: ~10,000 lines of Python across 14 modules, 27 templates.
+No frontend build step. No JS bundler. Everything ships from CDN or Jinja. Total footprint: ~25,000 lines of Python across 64 modules, 49 templates.
 
 ## License
 

@@ -11,9 +11,10 @@
 
 <p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
   One endpoint for everything that needs inference here. Point a client at
-  <span class="font-mono">http://wheatley:{{ port }}/v1</span> and ask for
-  <span class="font-mono">strata</span>, <span class="font-mono">llama</span> or
-  <span class="font-mono">maya</span> — those names stay
+  <span class="font-mono">http://{{ request.url.hostname }}:{{ port }}/v1</span> and ask for
+  {% for e in engines -%}
+  <span class="font-mono">{{ e }}</span>{% if not loop.last %}{{ ' or ' if loop.revindex == 2 else ', ' }}{% endif %}
+  {%- endfor %} — those names stay
   valid when the engine changes, which the real model ids do not. Real ids still work when you
   mean one specific model.
 </p>

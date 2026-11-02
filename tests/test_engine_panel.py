@@ -24,3 +24,20 @@ def test_router_tab_still_has_every_engine(web):
     for e in ("strata", "llama", "maya"):
         assert f'aria-label="Auto-switch to {e}"' in r.text
     assert r.text.count("border-t border-slate-200 dark:border-slate-700") >= 2   # rows 2 and 3
+
+
+def test_router_intro_names_every_engine_and_this_host(web):
+    import re
+    from app import router_api
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", web.get("/router").text))
+    names = list(router_api.ENGINES)
+    want = " ask for " + ", ".join(names[:-1]) + " or " + names[-1] + " — "
+    i = text.find(" ask for ")
+    assert want in text, text[i:i + 120]
+    assert "http://testserver:" in text and "wheatley" not in text
+
+
+def test_deepseek_row_describes_deepseek(web):
+    html = web.get("/router").text
+    row = html[html.index('aria-label="Auto-switch to maya"'):html.index('aria-label="Auto-switch to deepseek"')]
+    assert "DeepSeek runs the one model" in row and "llama.cpp loads on demand" not in row
