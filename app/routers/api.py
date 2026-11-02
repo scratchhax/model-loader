@@ -201,7 +201,9 @@ async def series() -> dict:
     """Every live history the pages draw, as raw [timestamp, value] pairs, oldest first.
 
     backends    per llama backend: tok/s and context in use (tokens), sampled on the Overview's
-                poll; prefill is one tok/s reading per completed prompt, with no timestamps
+                poll; prefill is one tok/s reading per completed prompt, with no timestamps;
+                slots is the same tok/s and context per slot, keyed by slot index ("solo" for
+                Strata's request outside the batch slots)
     cards       per card (host numbering): compute %, VRAM GB and each tenant's compute share
     containers  per backend, the hw sampler's own history: GPU util and VRAM per card, CPU, RAM
     power       wall watts and the hottest temperature
@@ -211,7 +213,9 @@ async def series() -> dict:
         names = services._effective_container_names()
         backends = {n: {"tps": _pairs(services.tps_series(n)),
                         "ctx": _pairs(services.ctx_series(n)),
-                        "prefill": [round(v, 2) for v in services.prefill_history(n)]}
+                        "prefill": [round(v, 2) for v in services.prefill_history(n)],
+                        "slots": {("solo" if i < 0 else str(i)): {k: _pairs(v) for k, v in sl.items()}
+                                  for i, sl in services.slot_series(n).items()}}
                     for n in names}
         cards: dict[str, list] = {}
         for c in gpu_activity._cards():

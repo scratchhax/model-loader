@@ -177,6 +177,18 @@ class TestSoloContextInUse:
         assert out.ctx_total == 4 * 4096
         assert sp._ctx_history["c"][-1][1] == 1050.0
 
+    def test_each_slot_records_its_own_history(self, monkeypatch):
+        raw = [{"id": i, "n_ctx": 4096, "is_processing": False,
+                "n_prompt_tokens": 100 * (i + 1)} for i in range(2)]
+        sp, out = self._speed(monkeypatch, {"cur_prompt_tokens": 1000}, raw,
+                              seed=lambda sp: sp._slot_history.clear())
+        series = sp.slot_series("c")
+        assert set(series) == {-1, 0, 1}
+        assert series[-1]["tps"][-1][1] == 40.0 and series[-1]["ctx"][-1][1] == 1050.0
+        # Idle slots draw zero speed but keep the context they are holding.
+        assert series[0]["tps"][-1][1] == 0.0 and series[0]["ctx"][-1][1] == 100.0
+        assert series[1]["ctx"][-1][1] == 200.0
+
     def test_solo_generation_excludes_idle_slot_context(self, monkeypatch):
         # Live shape measured on the box: two idle slots parked with 139,632 and
         # 30,415 tokens while a solo request of 83,278+148 generates. The headline
@@ -282,6 +294,20 @@ class TestPruneSlotState:
         assert set(k for k in s._speed_prev if k.startswith("c#")) == {"c#0"}
         assert set(k for k in s._gen_ema if k.startswith("c#")) == {"c#0"}
         assert "other#0" in s._speed_prev  # other containers untouched
+
+
+class TestSlotHistory:
+    def test_a_vanished_slot_takes_its_history_with_it(self, monkeypatch):
+        from app.services import speed as sp
+        sp._slot_history.clear()
+        clock = iter([100.0, 101.0])
+        monkeypatch.setattr(sp.time, "time", lambda: next(clock))
+        sp._record_slots("c", [sp.SlotSpeed(index=0, state="generating", gen_tps=30.0, ctx_used=900),
+                               sp.SlotSpeed(index=1, ctx_used=50)])
+        sp._record_slots("c", [sp.SlotSpeed(index=0, state="generating", gen_tps=31.0, ctx_used=950)])
+        assert set(sp.slot_series("c")) == {0}
+        assert sp.slot_series("c")[0]["tps"] == [(100.0, 30.0), (101.0, 31.0)]
+        sp._slot_history.clear()
 
 
 class TestStripLayout:

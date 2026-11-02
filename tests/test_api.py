@@ -107,6 +107,17 @@ def test_containers_perf_has_numbers_not_sparklines(web, monkeypatch):  # noqa: 
     assert perf == {"cur_gpu_util": 40.0, "imbalance_gb": 1.5}
 
 
+def test_series_carries_each_slots_history(web, monkeypatch):  # noqa: F811
+    from app import services
+    monkeypatch.setattr(services, "_effective_container_names", lambda: ["llama"])
+    monkeypatch.setattr(services, "slot_series", lambda n: {
+        -1: {"tps": [(10.0, 40.0)], "ctx": [(10.0, 1050.0)]},
+        0: {"tps": [(10.0, 0.0)], "ctx": [(10.0, 512.0)]}})
+    slots = web.get("/api/v1/series").json()["backends"]["llama"]["slots"]
+    assert slots == {"solo": {"tps": [[10.0, 40.0]], "ctx": [[10.0, 1050.0]]},
+                     "0": {"tps": [[10.0, 0.0]], "ctx": [[10.0, 512.0]]}}
+
+
 @pytest.mark.parametrize("path", [
     "/api/v1", "/api/v1/status", "/api/v1/hero", "/api/v1/cards", "/api/v1/strip",
     "/api/v1/box", "/api/v1/series", "/api/v1/router", "/api/v1/router?range=all",
