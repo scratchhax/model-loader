@@ -16,8 +16,14 @@ Everything ships as one Docker image. Deps in `requirements.txt` are pinned. Pyt
 
 ```
 app/
-  main.py             FastAPI app factory, middleware, startup, Router-tab endpoints.
+  main.py             FastAPI app factory, middleware, startup, and the router includes.
   routers/            One APIRouter module per nav section, included by main.py.
+  router_api.py       The :8086 inference router: a second FastAPI app in the same image,
+                      run as its own uvicorn process (engine aliases, ranking, auto-switch,
+                      request log and its retention tiers).
+  narrate.py          The status lines streamed while a switch brings an engine up.
+  engine_registry.py  Every engine declared once: readiness check, timeout, parking, colour.
+  engine_controls.py  The per-engine routing row shared by the Router tab and engine pages.
   web.py              Shared Jinja env + response plumbing (toast/chip builders).
   fit.py              VRAM/RAM placement math inputs shared by search estimates and config.
   services/           Package: docker SDK seam, models-dir helpers, engine switching,
@@ -29,7 +35,8 @@ app/
   hf.py               HF Hub API client (search, tree, avatar cache).
   gguf_meta.py        Hand-rolled GGUF v3 metadata reader (no numpy).
   ini.py              models.ini schema (98 fields, 10 tiers) + parser + writer.
-  downloader.py       Parallel-range download engine with sqlite-backed job history.
+  downloader.py       Range download engine (1 stream by default, up to 8), SHA-256 check,
+                      sqlite-backed job history, resume after a restart.
   db.py               Sqlite prefs, benchmark results, badges (schema inline in init()).
   migrate_layout.py   One-shot: flat GGUF layout -> per-model-subdir + absolute paths.
   config.py           pydantic-settings for env vars.
@@ -54,9 +61,9 @@ app/
 ### On download
 
 1. `POST /download` inserts a row into `downloads` sqlite table with status=`queued`.
-2. A background worker (started at first request) picks it up, splits the file into 8 byte-range chunks, opens 8 concurrent HTTPS streams.
-3. Each chunk writes to a `.part-N` file. Progress + speed sample every 500ms into an in-memory ring buffer for the sparkline.
-4. On completion, chunks are concatenated in order, temp files removed, `status=done`.
+2. A background worker picks it up when its turn comes: one file at a time and one stream per file by default, both set on the Downloads page. With more than one stream, the file is split into that many byte ranges.
+3. A single stream writes straight to the temp file and hashes as it goes. Parallel streams each seek and write their own region of a preallocated temp, and what each range has received is kept beside it so a stopped download resumes. Progress + speed sample every 500ms into an in-memory ring buffer for the sparkline.
+4. On completion, the SHA-256 is checked against the one Hugging Face published (a mismatch discards the file and fails the job), the temp is moved into place, `status=done`.
 5. If a companion `*mmproj*.gguf` exists in the same repo, it's auto-queued into the same subdir.
 
 ### On config save
