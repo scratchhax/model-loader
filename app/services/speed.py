@@ -352,6 +352,35 @@ def _record_ctx(container_name: str, tokens: float) -> None:
     hist.append((now, float(tokens or 0.0)))
     if len(hist) > _TPS_HISTORY_MAX:
         del hist[:len(hist) - _TPS_HISTORY_MAX]
+
+
+# The same two lines per slot, so a page can draw each conversation's own speed and size beside
+# the machine's. Keyed by slot index, -1 being Strata's solo row. Each sample is
+# (ts, gen tok/s, ctx tokens); tok/s is zero unless that slot is generating, for the reason
+# _record_tps records idle zeros. A slot that disappears (parallel lowered, model swapped) takes
+# its history with it, so a stale row is never drawn beside the live ones.
+_slot_history: dict[str, dict[int, list[tuple[float, float, float]]]] = {}
+
+
+def slot_series(container_name: str) -> dict[int, dict[str, list[tuple[float, float]]]]:
+    """Per-slot {"tps": [(ts, v)], "ctx": [(ts, v)]}, oldest first, keyed by slot index."""
+    return {i: {"tps": [(ts, t) for ts, t, _c in h], "ctx": [(ts, c) for ts, _t, c in h]}
+            for i, h in sorted(_slot_history.get(container_name, {}).items())}
+
+
+def _record_slots(container_name: str, slots: list[SlotSpeed]) -> None:
+    per = _slot_history.setdefault(container_name, {})
+    now = time.time()
+    for gone in set(per) - {sl.index for sl in slots}:
+        del per[gone]
+    for sl in slots:
+        hist = per.setdefault(sl.index, [])
+        if hist and (now - hist[-1][0]) < _TPS_MIN_GAP_S:
+            continue
+        hist.append((now, round(float(sl.gen_tps or 0.0), 2) if sl.state == "generating" else 0.0,
+                     float(sl.ctx_used or 0)))
+        if len(hist) > _TPS_HISTORY_MAX:
+            del hist[:len(hist) - _TPS_HISTORY_MAX]
 def prefill_history(container_name: str) -> list[float]:
     """Completed prefill rates for a backend, oldest first, one per request."""
     return [v for _ts, v in _pp_history.get(container_name, [])]
@@ -969,6 +998,7 @@ async def inference_speed(container_name: str, internal_port: int | None,
     # The completed figure only, so one point per request. See _record_prefill_tps.
     _record_prefill_tps(container_name, r["last_pp_tps"])
     _record_ctx(container_name, ctx_used)
+    _record_slots(container_name, slots + ([solo] if solo is not None else []))
 
     out = InferenceSpeed(
         model=model_id, state=state, gen_tps=gen_tps, gen_tokens=gen_tokens,
