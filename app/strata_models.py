@@ -62,8 +62,9 @@ ARCH_MARKER = "qwen3.8-flash-next"
 GSQ_MARKER = "gsq-rco"
 
 # Families whose files are GSQ-RCO and carry no pinned hashes, i.e. the slots a mirror repo can
-# legitimately be installed into. `unsloth` is deliberately absent: its files ARE hash-pinned,
-# so a mirror renamed into that slot would fail verify_sha256 - correctly, and confusingly.
+# legitimately be installed into. `unsloth` and `gyro` are deliberately absent: their files ARE
+# hash-pinned, so a mirror renamed into those slots would fail verify_sha256 - correctly, and
+# confusingly. They install from their own repo instead (catalog_match).
 MIRROR_SLOTS = ("qwen", "swift", "coder")
 
 _SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
@@ -89,6 +90,14 @@ class Tier:
     first_shard: str              # the exact filename setup will look for
     hash_pinned: bool
     canonical_repo: str = ""      # the Hub repo this family's own files come from
+    # Setup's own recipe for fetching this pair, read from the engine like the rest of the catalog:
+    # every shard name, the pinned {name: [size, sha256]} for hash-pinned families, the family's
+    # Hub URL (a pinned commit, with {q} for the tier) and where its vision encoder comes from.
+    shard_files: list = field(default_factory=list)
+    pins: dict = field(default_factory=dict)
+    hf_url: str = ""
+    mmproj_url: str = ""
+    mmproj_file: str = ""
 
     @property
     def install_tag(self) -> str:
@@ -154,6 +163,7 @@ for f, d in setup.FAMILIES.items():
         "vision": d.get("vision"), "shards": int(d.get("shards") or 2),
         "hash_pinned": bool(d.get("sha256")),
         "hf": d.get("hf", ""),
+        "mmproj_hf": d.get("mmproj_hf", ""), "mmproj": d.get("mmproj", ""),
     }
 for m, d in setup.MODELS.items():
     out["models"][m] = {
@@ -172,6 +182,19 @@ for f, d in setup.FAMILIES.items():
                 out["files"]["%s/%s" % (f, m)] = setup.model_file(d, m, 1)
             except Exception:
                 pass
+out["shard_files"], out["pins"] = {}, {}
+for f, d in setup.FAMILIES.items():
+    pinned = d.get("sha256") or {}
+    for m in setup.MODELS:
+        if f not in setup.MODELS[m].get("families", ("qwen", "swift")):
+            continue
+        try:
+            n = int(setup.MODELS[m].get("shards") or d.get("shards") or 2)
+            names = [setup.model_file(d, m, i) for i in range(1, n + 1)]
+        except Exception:
+            continue
+        out["shard_files"]["%s/%s" % (f, m)] = names
+        out["pins"]["%s/%s" % (f, m)] = {x: list(pinned[x]) for x in names if x in pinned}
 print(json.dumps(out))
 """
 
@@ -194,6 +217,7 @@ def catalog(container: str = "strata", force: bool = False) -> list[Tier]:
         _catalog_cache = (now, raw)
 
     fams, models, files = raw.get("families", {}), raw.get("models", {}), raw.get("files", {})
+    shard_files, pins = raw.get("shard_files", {}), raw.get("pins", {})
     out: list[Tier] = []
     for fname, f in fams.items():
         for mname, m in models.items():
@@ -219,6 +243,11 @@ def catalog(container: str = "strata", force: bool = False) -> list[Tier]:
                 first_shard=first,
                 hash_pinned=bool(f.get("hash_pinned")),
                 canonical_repo=_repo_from_hf(f.get("hf", "")),
+                shard_files=list(shard_files.get(f"{fname}/{mname}") or []),
+                pins=dict(pins.get(f"{fname}/{mname}") or {}),
+                hf_url=f.get("hf", ""),
+                mmproj_url=f.get("mmproj_hf", ""),
+                mmproj_file=f.get("mmproj", ""),
             ))
     out.sort(key=lambda t: (t.family, t.download_gb))
     return out
@@ -228,6 +257,55 @@ def _repo_from_hf(url: str) -> str:
     """"owner/name" out of a family's Hub URL, which carries a path and placeholders after it."""
     m = re.search(r"huggingface\.co/([^/]+/[^/{}]+)", url or "")
     return m.group(1).rstrip("/") if m else ""
+
+
+_HF_RESOLVE_RE = re.compile(r"huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/?(.*)$")
+
+
+def hf_location(url: str, model: str = "") -> tuple[str, str, str] | None:
+    """(repo, revision, path prefix) out of a family's resolve URL, with {q} filled in.
+
+    Setup fetches from a PINNED COMMIT, not main: `.../Qwen3.8-Flash-Next-GGUF/resolve/38bb39e.../{q}/`.
+    Downloading from main instead would be downloading whatever the publisher pushed since, which
+    for a hash-pinned family is a file setup will reject and delete.
+    """
+    m = _HF_RESOLVE_RE.search(url or "")
+    if not m:
+        return None
+    prefix = m.group(3).replace("{q}", model)
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    return m.group(1), m.group(2), prefix
+
+
+def catalog_match(tier: Tier) -> RepoMatch | None:
+    """What setup itself would fetch for `tier`, as a RepoMatch: every shard under the exact name
+    setup looks for, from the family's own repo at setup's pinned commit, plus the vision encoder.
+
+    This is how a family whose files are hash-pinned (Unsloth, Gyro) gets installed: there is no
+    renaming and no choosing, only the publisher's files, which is the one thing a pin accepts.
+    It serves every other family's own repo too, so any pair in the catalog can be installed from
+    the catalog. Sizes and hashes come from the pins where there are pins; the route fills the
+    rest from the Hub (`fetch_etags`) before planning. None when the engine gave no recipe.
+    """
+    loc = hf_location(tier.hf_url, tier.model)
+    if loc is None or not tier.shard_files:
+        return None
+    repo, rev, prefix = loc
+    files = []
+    for name in tier.shard_files:
+        pin = tier.pins.get(name) or []
+        files.append({"src": prefix + name, "dst": name,
+                      "size": int(pin[0]) if len(pin) > 0 else 0,
+                      "sha": str(pin[1]).lower() if len(pin) > 1 else "",
+                      "pinned": len(pin) > 1, "repo": repo, "rev": rev})
+    mm = None
+    mloc = hf_location(tier.mmproj_url) if tier.vision and tier.mmproj_file else None
+    if mloc:
+        mrepo, mrev, mprefix = mloc
+        mm = {"src": mprefix + tier.mmproj_file, "dst": tier.mmproj_file, "size": 0, "sha": "",
+              "pinned": False, "repo": mrepo, "rev": mrev}
+    return RepoMatch(tier=tier, files=files, mmproj=mm)
 
 
 def parse_shard(name: str) -> tuple[int, int] | None:
@@ -247,7 +325,7 @@ def _tier_token_in(name: str, model: str) -> bool:
 
 
 def classify_repo(repo_files: list[dict], tiers: list[Tier] | None = None,
-                  container: str = "strata") -> list[RepoMatch]:
+                  container: str = "strata", repo_id: str = "") -> list[RepoMatch]:
     """Which catalog tiers a Hub repo can be installed as, and the rename each file needs.
 
     `repo_files` is [{"path": "IQ3_S/Foo-IQ3_S-00001-of-00002.gguf", "size": int, "sha": str}].
@@ -257,6 +335,10 @@ def classify_repo(repo_files: list[dict], tiers: list[Tier] | None = None,
     thing: the architecture marker, the quant-format marker, that tier's token, and the shard
     count the family declares. Partial sets are dropped rather than offered, because a missing
     shard surfaces as a pack-builder failure tens of GB into a download.
+
+    A hash-pinned family (Unsloth, Gyro) matches only its OWN repo, `repo_id`, holding every shard
+    under the exact name setup pins: then it is offered as `catalog_match` describes it, because
+    those files are the only ones the pins will accept.
     """
     tiers = tiers if tiers is not None else catalog(container)
     if not tiers:
@@ -269,9 +351,18 @@ def classify_repo(repo_files: list[dict], tiers: list[Tier] | None = None,
                if "mmproj" in str(f.get("path", "")).rsplit("/", 1)[-1].lower()]
 
     out: list[RepoMatch] = []
+    names_here = {str(f.get("path", "")).rsplit("/", 1)[-1]: f for f in ggufs}
     for tier in tiers:
         if tier.family not in MIRROR_SLOTS:
-            # unsloth: hash-pinned, so only the genuine upstream file can ever satisfy it.
+            # Hash-pinned: only the publisher's own files, under their own names, can satisfy it,
+            # so it matches its own repo or nothing.
+            own = bool(repo_id) and repo_id.lower() == (tier.canonical_repo or "").lower()
+            if own and tier.shard_files and all(n in names_here for n in tier.shard_files):
+                m = catalog_match(tier)
+                if m is not None:
+                    for f in m.files:
+                        f["size"] = f["size"] or int(names_here[f["dst"]].get("size") or 0)
+                    out.append(m)
             continue
         want = parse_shard(tier.first_shard)
         want_total = want[1] if want else tier.shards
@@ -571,6 +662,60 @@ async def fetch_etags(repo_id: str, paths: list[str], revision: str = "main") ->
             if re.fullmatch(r"[0-9a-f]{64}", tag):
                 out[p] = tag
     return out
+
+
+def write_done_marks(folder, pins: dict) -> list[str]:
+    """Record a pinned shard's verified hash where setup looks for it, so a start does not re-hash it.
+
+    Setup checks a hash-pinned shard (Unsloth, Gyro) with verify_sha256, which returns at once when
+    the shard's finish mark `<name>.done` already says `sha256 <pin>`, and otherwise hashes the whole
+    file and writes that mark. Strata sees ./models read-only, so the mark cannot be written there
+    and every start would hash the set again (111 GB for UD-Q4_K_XL). This app can write ./models,
+    so it hashes each shard once and writes the same mark, only when the hash IS the pin.
+    Returns the names marked.
+    """
+    folder = Path(folder)
+    done: list[str] = []
+    for name, pin in (pins or {}).items():
+        if len(pin) < 2:
+            continue
+        size, sha = int(pin[0]), str(pin[1]).lower()
+        p, m = folder / name, folder / (name + ".done")
+        try:
+            if not p.is_file() or p.stat().st_size != size:
+                continue
+            if m.is_file() and f"sha256 {sha}" in m.read_text(encoding="utf-8", errors="replace"):
+                continue
+        except OSError:
+            continue
+        if local_sha256(str(p)) == sha:
+            try:
+                m.write_text(f"sha256 {sha}", encoding="utf-8")
+                done.append(name)
+            except OSError:
+                pass
+    return done
+
+
+_marking: set[str] = set()
+
+
+def mark_in_background(folder, pins: dict) -> bool:
+    """write_done_marks on a thread, one per folder at a time. False when one is already running."""
+    import threading
+    key = str(folder)
+    if key in _marking or not pins:
+        return False
+    _marking.add(key)
+
+    def run():
+        try:
+            write_done_marks(folder, pins)
+        finally:
+            _marking.discard(key)
+
+    threading.Thread(target=run, name=f"strata-marks-{Path(key).name}", daemon=True).start()
+    return True
 
 
 # ---------------------------------------------------------------- carrying out an install

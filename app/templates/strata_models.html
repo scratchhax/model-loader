@@ -23,9 +23,10 @@
 
 <p class="mt-3 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
   Strata serves one architecture — Qwen3.8-Flash-Next — from an expert pack it builds itself, and it
-  resolves a model by exact filename against the catalog below. A community re-quant or fine-tune is
-  installable when it ships a complete shard set in GSQ-RCO format; it is renamed into a free slot on
-  the way in. Search results say plainly why anything else is refused.
+  resolves a model by exact filename against the catalog below. Every tier in the catalog installs
+  from here. A community re-quant or fine-tune is installable too when it ships a complete shard set
+  in GSQ-RCO format; it is renamed into a free slot on the way in. Search results say plainly why
+  anything else is refused.
 </p>
 
 <!-- installed ------------------------------------------------------------ -->
@@ -81,9 +82,10 @@
           {# The selection changes three things on this page (the next-start line, which install
              the tuning below is for, and this row), so success reloads it; a failure lands in
              the note and the button stays. #}
+          {% set ct = tier_by_tag.get(tag) %}
           <form hx-post="/strata/select" hx-target="find .form-note" hx-swap="innerHTML" class="inline">
-            <input type="hidden" name="family" value="{{ 'unsloth' if tag.startswith('unsloth-') else ('swift' if tag.startswith('swift-') else ('coder' if tag.startswith('coder-') else 'qwen')) }}">
-            <input type="hidden" name="model" value="{{ tag.split('-', 1)[1]|upper if '-' in tag else tag|upper }}">
+            <input type="hidden" name="family" value="{{ ct.family if ct else ('unsloth' if tag.startswith('unsloth-') else ('swift' if tag.startswith('swift-') else ('coder' if tag.startswith('coder-') else 'qwen'))) }}">
+            <input type="hidden" name="model" value="{{ ct.model if ct else (tag.split('-', 1)[1]|upper if '-' in tag else tag|upper) }}">
             <button {% if d.missing %}disabled title="Its source files are missing, so this would fail to start"{% endif %}
                     class="rounded-md border px-2 py-1 text-xs
                            {% if d.missing %}cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400
@@ -206,6 +208,7 @@
         <th class="px-3 py-2 text-right font-medium">Download</th>
         <th class="px-3 py-2 text-right font-medium">Experts in RAM</th>
         <th class="px-3 py-2 text-left font-medium">Slot</th>
+        <th class="px-3 py-2"></th>
       </tr>
     </thead>
     <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
@@ -220,9 +223,26 @@
         <td class="px-3 py-2 text-right">{{ t.arena_gb }} GB</td>
         <td class="px-3 py-2">
           <span class="font-mono text-xs">{{ t.install_tag }}</span>
+          {% set dl = downloaded.get(t.install_tag) %}
           {% if t.install_tag in installed %}<span class="ml-1 text-xs text-emerald-600 dark:text-emerald-400">installed</span>
-          {% elif t.hash_pinned %}<span class="ml-1 text-xs text-slate-400">upstream only</span>
+          {% elif dl and dl.complete %}<span class="ml-1 text-xs text-sky-600 dark:text-sky-400">downloaded, not set up</span>
+          {% elif dl %}<span class="ml-1 text-xs text-sky-600 dark:text-sky-400">downloading {{ dl.present }} of {{ dl.files }}</span>
           {% else %}<span class="ml-1 text-xs text-slate-400">free</span>{% endif %}
+        </td>
+        <td class="px-3 py-2 text-right">
+          {# Every pair the engine lists can be installed from here, from the family's own repo at
+             the commit Strata's setup pins, under the names it looks for. Hash-pinned families
+             (Unsloth, Gyro) can only come this way. #}
+          {% if t.install_tag not in installed and not dl and t.canonical_repo %}
+          <form hx-post="/strata/install" hx-swap="outerHTML" class="inline"
+                hx-confirm="Download Qwen3.8-Flash-Next {{ t.model }} ({{ t.family_title }}), about {{ t.download_gb }} GB from {{ t.canonical_repo }}? Anything already on disk is reused. It appears under Not set up yet; Use next start and a Strata restart run it.">
+            <input type="hidden" name="repo_id" value="{{ t.canonical_repo }}">
+            <input type="hidden" name="family" value="{{ t.family }}">
+            <input type="hidden" name="model" value="{{ t.model }}">
+            <button class="rounded-md border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs hover:bg-slate-50 dark:hover:bg-slate-700"
+                    title="{{ t.shards }} shard{{ 's' if t.shards != 1 else '' }}{% if t.vision %} + vision encoder{% endif %} from {{ t.canonical_repo }}{% if t.hash_pinned %}, checked against the SHA-256 Strata pins{% endif %}">Install</button>
+          </form>
+          {% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -232,8 +252,11 @@
 <p class="mt-2 max-w-3xl text-xs text-slate-500 dark:text-slate-400">
   A pack is named after its family slot and tier, so two mirrors of the same tier cannot be installed
   at once unless they go in different slots — that is the ceiling on how many re-tunes you can keep
-  prepared. Slots marked <em>upstream only</em> pin SHA-256 hashes, so only the original publisher's
-  files satisfy them.
+  prepared. <strong>Install</strong> fetches a tier from its family's own repo, at the commit Strata's
+  setup pins and under the names it looks for, through the Downloads queue. Unsloth's and Gyro's
+  families pin SHA-256 hashes, so the Hub's hashes are checked against them before anything is queued.
+  A finished download is listed under <em>Not set up yet</em>: <strong>Use next start</strong>, then
+  restart Strata, and it builds its pack from those files.
 </p>
 
 {% endblock %}

@@ -309,8 +309,11 @@ class DownloadManager:
         self._save_pending()
         return job
 
-    def enqueue(self, *, repo_id: str, hf_path: str, filename: str, total_bytes: int) -> DownloadJob:
-        url = f"{hf.HF_RESOLVE}/{repo_id}/resolve/main/{hf_path}"
+    def enqueue(self, *, repo_id: str, hf_path: str, filename: str, total_bytes: int,
+                revision: str = "main") -> DownloadJob:
+        # `revision` is a commit for a Strata family: setup pins its files at one, and main may
+        # have moved on to bytes its hashes reject.
+        url = f"{hf.HF_RESOLVE}/{repo_id}/resolve/{revision or 'main'}/{hf_path}"
         return self._make_job(repo_id=repo_id, filename=filename, url=url, total_bytes=total_bytes)
 
     def enqueue_url(self, *, url: str, filename: str, total_bytes: int = 0) -> DownloadJob:

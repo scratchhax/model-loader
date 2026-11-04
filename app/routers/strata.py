@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 
 import httpx
 from fastapi import APIRouter, Form, Request
@@ -51,6 +52,9 @@ def _strata_state() -> dict:
         "installed": inst,
         "downloaded": _not_set_up(tiers, inst),
         "free": {t.install_tag for t in strata_models.free_slots(set(inst), tiers)},
+        # A slot's family and tier come from the catalog, not from splitting its tag: Gyro's tags
+        # (gyro-gyro-s) and any future family would be guessed wrong.
+        "tier_by_tag": {t.install_tag: t for t in tiers},
         "selection": sel,
         "engine_up": bool(tiers),
         # {install_tag: repo} so a search row can say whether the slot it wants is held by THIS
@@ -156,7 +160,7 @@ async def _strata_results_response(request: Request, q: str = "") -> HTMLRespons
                 if detail is None:
                     continue
                 files = [{"path": f.path, "size": f.size} for f in detail.files]
-                matches = strata_models.classify_repo(files, st["tiers"])
+                matches = strata_models.classify_repo(files, st["tiers"], repo_id=m.id)
                 rows.append({"repo": m, "matches": matches,
                              "reason": "" if matches else _strata_refusal(files)})
             # Owner avatars, the same call and the same cache the llama search uses, so a repo
@@ -181,12 +185,52 @@ def _strata_refusal(files: list[dict]) -> str:
     if not any(strata_models.ARCH_MARKER in n for n in names):
         return "not Qwen3.8-Flash-Next — Strata serves only that architecture"
     if not any(strata_models.GSQ_MARKER in n for n in names):
-        return ("Qwen3.8-Flash-Next, but not GSQ-RCO quantized — Strata's pack builder reads "
-                "GSQ-RCO files (and Unsloth's own UD-IQ4_XS / UD-Q4_K_XL, which it downloads itself)")
+        return ("Qwen3.8-Flash-Next, but neither GSQ-RCO quantized nor the exact files of a family "
+                "Strata pins by hash. Unsloth's and Gyro's own repos install; so does any tier "
+                "from the Catalog on the Strata tab")
     return "GSQ-RCO, but no complete shard set for a quant tier this engine lists"
 
 
 _CANT_INSTALL = "Can&rsquo;t install"
+
+# Left free on the models volume after a download: a full disk breaks every other writer on it.
+_DISK_SPARE_BYTES = 20 * 1024**3
+
+
+async def _fill_sizes_and_hashes(match: strata_models.RepoMatch, repo_id: str) -> str:
+    """Sizes and content hashes for every file `match` will fetch, or why it must not be fetched.
+
+    Hashes first because without them every reuse check degrades to "same size", which is not
+    good enough to act on (see plan_install). Each file is asked of its own repo at its own
+    revision: the catalog recipe fetches from a pinned commit, and the vision encoder comes from a
+    different repo than the shards. A pinned file whose Hub hash disagrees with the pin is refused
+    HERE: setup would reject it after the download, and delete it.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for f in list(match.files) + ([match.mmproj] if match.mmproj else []):
+        groups.setdefault((f.get("repo") or repo_id, f.get("rev") or "main"), []).append(f)
+    for (repo, rev), fs in groups.items():
+        if any(not f["size"] for f in fs):
+            try:
+                detail = await hf.repo_detail(repo, rev)
+            except httpx.HTTPError as e:
+                return f"cannot read {repo}: {e}"
+            sizes = {x.path: x.size for x in detail.files}
+            for f in fs:
+                if not f["size"]:
+                    if f["src"] not in sizes:
+                        return f"{repo} has no {f['src']} at the commit Strata uses"
+                    f["size"] = sizes[f["src"]]
+        etags = await strata_models.fetch_etags(repo, [f["src"] for f in fs], rev)
+        for f in fs:
+            got = etags.get(f["src"], "")
+            if f.get("pinned"):
+                if got and got != f["sha"]:
+                    return (f"the Hub's {f['dst']} does not match the SHA-256 Strata pins for it, "
+                            "so setup would reject it")
+            else:
+                f["sha"] = got
+    return ""
 
 
 @router.post("/strata/install", response_class=HTMLResponse)
@@ -200,32 +244,46 @@ async def strata_install(repo_id: str = Form(...), family: str = Form(...),
     if tier.install_tag in st["installed"]:
         return _blocked_chip(f"{tier.install_tag} is already installed; remove it first", _CANT_INSTALL)
 
-    try:
-        detail = await hf.repo_detail(repo_id)
-    except httpx.HTTPError as e:
-        return _blocked_chip(f"cannot read {repo_id}: {e}", _CANT_INSTALL)
-    files = [{"path": f.path, "size": f.size} for f in detail.files]
-    match = next((m for m in strata_models.classify_repo(files, [tier])), None)
-    if match is None:
-        return _blocked_chip("this repo no longer matches that tier", _CANT_INSTALL)
-
-    # Content hashes first: without them every reuse check degrades to "same size", which is
-    # not good enough to act on (see plan_install).
-    paths = [f["src"] for f in match.files] + ([match.mmproj["src"]] if match.mmproj else [])
-    etags = await strata_models.fetch_etags(repo_id, paths)
-    for f in match.files:
-        f["sha"] = etags.get(f["src"], "")
-    if match.mmproj:
-        match.mmproj["sha"] = etags.get(match.mmproj["src"], "")
-
     subdir = f"strata-{repo_id.split('/')[-1]}-{model}"
+    if any(j.status in ("queued", "downloading", "verifying") and j.filename.startswith(subdir + "/")
+           for j in manager.snapshot()):
+        return _blocked_chip(f"{tier.install_tag} is already downloading", _CANT_INSTALL)
+
+    # The family's OWN repo installs from the engine's recipe (catalog_match): setup's file names,
+    # at setup's pinned commit, checked against setup's hashes. That is the only way into a
+    # hash-pinned family, and the right way into any family's own repo. A mirror is classified.
+    own = repo_id.lower() == (tier.canonical_repo or "").lower()
+    match = strata_models.catalog_match(tier) if own else None
+    if match is None:
+        if tier.hash_pinned:
+            return _blocked_chip(f"{tier.family} files are hash-pinned; only {tier.canonical_repo or 'its own repo'} "
+                                 "can satisfy them", _CANT_INSTALL)
+        try:
+            detail = await hf.repo_detail(repo_id)
+        except httpx.HTTPError as e:
+            return _blocked_chip(f"cannot read {repo_id}: {e}", _CANT_INSTALL)
+        files = [{"path": f.path, "size": f.size} for f in detail.files]
+        match = next((m for m in strata_models.classify_repo(files, [tier], repo_id=repo_id)), None)
+        if match is None:
+            return _blocked_chip("this repo no longer matches that tier", _CANT_INSTALL)
+
+    why = await _fill_sizes_and_hashes(match, repo_id)
+    if why:
+        return _blocked_chip(why, _CANT_INSTALL)
+
     plan = await asyncio.to_thread(strata_models.plan_install, match,
                                    str(settings.models_dir), subdir)
+    # Refuse up front rather than fill the disk 100 GB in. Reused files cost nothing.
+    free = await asyncio.to_thread(lambda: shutil.disk_usage(str(settings.models_dir)).free)
+    if plan["fetch_bytes"] > free - _DISK_SPARE_BYTES:
+        return _blocked_chip(f"needs {human_bytes(plan['fetch_bytes'])} and the models volume has "
+                             f"{human_bytes(free)} free", _CANT_INSTALL)
     await asyncio.to_thread(strata_models.materialize_reuse, plan)
 
     for f in plan["fetch"]:
-        manager.enqueue(repo_id=repo_id, hf_path=f["src"],
-                        filename=f"{subdir}/{f['dst']}", total_bytes=f["size"])
+        manager.enqueue(repo_id=f.get("repo") or repo_id, hf_path=f["src"],
+                        filename=f"{subdir}/{f['dst']}", total_bytes=f["size"],
+                        revision=f.get("rev") or "main")
 
     # Recorded at QUEUE time, not on completion: the slot is spoken for from here on, and a
     # download that is interrupted still leaves files whose origin someone will need to know.
@@ -248,6 +306,14 @@ def strata_select(family: str = Form(...), model: str = Form(...),
     ok, msg = strata_models.set_selection(STRATA_ENV_FILE, family, model, gguf_dir)
     if not ok:
         return _form_note(False, msg)
+    # A hash-pinned family's shards in ./models: hash them now and leave setup's finish marks,
+    # because Strata cannot write there and would otherwise re-hash them on every start.
+    root = strata_models._PATH_VIEWS[0][0]
+    if gguf_dir.startswith(root):
+        tier = next((t for t in strata_models.catalog(STRATA_CONTAINER)
+                     if t.family == family and t.model == model), None)
+        if tier is not None and tier.pins:
+            strata_models.mark_in_background(settings.models_dir / gguf_dir[len(root):], tier.pins)
     resp = _form_note(True, msg + "; restart Strata to apply", label="saved, applies on next start")
     resp.headers["HX-Refresh"] = "true"
     return resp
