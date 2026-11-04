@@ -26,8 +26,8 @@
           {# The two engines load models in fundamentally different ways, and pretending
              otherwise would make this control lie about one of them. #}
           Strata serves whatever it started with and cannot load on demand, so the choice is one
-          of the <strong>installed packs</strong> and it applies on the next start — a statement
-          of intent, not a switch.
+          of the <strong>installed packs</strong> or finished downloads, and it applies on the
+          next start — a statement of intent, not a switch.
         {% elif e == 'maya' %}
           {# One model per container, fixed by the config Maya's own setup wrote - so a default
              here would be a control that does nothing. Say what does decide it instead. #}

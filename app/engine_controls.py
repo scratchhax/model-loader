@@ -24,7 +24,8 @@ def strata_choices() -> list[tuple[str, str]]:
     from .routers import strata as strata_router
     out: list[tuple[str, str]] = []
     prov = strata_models.provenance()
-    for tag, d in strata_models.installed(strata_router.STRATA_DATA).items():
+    inst = strata_models.installed(strata_router.STRATA_DATA)
+    for tag, d in inst.items():
         name = tag
         try:
             name = _json.loads(open(d["config"], encoding="utf-8").read()).get("model_name") or tag
@@ -36,6 +37,16 @@ def strata_choices() -> list[tuple[str, str]]:
         if d.get("missing"):
             label += "  — source files missing"
         out.append((tag, label))
+    # Finished downloads Strata has not set up yet are choosable too: it builds their pack at the
+    # start that names them. Leaving them out meant a model the app had just downloaded could not
+    # be picked here at all. Still-running downloads are not offered.
+    for tag, d in strata_router._not_set_up(strata_models.catalog(strata_router.STRATA_CONTAINER),
+                                            inst).items():
+        if not d.get("complete"):
+            continue
+        owner = d["about"].get("owner") or ""
+        real = strata_models.install_label(d["about"]) or tag
+        out.append((tag, f"{real}  ({owner + ', ' if owner else ''}not set up yet, sets up at its first start)"))
     return out
 
 
