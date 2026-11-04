@@ -85,6 +85,53 @@ def _strata_selected_tag(sel: dict) -> str:
     return f"{prefix}{mod.lower()}"
 
 
+def selection_for_tag(tag: str) -> tuple[str, str, str] | None:
+    """(family, model, gguf_dir) to start the pack or download named by its install tag.
+
+    The engine row's dropdown offers installs by tag, and used to turn one back into a family and
+    tier by splitting its prefix, with no folder. That guessed Gyro wrong (gyro-gyro-s) and could
+    not start a download Strata has not set up yet: with no GGUF_DIR its setup would fetch the
+    family's own files again instead of using the ones here. A not-set-up download answers with
+    its folder; an installed pack with its catalog pair and no folder (its run config has one);
+    None while a download is still running.
+    """
+    tag = (tag or "").strip()
+    tiers = strata_models.catalog(STRATA_CONTAINER)
+    inst = strata_models.installed(STRATA_DATA)
+    if tag not in inst:
+        d = _not_set_up(tiers, inst).get(tag)
+        if d is not None:
+            return (d["family"], d["model"], d["gguf_dir"]) if d.get("complete") else None
+    t = next((t for t in tiers if t.install_tag == tag), None)
+    if t is not None:
+        return t.family, t.model, ""
+    # Engine stopped (no catalog) or rolled back past this tier: the install's own record, then
+    # the slot name, which is right for every family but Gyro.
+    p = strata_models.provenance().get(tag) or {}
+    if p.get("family") and p.get("model"):
+        return p["family"], p["model"], ""
+    for fam in ("unsloth", "swift", "coder", "gyro"):
+        if tag.startswith(fam + "-"):
+            return fam, tag[len(fam) + 1:].upper(), ""
+    return "qwen", tag.upper(), ""
+
+
+def apply_selection(family: str, model: str, gguf_dir: str = "") -> tuple[bool, str]:
+    """Write the next start's pair (and folder) where Strata reads it, from either control."""
+    ok, msg = strata_models.set_selection(STRATA_ENV_FILE, family, model, gguf_dir)
+    if not ok:
+        return ok, msg
+    # A hash-pinned family's shards in ./models: hash them now and leave setup's finish marks,
+    # because Strata cannot write there and would otherwise re-hash them on every start.
+    root = strata_models._PATH_VIEWS[0][0]
+    if gguf_dir.startswith(root):
+        tier = next((t for t in strata_models.catalog(STRATA_CONTAINER)
+                     if t.family == family and t.model == model), None)
+        if tier is not None and tier.pins:
+            strata_models.mark_in_background(settings.models_dir / gguf_dir[len(root):], tier.pins)
+    return ok, msg
+
+
 @router.post("/strata/tuning", response_class=HTMLResponse)
 def strata_tuning(install_tag: str = Form(...), flag: str = Form(...),
                   value: str = Form(...)) -> HTMLResponse:
@@ -303,17 +350,9 @@ async def strata_install(repo_id: str = Form(...), family: str = Form(...),
 def strata_select(family: str = Form(...), model: str = Form(...),
                   gguf_dir: str = Form("")) -> HTMLResponse:
     """Point the next Strata start at an installed pair. Takes effect on restart, not now."""
-    ok, msg = strata_models.set_selection(STRATA_ENV_FILE, family, model, gguf_dir)
+    ok, msg = apply_selection(family, model, gguf_dir)
     if not ok:
         return _form_note(False, msg)
-    # A hash-pinned family's shards in ./models: hash them now and leave setup's finish marks,
-    # because Strata cannot write there and would otherwise re-hash them on every start.
-    root = strata_models._PATH_VIEWS[0][0]
-    if gguf_dir.startswith(root):
-        tier = next((t for t in strata_models.catalog(STRATA_CONTAINER)
-                     if t.family == family and t.model == model), None)
-        if tier is not None and tier.pins:
-            strata_models.mark_in_background(settings.models_dir / gguf_dir[len(root):], tier.pins)
     resp = _form_note(True, msg + "; restart Strata to apply", label="saved, applies on next start")
     resp.headers["HX-Refresh"] = "true"
     return resp

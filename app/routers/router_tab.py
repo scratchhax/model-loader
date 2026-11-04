@@ -8,10 +8,10 @@ import time
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
-from .. import db, engine_controls, router_api, strata_models
+from .. import db, engine_controls, router_api
 from ..config import settings
 from ..web import templates, _form_note, _toast
-from .strata import STRATA_ENV_FILE
+from . import strata as strata_router
 
 router = APIRouter()
 
@@ -201,17 +201,17 @@ def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLRe
         # pin file the Strata tab writes, which a read-only instance must not do: two instances
         # driving the same engine is how this setup produced crash loops.
         tag = model.strip()
-        fam = "qwen"
-        for f in ("unsloth-", "swift-", "coder-"):
-            if tag.startswith(f):
-                fam = f[:-1]
-                break
-        mdl = tag[len(fam) + 1:].upper() if fam != "qwen" else tag.upper()
+        # The same pair and folder the Strata tab's own button writes: a finished download that
+        # Strata has not set up yet needs its folder, or setup would download it all again.
+        sel = strata_router.selection_for_tag(tag)
+        if sel is None:
+            return _form_note(False, f"{tag} is still downloading; it can be chosen when it finishes")
+        fam, mdl, gguf_dir = sel
         if settings.router_readonly:
             return _form_note(True, f"{tag} recorded as the Strata default. This instance is "
                                     f"read-only, so apply it from the live Model Loader's "
                                     f"Strata tab ({fam} / {mdl})", label="noted, not applied")
-        ok, msg = strata_models.set_selection(STRATA_ENV_FILE, fam, mdl, "")
+        ok, msg = strata_router.apply_selection(fam, mdl, gguf_dir)
         return _form_note(ok, msg + ("; restart Strata to apply" if ok else ""),
                           label="saved, applies on next start")
     return _form_note(True, f"{engine} now defaults to {model or '(none)'}")
