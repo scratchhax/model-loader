@@ -96,6 +96,60 @@ def _compose_service_of(client, container_name: str) -> str:
         return ""
 
 
+def _local_hosts(client) -> set[str]:
+    """Container names and compose service names on this docker socket."""
+    out: set[str] = set()
+    try:
+        for c in client.containers.list(all=True):
+            if c.name:
+                out.add(c.name)
+            svc = c.labels.get("com.docker.compose.service") if c.labels else None
+            if svc:
+                out.add(svc)
+    except DockerException:
+        pass
+    return out
+
+
+_PROBE_SCRIPT = r"""
+import json, os, sys, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor
+def ok(u):
+    try:
+        urllib.request.urlopen(u, timeout=3)
+        return True
+    except urllib.error.HTTPError:
+        return True          # it answered: the host is there, whatever it thought of the path
+    except Exception:
+        return False
+urls = json.loads(os.environ.get('URLS', '[]'))
+with ThreadPoolExecutor(max(1, min(8, len(urls)))) as ex:
+    print(json.dumps([u for u, r in zip(urls, ex.map(ok, urls)) if r]))
+"""
+
+
+def _reachable_from(ow, urls: list[str]) -> set[str]:
+    """The `urls` Open WebUI itself can reach: any HTTP answer counts, a refused or timed-out
+    connection does not. Asked from inside its container because that is where these names
+    resolve. A connection to another box (http://glados:8086/v1) has no container here, and
+    judging it by the local docker socket alone called it stale, and Reconcile deleted it."""
+    import json as _json
+    urls = sorted({u for u in urls if u})
+    if not urls:
+        return set()
+    try:
+        res = ow.exec_run(["python3", "-c", _PROBE_SCRIPT], environment={"URLS": _json.dumps(urls)})
+        if res.exit_code != 0:
+            return set(urls)     # cannot tell: never call something gone on a failed probe
+        return set(_json.loads((res.output or b"").decode(errors="replace").strip() or "[]"))
+    except (DockerException, APIError, ValueError):
+        return set(urls)
+
+
+def _looks_local(host: str) -> bool:
+    return bool(host) and "." not in host and ":" not in host
+
+
 def openwebui_state() -> dict:
     """Report the URLs OpenWebUI currently has PERSISTED and which discovered llama backends are missing."""
     client = _docker_client()
@@ -170,24 +224,15 @@ def openwebui_state() -> dict:
     if routed_via:
         missing = []
 
-    # Detect stale entries — URLs pointing at compose-local hosts that no longer exist
-    valid_hosts: set[str] = set()
-    try:
-        for c in client.containers.list(all=True):
-            if c.name:
-                valid_hosts.add(c.name)
-            svc = c.labels.get("com.docker.compose.service") if c.labels else None
-            if svc:
-                valid_hosts.add(svc)
-    except DockerException:
-        pass
+    # Stale: a compose-style host with no container here AND that Open WebUI cannot reach. The
+    # second half is what keeps another box's server (glados:8086) from reading as gone.
+    valid_hosts = _local_hosts(client)
     from urllib.parse import urlparse
-    stale: list[str] = []
-    for u in current_urls:
-        host = urlparse(u).hostname or ""
-        looks_local = host and "." not in host and ":" not in host
-        if looks_local and valid_hosts and host not in valid_hosts:
-            stale.append(u)
+    suspect = [u for u in current_urls
+               if _looks_local(urlparse(u).hostname or "") and valid_hosts
+               and (urlparse(u).hostname or "") not in valid_hosts]
+    alive = _reachable_from(ow, [u.rstrip("/") + "/models" for u in suspect])
+    stale = [u for u in suspect if u.rstrip("/") + "/models" not in alive]
 
     # Container facts + per-connection settings. Model Loader writes to this container's
     # database, so the page that does the writing should also show what it is writing to.
@@ -291,8 +336,14 @@ def _openwebui_companions(client, ow, valid_hosts: set[str]) -> list[dict]:
     except DockerException:
         pass
 
+    entries = entries if isinstance(entries, list) else []
+    # Anything with no container here (a terminal server on another box, by IP or name) is
+    # asked about directly, so it shows as reachable or unreachable rather than "missing".
+    remote = [str(e.get("url") or "") for e in entries
+              if (_urlparse(str(e.get("url") or "")).hostname or "") not in by_name]
+    alive = _reachable_from(ow, [u.rstrip("/") + "/health" for u in remote if u])
     out: list[dict] = []
-    for e in entries if isinstance(entries, list) else []:
+    for e in entries:
         url = str(e.get("url") or "")
         host = _urlparse(url).hostname or ""
         c = by_name.get(host)
@@ -304,7 +355,9 @@ def _openwebui_companions(client, ow, valid_hosts: set[str]) -> list[dict]:
                 image = ((c.image.tags or [c.image.short_id]) or [""])[0]
             except (DockerException, AttributeError):
                 pass
-        looks_local = bool(host) and "." not in host and ":" not in host
+        reachable = c is None and url.rstrip("/") + "/health" in alive
+        if c is None:
+            status = "reachable" if reachable else "unreachable"
         out.append({
             "kind": "terminal server",
             "name": e.get("name") or host,
@@ -314,8 +367,10 @@ def _openwebui_companions(client, ow, valid_hosts: set[str]) -> list[dict]:
             "container": host if c is not None else "",
             "image": image,
             "status": status,
-            # Same stale rule as the llama backends: a compose-local host that no longer exists.
-            "stale": looks_local and bool(valid_hosts) and host not in valid_hosts,
+            # Same stale rule as the llama backends: a compose-style host with no container
+            # here that does not answer either.
+            "stale": _looks_local(host) and bool(valid_hosts) and host not in valid_hosts
+                     and not reachable,
         })
     return out
 
@@ -719,19 +774,18 @@ def sync_openwebui_endpoints() -> tuple[bool, str]:
     if ow is None:
         return False, "open-webui not found"
 
-    # Build the set of hostnames that are valid targets (container names + compose service names)
-    valid_hosts: set[str] = set()
-    try:
-        for c in client.containers.list(all=True):
-            if c.name:
-                valid_hosts.add(c.name)
-            svc = c.labels.get("com.docker.compose.service") if c.labels else None
-            if svc:
-                valid_hosts.add(svc)
-    except DockerException:
-        pass
+    # Hostnames that are valid targets: container names, compose service names, and any host
+    # Open WebUI can actually reach. The last one is why glados:8086 (another box's router, no
+    # container here) is kept instead of being pruned as stale.
+    valid_hosts = _local_hosts(client)
 
     state = openwebui_state()
+    from urllib.parse import urlparse
+    stale_now = set(state.get("stale_urls") or [])
+    for u in state.get("current_urls") or []:
+        if u not in stale_now:
+            valid_hosts.add(urlparse(u).hostname or "")
+    valid_hosts.discard("")
     missing = state.get("missing_backends") or []
 
     additions = [{"name": m["name"]} for m in missing]

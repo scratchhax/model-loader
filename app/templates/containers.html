@@ -27,7 +27,7 @@
     {% endif %}
     {% if openwebui.stale_urls %}
     <div class="mt-1 text-xs text-red-700 dark:text-red-300">
-      <span class="font-semibold">{{ openwebui.stale_urls | length }} stale</span> (target container gone):
+      <span class="font-semibold">{{ openwebui.stale_urls | length }} stale</span> (no container here, and Open WebUI gets no answer from it):
       {% for u in openwebui.stale_urls %}
       <span class="inline-block font-mono bg-red-100 dark:bg-red-950 px-1.5 py-0.5 rounded">{{ u }}</span>
       {% endfor %}
@@ -167,15 +167,16 @@
         {% for s in openwebui.companions %}
         <div class="flex flex-wrap items-center gap-2 text-[11px] font-mono">
           <span class="inline-flex items-center rounded px-1.5 py-0.5
-            {% if s.stale or s.status == 'not found' %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300
+            {% if s.stale or s.status in ('not found', 'unreachable') %}bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300
             {% elif not s.enabled %}bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400
-            {% elif s.status == 'running' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
+            {% elif s.status in ('running', 'reachable') %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300
             {% else %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300{% endif %}">
-            {% if s.stale or s.status == 'not found' %}missing{% elif not s.enabled %}disabled{% else %}{{ s.status }}{% endif %}
+            {% if s.stale or s.status == 'not found' %}missing{% elif s.status == 'unreachable' %}unreachable{% elif not s.enabled %}disabled{% else %}{{ s.status }}{% endif %}
           </span>
           <span class="text-slate-500 dark:text-slate-400">{{ s.kind }}</span>
           <span class="text-slate-600 dark:text-slate-300">{{ s.url }}</span>
           {% if s.name and s.name != s.host %}<span class="text-slate-400">“{{ s.name }}”</span>{% endif %}
+          {% if not s.container and s.status == 'reachable' %}<span class="text-slate-400">on another host</span>{% endif %}
           {% if s.image %}<span class="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-slate-500">{{ s.image }}</span>{% endif %}
         </div>
         {% endfor %}
