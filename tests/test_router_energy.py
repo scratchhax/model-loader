@@ -216,3 +216,13 @@ def test_overview_strip_and_api_carry_the_running_total(web, monkeypatch):  # no
     assert api["windows"]["24h"]["box_wh"] == 2140.0 and len(api["days"]) == 30
     assert "/api/v1/energy" in web.get("/api/v1").json()["endpoints"]
     assert web.get("/api/v1/box").json()["energy"]["routed_wh"] == 380.0
+
+
+def test_a_part_day_box_total_is_not_set_beside_a_full_day_routed_one(web, monkeypatch):  # noqa: F811
+    # The box meter started 48 s ago, the routed figures go back further: "3.18 Wh of 0.97 Wh"
+    # would read as impossible. The strip shows the routed figure alone until the day is covered.
+    monkeypatch.setattr(energy, "summary", lambda *a, **k: {
+        "window_s": 86400.0, "box_wh": 0.97, "box_metered_s": 48, "box_coverage": 0.001,
+        "routed_wh": 3.18, "routed_n": 2, "requests": 2, "now_w": 70.0})
+    line = web.get("/boxbar").text.split('id="bar-power-num"')[1].split("</div>")[1]
+    assert "3.18 Wh</span> routed, 24 h" in line and "0.97" not in line
