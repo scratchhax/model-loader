@@ -81,12 +81,23 @@ def _init_db() -> None:
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 cached_tokens     INTEGER NOT NULL DEFAULT 0,
                 ttft_ms           REAL NOT NULL DEFAULT 0,
-                total_ms          REAL NOT NULL DEFAULT 0
+                total_ms          REAL NOT NULL DEFAULT 0,
+                energy_wh         REAL
             );
             CREATE INDEX IF NOT EXISTS router_request_ts   ON router_request(ts DESC);
             CREATE INDEX IF NOT EXISTS router_request_conv ON router_request(conv, ts DESC);
             """
         )
+        # Wall energy while the request ran, written after it ends by app.energy: NULL until
+        # then, -1 when the meter saw too little of it to say.
+        _add_column(c, "router_request", "energy_wh", "REAL")
+
+
+def _add_column(c, table: str, name: str, decl: str) -> None:
+    """ALTER a column into a table that predates it; CREATE TABLE IF NOT EXISTS will not."""
+    have = {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+    if have and name not in have:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def _record(**row) -> None:
@@ -1358,15 +1369,17 @@ _DAY = 86400.0
 
 _ROLLUP_UPSERT = (
     "INSERT INTO router_rollup(grain, bucket, engine, model, requests, failures, "
-    " prompt_tokens, completion_tokens, cached_tokens, ttft_ms_sum, ttft_n, total_ms_sum) "
-    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+    " prompt_tokens, completion_tokens, cached_tokens, ttft_ms_sum, ttft_n, total_ms_sum, "
+    " energy_wh_sum, energy_n) "
+    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
     "ON CONFLICT(grain, bucket, engine, model) DO UPDATE SET "
     " requests = requests + excluded.requests, failures = failures + excluded.failures, "
     " prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
     " completion_tokens = completion_tokens + excluded.completion_tokens, "
     " cached_tokens = cached_tokens + excluded.cached_tokens, "
     " ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum, ttft_n = ttft_n + excluded.ttft_n, "
-    " total_ms_sum = total_ms_sum + excluded.total_ms_sum"
+    " total_ms_sum = total_ms_sum + excluded.total_ms_sum, "
+    " energy_wh_sum = energy_wh_sum + excluded.energy_wh_sum, energy_n = energy_n + excluded.energy_n"
 )
 
 
@@ -1387,11 +1400,15 @@ def _init_rollup() -> None:
                 ttft_ms_sum       REAL NOT NULL DEFAULT 0,
                 ttft_n            INTEGER NOT NULL DEFAULT 0,
                 total_ms_sum      REAL NOT NULL DEFAULT 0,
+                energy_wh_sum     REAL NOT NULL DEFAULT 0,
+                energy_n          INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (grain, bucket, engine, model)
             );
             CREATE INDEX IF NOT EXISTS router_rollup_bucket ON router_rollup(bucket DESC);
             """
         )
+        _add_column(c, "router_rollup", "energy_wh_sum", "REAL NOT NULL DEFAULT 0")
+        _add_column(c, "router_rollup", "energy_n", "INTEGER NOT NULL DEFAULT 0")
 
 
 def compact(now: float | None = None) -> dict:
@@ -1409,13 +1426,14 @@ def compact(now: float | None = None) -> dict:
         rows = c.execute(
             "SELECT CAST(ts / 3600 AS INTEGER) * 3600.0, engine, model, COUNT(*), "
             "       SUM(status >= 400), SUM(prompt_tokens), SUM(completion_tokens), "
-            "       SUM(cached_tokens), SUM(ttft_ms), SUM(ttft_ms > 0), SUM(total_ms) "
+            "       SUM(cached_tokens), SUM(ttft_ms), SUM(ttft_ms > 0), SUM(total_ms), "
+            "       SUM(CASE WHEN energy_wh >= 0 THEN energy_wh ELSE 0 END), SUM(energy_wh >= 0) "
             "FROM router_request WHERE ts < ? GROUP BY 1, engine, model",
             (raw_before,)).fetchall()
         for r in rows:
             c.execute(_ROLLUP_UPSERT, ("hour", r[0], r[1] or "", r[2] or "", r[3], r[4] or 0,
                                        r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0.0,
-                                       r[9] or 0, r[10] or 0.0))
+                                       r[9] or 0, r[10] or 0.0, r[11] or 0.0, r[12] or 0))
         out["hourly"] = len(rows)
         out["raw_deleted"] = c.execute("DELETE FROM router_request WHERE ts < ?",
                                        (raw_before,)).rowcount
@@ -1423,13 +1441,14 @@ def compact(now: float | None = None) -> dict:
         rows = c.execute(
             "SELECT CAST(bucket / 86400 AS INTEGER) * 86400.0, engine, model, SUM(requests), "
             "       SUM(failures), SUM(prompt_tokens), SUM(completion_tokens), "
-            "       SUM(cached_tokens), SUM(ttft_ms_sum), SUM(ttft_n), SUM(total_ms_sum) "
+            "       SUM(cached_tokens), SUM(ttft_ms_sum), SUM(ttft_n), SUM(total_ms_sum), "
+            "       SUM(energy_wh_sum), SUM(energy_n) "
             "FROM router_rollup WHERE grain = 'hour' AND bucket < ? GROUP BY 1, engine, model",
             (hourly_before,)).fetchall()
         for r in rows:
             c.execute(_ROLLUP_UPSERT, ("day", r[0], r[1] or "", r[2] or "", r[3], r[4] or 0,
                                        r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0.0,
-                                       r[9] or 0, r[10] or 0.0))
+                                       r[9] or 0, r[10] or 0.0, r[11] or 0.0, r[12] or 0))
         out["daily"] = len(rows)
         out["rollup_deleted"] = c.execute(
             "DELETE FROM router_rollup WHERE grain = 'hour' AND bucket < ?",
@@ -1446,16 +1465,19 @@ def totals(since: float) -> dict:
     quietly means "last 14" - a wrong answer that looks like a right one.
     """
     out = {"requests": 0, "failures": 0, "prompt_tokens": 0, "completion_tokens": 0,
-           "cached_tokens": 0, "total_ms": 0.0, "ttft_ms_sum": 0.0, "ttft_n": 0}
+           "cached_tokens": 0, "total_ms": 0.0, "ttft_ms_sum": 0.0, "ttft_n": 0,
+           "energy_wh": 0.0, "energy_n": 0}
     keys = ("requests", "failures", "prompt_tokens", "completion_tokens", "cached_tokens",
-            "total_ms", "ttft_ms_sum", "ttft_n")
+            "total_ms", "ttft_ms_sum", "ttft_n", "energy_wh", "energy_n")
     with db._conn() as c:
         for sql, params in (
             ("SELECT COUNT(*), SUM(status >= 400), SUM(prompt_tokens), SUM(completion_tokens), "
-             "       SUM(cached_tokens), SUM(total_ms), SUM(ttft_ms), SUM(ttft_ms > 0) "
+             "       SUM(cached_tokens), SUM(total_ms), SUM(ttft_ms), SUM(ttft_ms > 0), "
+             "       SUM(CASE WHEN energy_wh >= 0 THEN energy_wh ELSE 0 END), SUM(energy_wh >= 0) "
              "FROM router_request WHERE ts >= ?", (since,)),
             ("SELECT SUM(requests), SUM(failures), SUM(prompt_tokens), SUM(completion_tokens), "
-             "       SUM(cached_tokens), SUM(total_ms_sum), SUM(ttft_ms_sum), SUM(ttft_n) "
+             "       SUM(cached_tokens), SUM(total_ms_sum), SUM(ttft_ms_sum), SUM(ttft_n), "
+             "       SUM(energy_wh_sum), SUM(energy_n) "
              "FROM router_rollup WHERE bucket >= ?", (since,)),
         ):
             r = c.execute(sql, params).fetchone()

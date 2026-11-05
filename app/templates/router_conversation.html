@@ -17,7 +17,11 @@
     model, and the conversation key is not carried into them.
   </p>
 {% else %}
-<p class="mt-2 text-sm text-slate-500 dark:text-slate-400">{{ turns | length }} turn{{ 's' if turns | length != 1 }}</p>
+{% set known = turns | selectattr('energy_wh', 'ne', none) | selectattr('energy_wh', 'ge', 0) | list %}
+<p class="mt-2 text-sm text-slate-500 dark:text-slate-400">{{ turns | length }} turn{{ 's' if turns | length != 1 }}
+  {% if known %}· {{ known | sum(attribute='energy_wh') | wh }} at the wall
+    {% if known | length < turns | length %}<span title="Turns still being measured, or not measurable, are not in this figure">({{ known | length }} of {{ turns | length }} turns measured)</span>{% endif %}
+  {% endif %}</p>
 <div class="mt-3 overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
   <table class="w-full text-sm">
     <thead class="bg-slate-50 dark:bg-slate-800/60 text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
@@ -30,6 +34,7 @@
         <th class="px-3 py-2 text-right font-medium">Output</th>
         <th class="px-3 py-2 text-right font-medium">TTFT</th>
         <th class="px-3 py-2 text-right font-medium">Total</th>
+        <th class="px-3 py-2 text-right font-medium">Energy</th>
         <th class="px-3 py-2 text-left font-medium">Status</th>
       </tr>
     </thead>
@@ -44,6 +49,7 @@
         <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(t.completion_tokens) }}</td>
         <td class="px-3 py-2 text-right tabular-nums">{% if t.ttft_ms %}{{ (t.ttft_ms / 1000) | round(2) }}s{% else %}—{% endif %}</td>
         <td class="px-3 py-2 text-right tabular-nums">{{ (t.total_ms / 1000) | round(1) }}s</td>
+        <td class="px-3 py-2 text-right tabular-nums">{% if t.energy_wh is none %}<span class="text-slate-400" title="Measured a few seconds after it finishes">…</span>{% elif t.energy_wh < 0 %}<span class="text-slate-400" title="The power meter was not running for most of it (a restart), so it is not guessed">—</span>{% else %}{{ t.energy_wh | wh }}{% endif %}</td>
         <td class="px-3 py-2 text-xs">
           {% if t.status >= 400 %}<span class="text-rose-700 dark:text-rose-400">{{ t.status }}</span>
             <span class="text-slate-500 dark:text-slate-400">{{ t.error[:70] }}</span>
