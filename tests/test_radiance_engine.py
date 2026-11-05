@@ -109,9 +109,72 @@ def test_idle_shows_the_last_request_from_the_log(monkeypatch):
     assert out.prefill_tps == 2000.0               # (33069 - 1069) read / 16 s
 
 
-def test_the_router_row_says_what_radiance_runs(monkeypatch, web):  # noqa: F811
-    r = web.post("/router/default", data={"engine": "radiance", "model": "x"})
-    assert "Radiance starts the model its compose command names" in r.text
+def _rad(tmp_path, monkeypatch):
+    from app import radiance
+    from app.config import settings
+    monkeypatch.setattr(settings, "models_dir", tmp_path)
+    d = tmp_path / "rad"
+    d.mkdir()
+    (d / "qwen3.8-next-flash-fp8-iq4r-moe.rad").write_bytes(b"x" * 10)
+    (d / "qwen3.8-next-flash-fp8-iq4r-moe.args").write_text(
+        "# Flash-Next: expert tiering and MTP\n--served-model-name qwen3.8-flash-next-iq4r\n"
+        "--tp-wire wht6 --placement expert_tiered   # trailing comment\n--host-pool-mib 12288\n")
+    (d / "qwen3.8-27b-fp8.rad").write_bytes(b"y" * 10)
+    return radiance, d
+
+
+def test_the_picker_lists_every_rad_with_its_served_name(tmp_path, monkeypatch):
+    radiance, d = _rad(tmp_path, monkeypatch)
+    (d / "notes.txt").write_text("not a model")
+    assert radiance.read_args("qwen3.8-next-flash-fp8-iq4r-moe") == [
+        "--served-model-name", "qwen3.8-flash-next-iq4r", "--tp-wire", "wht6", "--placement",
+        "expert_tiered", "--host-pool-mib", "12288"]
+    ch = dict(radiance.choices())
+    assert set(ch) == {"qwen3.8-next-flash-fp8-iq4r-moe.rad", "qwen3.8-27b-fp8.rad"}
+    assert ch["qwen3.8-next-flash-fp8-iq4r-moe.rad"].startswith("qwen3.8-flash-next-iq4r")
+    assert "no .args file" in ch["qwen3.8-27b-fp8.rad"]     # served as its stem, shared flags only
+
+
+def test_select_writes_what_the_entry_point_reads(tmp_path, monkeypatch):
+    radiance, d = _rad(tmp_path, monkeypatch)
+    ok, msg = radiance.select("qwen3.8-27b-fp8.rad")
+    assert ok and "qwen3.8-27b-fp8" in msg and radiance.selected() == "qwen3.8-27b-fp8.rad"
+    assert "RADIANCE_MODEL=qwen3.8-27b-fp8.rad\n" in (d / "radiance.env").read_text()
+    ok, msg = radiance.select("../etc/passwd.rad")
+    assert not ok and radiance.selected() == "qwen3.8-27b-fp8.rad"
+
+
+def test_the_router_row_sets_radiance_s_next_model(tmp_path, monkeypatch, web):  # noqa: F811
+    radiance, d = _rad(tmp_path, monkeypatch)
+    monkeypatch.setattr(radiance, "restart_if_idle", lambda docker: "it loads at Radiance's next start")
+    r = web.post("/router/default", data={"engine": "radiance", "model": "qwen3.8-next-flash-fp8-iq4r-moe.rad"})
+    assert "next start: qwen3.8-flash-next-iq4r" in r.text and "next start" in r.text
+    assert radiance.selected() == "qwen3.8-next-flash-fp8-iq4r-moe.rad"
+    assert "is not a .rad container" in web.post("/router/default", data={"engine": "radiance", "model": "nope.rad"}).text
+
+
+def test_a_running_idle_radiance_restarts_and_a_busy_one_waits(monkeypatch):
+    from app import radiance
+    import httpx
+
+    class C:
+        status = "running"
+        restarted = False
+
+        def restart(self, timeout=0):
+            C.restarted = True
+
+    class D:
+        class containers:
+            @staticmethod
+            def get(name):
+                return C()
+    monkeypatch.setattr(__import__("threading"), "Thread",
+                        lambda target, **k: type("T", (), {"start": lambda self: target()})())
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: type("R", (), {"json": lambda self: {"in_flight": 1}})())
+    assert "answering a request" in radiance.restart_if_idle(D()) and not C.restarted
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: type("R", (), {"json": lambda self: {"in_flight": 0}})())
+    assert "restarting Radiance" in radiance.restart_if_idle(D()) and C.restarted
 
 
 def test_an_image_name_that_says_nothing_is_known_by_its_devices():

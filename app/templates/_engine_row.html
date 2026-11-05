@@ -39,9 +39,10 @@
           DeepSeek runs the one model its container was set up with, on Strata's DeepSeek engine;
           asking for <span class="font-mono">deepseek</span> always gets that model.
         {% elif e == 'radiance' %}
-          {# Same shape as DeepSeek: one .rad model, named by the radiance service's command. #}
-          Radiance runs the one model its compose command names (the radiance service in
-          docker-compose.yaml); asking for <span class="font-mono">radiance</span> always gets that model.
+          {# Strata's shape: one model per process, read at startup. #}
+          Radiance serves one model at a time and reads it when it starts, so the choice is one of
+          the <strong>.rad containers</strong> in models/rad. Set applies it at the next start, at
+          once when Radiance holds the cards and is idle.
         {% else %}
           llama.cpp loads on demand, so this takes effect on the next request asking for
           <span class="font-mono">llama</span>.
@@ -70,7 +71,7 @@
     {% endif %}
     {# Maya starts the config its compose command names, so a choice here would be recorded and
        never read. It is shown, so the row matches the other engines, and not offered. #}
-    {% set fixed = e in ('maya', 'radiance') %}
+    {% set fixed = e == 'maya' %}
     <form hx-post="/router/default" hx-target="find .form-note" hx-swap="innerHTML" class="flex min-w-0 max-w-full items-center gap-2"
           {% if e == 'maya' %}title="Maya starts the model its compose command names (--config {{ maya_run_config or '?' }}); it is not chosen here."
           {% elif fixed %}title="{{ e }} starts the model its compose command names; it is not chosen here."{% endif %}>
