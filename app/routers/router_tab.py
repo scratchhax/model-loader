@@ -62,7 +62,7 @@ def _router_conversations(since: float = 0.0, limit: int = 50) -> list[dict]:
             "       AVG(NULLIF(ttft_ms,0)) AS avg_ttft, AVG(total_ms) AS avg_total, "
             "       SUM(status >= 400) AS failures, "
             "       SUM(CASE WHEN energy_wh >= 0 THEN energy_wh ELSE 0 END) AS energy_wh, "
-            "       SUM(energy_wh IS NULL) AS energy_pending, "
+            "       SUM(energy_wh IS NULL) AS energy_pending, SUM(energy_wh >= 0) AS energy_n, "
             "       COUNT(DISTINCT CASE WHEN model <> '' THEN model END) AS models_used, "
             "       (SELECT engine FROM router_request x WHERE x.conv = r.conv AND x.engine <> '' "
             "         ORDER BY x.ts DESC LIMIT 1) AS engine, "
