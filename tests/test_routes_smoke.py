@@ -44,6 +44,7 @@ def web(tmp_path, monkeypatch):
     monkeypatch.setattr(app_utils.docker, "from_env", lambda *a, **k: fake)
     monkeypatch.setattr(app_utils, "_DOCKER_CLIENT", None)
     monkeypatch.setattr(hw, "start_sampler", lambda: None)
+    monkeypatch.setattr("app.energy.start", lambda: None)   # the wall-power meter thread, likewise
     # the startup reconcile thread outlives the fixture; left running it reaches db after the
     # tmp data_dir is torn down and the restored /data default raises in a daemon thread
     monkeypatch.setattr("app.main._reconcile_strata_config", lambda: None)

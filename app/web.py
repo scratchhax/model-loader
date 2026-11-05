@@ -64,6 +64,14 @@ def _fmt_ts(v) -> str:
 templates.env.filters["ts"] = _fmt_ts
 
 
+def _fmt_wh(wh) -> str:
+    from .energy import fmt_wh
+    return fmt_wh(wh)
+
+
+templates.env.filters["wh"] = _fmt_wh
+
+
 def _blocked_chip(reason: str, label: str = "Blocked: llama.cpp can&rsquo;t load this") -> HTMLResponse:
     """What a refused action button turns into. The reason rides in the tooltip.
 

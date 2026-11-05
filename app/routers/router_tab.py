@@ -40,7 +40,7 @@ def _router_rows(since: float = 0.0, limit: int = 100) -> list[dict]:
     with db._conn() as c:
         return [dict(r) for r in c.execute(
             "SELECT ts, conv, client, asked, engine, backend, model, shape, stream, status, "
-            "error, prompt_tokens, completion_tokens, cached_tokens, ttft_ms, total_ms "
+            "error, prompt_tokens, completion_tokens, cached_tokens, ttft_ms, total_ms, energy_wh "
             "FROM router_request WHERE ts >= ? ORDER BY ts DESC LIMIT ?", (since, limit))]
 
 
@@ -61,6 +61,8 @@ def _router_conversations(since: float = 0.0, limit: int = 50) -> list[dict]:
             "       SUM(cached_tokens) AS cached_tokens, "
             "       AVG(NULLIF(ttft_ms,0)) AS avg_ttft, AVG(total_ms) AS avg_total, "
             "       SUM(status >= 400) AS failures, "
+            "       SUM(CASE WHEN energy_wh >= 0 THEN energy_wh ELSE 0 END) AS energy_wh, "
+            "       SUM(energy_wh IS NULL) AS energy_pending, "
             "       COUNT(DISTINCT CASE WHEN model <> '' THEN model END) AS models_used, "
             "       (SELECT engine FROM router_request x WHERE x.conv = r.conv AND x.engine <> '' "
             "         ORDER BY x.ts DESC LIMIT 1) AS engine, "
@@ -152,7 +154,7 @@ def router_conversation(request: Request, conv: str) -> HTMLResponse:
     with db._conn() as c:
         turns = [dict(r) for r in c.execute(
             "SELECT ts, asked, engine, backend, model, stream, status, error, prompt_tokens, "
-            "cached_tokens, completion_tokens, ttft_ms, total_ms "
+            "cached_tokens, completion_tokens, ttft_ms, total_ms, energy_wh "
             "FROM router_request WHERE conv = ? ORDER BY ts", (conv,))]
     return templates.TemplateResponse("router_conversation.html", {
         "request": request, "conv": conv, "turns": turns,
