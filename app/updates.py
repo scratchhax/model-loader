@@ -12,6 +12,8 @@ What "running here" means differs per engine, so it is read the way each one can
     upstream's published image, whose tag names its version. When either is serving, its own
     report wins (Strata's /metrics engine.version, Maya's /health version), because that is what
     is actually loaded.
+  * Radiance is a pulled image whose releases ARE its Docker Hub tags (1.17.0): the running
+    server's /version, or the tag its container was created from, against the highest tag.
   * llama.cpp is a pulled image. The meaningful question is "would a pull change it", so each
     local llama image's digest is compared with the registry's for the same tag, and the build it
     runs (llama's /props build_info, bNNNNN) against the newest release.
@@ -131,6 +133,9 @@ def _running_report(engine: str, container: str) -> str:
                 from .services import auth_headers
                 v = (c.get(f"http://{container}:8080/metrics", headers=auth_headers(container))
                      .json().get("engine") or {}).get("version")
+            elif engine == "radiance":
+                from .services import auth_headers
+                v = c.get(f"http://{container}:8080/version", headers=auth_headers(container)).json().get("version")
             else:
                 v = c.get(f"http://{container}:8080/health").json().get("version")
         return str(v or "")
@@ -216,6 +221,33 @@ def latest_image_version(client: httpx.Client, repo: str, flavor: str) -> str:
     return max(vers, key=_vkey) if vers else ""
 
 
+# ------------------------------------------------------------------------------- Docker Hub
+
+def latest_hub_tag(client: httpx.Client, image: str) -> str:
+    """The highest version-shaped tag of a Docker Hub image ("1.17.0"), "" when there is none.
+
+    For an engine whose releases ARE its image tags (Radiance: stilldeadcode/radiance, source on
+    Codeberg, which this app does not read). `latest` and commit tags are skipped by the shape.
+    """
+    r = client.get(f"https://hub.docker.com/v2/repositories/{image}/tags", params={"page_size": 100})
+    r.raise_for_status()
+    vers = [m.group(1) for t in (r.json().get("results") or [])
+            if (m := _VER_RE.match(str(t.get("name") or "")))]
+    return max(vers, key=_vkey) if vers else ""
+
+
+def hub_image_version(docker, container: str) -> str:
+    """The version tag a container's image was created from ("1.17.0" for
+    stilldeadcode/radiance:1.17.0), "" for `latest` or anything not version-shaped."""
+    try:
+        ref = str((docker.containers.get(container).attrs.get("Config") or {}).get("Image") or "")
+    except Exception:  # noqa: BLE001 - no container is "unknown", never an error page
+        return ""
+    tag = ref.rsplit(":", 1)[1] if ":" in ref.rsplit("/", 1)[-1] else ""
+    m = _VER_RE.match(tag)
+    return m.group(1) if m else ""
+
+
 # ------------------------------------------------------------------------------- the check
 
 _DSV41_ASSET_RE = re.compile(r"^strata-dsv41-(\d+(?:\.\d+)+)-(.+)\.tar\.gz$")
@@ -271,6 +303,17 @@ def check(docker, http: httpx.Client | None = None) -> dict:
                     if row["current"] and row["latest"]:
                         row["url"] = (f"https://github.com/{e['repo']}/compare/"
                                       f"v{row['current']}...v{row['latest']}")
+                    is_new = newer(row["latest"], row["current"])
+                    row["status"] = ("update" if is_new else "current") if is_new is not None else "unknown"
+                elif e["kind"] == "dockerhub":
+                    # The serving engine's own /version wins (it is what is loaded); a stopped one
+                    # is known by the tag its container was created from.
+                    row["current"] = (_running_report(e["engine"], e["container"])
+                                      or hub_image_version(docker, e["container"]))
+                    row["latest"] = latest_hub_tag(http, e["image"])
+                    web = e.get("web") or f"https://hub.docker.com/r/{e['image']}/tags"
+                    row["url"] = (f"{web}/compare/v{row['current']}...v{row['latest']}"
+                                  if e.get("web") and row["current"] and row["latest"] else web)
                     is_new = newer(row["latest"], row["current"])
                     row["status"] = ("update" if is_new else "current") if is_new is not None else "unknown"
                 else:

@@ -90,7 +90,11 @@ ENGINES: dict[str, Engine] = {e.name: e for e in (
         name="radiance", label="Radiance", color=("rose", "244,63,94"),
         single_model=True, ready_path="/health", ready_timeout_s=600.0,
         protocol="radiance", ready_status="ok", needs_ram=True,
-        runbook="docker-compose.yaml's radiance service; trial scripts in ~/ai-lab/radiance"),
+        # Its releases are its Docker Hub tags (the source is on Codeberg); see updates.latest_hub_tag.
+        updates={"repo": "StillDeadcode/radiance", "kind": "dockerhub", "image": "stilldeadcode/radiance",
+                 "container": "radiance", "web": "https://codeberg.org/StillDeadcode/radiance"},
+        runbook="change the radiance service's image tag in docker-compose.yaml, then recreate it "
+                "(the old image stays for rollback); trial scripts in ~/ai-lab/radiance"),
 )}
 
 NAMES: tuple[str, ...] = tuple(ENGINES)

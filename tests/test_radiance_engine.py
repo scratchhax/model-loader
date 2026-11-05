@@ -20,7 +20,7 @@ def test_it_is_registered_with_its_own_protocol():
     assert "radiance" in ra.SINGLE_MODEL and "radiance" not in speed._METRICS_ENGINES
     assert reg.speaks_radiance("radiance") and not reg.speaks_radiance("strata")
     assert not reg.speaks_strata("radiance")
-    assert not spec.parks and not spec.updates
+    assert not spec.parks and spec.updates["kind"] == "dockerhub"
 
 
 def test_serving_needs_health_ok():
@@ -122,3 +122,62 @@ def test_an_image_name_that_says_nothing_is_known_by_its_devices():
     assert backends._vendor_from_devices(amd) == "rocm"
     assert backends._vendor_from_devices(nv) == "cuda"
     assert backends._vendor_from_devices({"HostConfig": {}}) == "" and backends._vendor_from_devices(None) == ""
+
+
+class _Ctr:
+    def __init__(self, image):
+        self.attrs = {"Config": {"Image": image}}
+
+
+class _Docker:
+    def __init__(self, **by_name):
+        outer = by_name
+
+        class Containers:
+            def get(self, name):
+                return outer[name]
+        self.containers = Containers()
+
+
+def _hub(tags):
+    import httpx
+
+    def h(req):
+        if str(req.url).startswith("https://hub.docker.com/v2/repositories/stilldeadcode/radiance/tags"):
+            return httpx.Response(200, json={"results": [{"name": t} for t in tags]})
+        return httpx.Response(404)
+    return httpx.Client(transport=httpx.MockTransport(h))
+
+
+def test_the_newest_hub_tag_is_the_highest_version():
+    from app import updates
+    c = _hub(["latest", "1.9.0", "1.17.0", "1.16.0", "sha-19d4e8f"])
+    assert updates.latest_hub_tag(c, "stilldeadcode/radiance") == "1.17.0"
+
+
+def test_a_stopped_radiance_is_known_by_its_image_tag():
+    from app import updates
+    d = _Docker(radiance=_Ctr("stilldeadcode/radiance:1.16.0"), other=_Ctr("stilldeadcode/radiance:latest"))
+    assert updates.hub_image_version(d, "radiance") == "1.16.0"
+    assert updates.hub_image_version(d, "other") == "" and updates.hub_image_version(d, "gone") == ""
+
+
+def test_the_check_row_says_update_and_links_the_codeberg_compare(monkeypatch):
+    from app import deepseek_engine, updates
+    monkeypatch.setattr(updates, "ENGINES", [e for e in updates.ENGINES if e["engine"] == "radiance"])
+    monkeypatch.setattr(updates, "_running_report", lambda engine, container: "")
+    monkeypatch.setattr(deepseek_engine, "installed", lambda: [])
+    out = updates.check(_Docker(radiance=_Ctr("stilldeadcode/radiance:1.16.0")), _hub(["1.16.0", "1.17.0"]))
+    (row,) = out["engines"]
+    assert (row["engine"], row["current"], row["latest"], row["status"]) == ("radiance", "1.16.0", "1.17.0", "update")
+    assert row["url"] == "https://codeberg.org/StillDeadcode/radiance/compare/v1.16.0...v1.17.0"
+    assert "image tag" in row["runbook"]
+
+
+def test_a_serving_radiance_reports_its_own_version(monkeypatch):
+    from app import deepseek_engine, updates
+    monkeypatch.setattr(updates, "ENGINES", [e for e in updates.ENGINES if e["engine"] == "radiance"])
+    monkeypatch.setattr(updates, "_running_report", lambda engine, container: "1.17.0")
+    monkeypatch.setattr(deepseek_engine, "installed", lambda: [])
+    (row,) = updates.check(_Docker(radiance=_Ctr("stilldeadcode/radiance:latest")), _hub(["1.17.0"]))["engines"]
+    assert row["current"] == "1.17.0" and row["status"] == "current"

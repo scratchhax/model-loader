@@ -18,7 +18,7 @@ def test_derived_constants_match_what_they_were():
     assert engines.READY_TIMEOUT_S["maya"] == 900.0
     assert engines.READY_TIMEOUT_S.get("llama", engines._READY_TIMEOUT_DEFAULT_S) == 420.0
     assert ENGINE_COLORS["strata"] == ("indigo", "99,102,241")
-    assert [e["engine"] for e in updates.ENGINES] == ["strata", "maya", "llama"]
+    assert [e["engine"] for e in updates.ENGINES] == ["strata", "maya", "llama", "radiance"]
     assert updates.ENGINES[0]["runbook"] == "~/ai-lab/strata/UPGRADING.md"
 
 
