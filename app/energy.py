@@ -61,9 +61,124 @@ def add_sample(ts: float, watts: float) -> None:
     with _lock:
         if _samples and ts <= _samples[-1][0]:
             return
+        if _samples:
+            # The box's own meter: every stretch between two readings goes into its hour, unless
+            # the gap is so long (a stall, a restart) that a straight line across it is a guess.
+            t0, w0 = _samples[-1]
+            dt = ts - t0
+            if dt <= MAX_GAP_S:
+                b = int((t0 + dt / 2) // 3600) * 3600.0
+                acc = _unflushed.setdefault(b, [0.0, 0.0])
+                acc[0] += (w0 + watts) / 2 * dt / 3600.0
+                acc[1] += dt
         _samples.append((ts, watts))
         while _samples and _samples[0][0] < ts - KEEP_S:
             _samples.popleft()
+
+
+# ---------------------------------------------------------------- the box's own running total
+#
+# Whole-box energy per clock hour, kept in the database so a rolling day (and a history of days)
+# survives restarts. Hours rather than calendar days because the boxes run on UTC: a "today" that
+# resets mid-afternoon reads as a bug. The seconds the meter actually covered are kept beside it,
+# so a restart's missing minutes are a stated gap rather than a silent undercount.
+
+MAX_GAP_S = 30.0
+KEEP_HOURS_DAYS = 400
+_unflushed: dict[float, list[float]] = {}    # {hour start: [Wh, metered seconds]}
+
+
+def _init_table(c) -> None:
+    c.execute("CREATE TABLE IF NOT EXISTS energy_hour (bucket REAL PRIMARY KEY, "
+              "wh REAL NOT NULL DEFAULT 0, metered_s REAL NOT NULL DEFAULT 0)")
+
+
+def flush(now: float | None = None) -> int:
+    """Add the meter's unwritten hours to energy_hour. Returns how many hours were touched."""
+    with _lock:
+        pending = dict(_unflushed)
+        _unflushed.clear()
+    if not pending:
+        return 0
+    now = now or time.time()
+    try:
+        with db._LOCK, db._conn() as c:
+            _init_table(c)
+            c.executemany(
+                "INSERT INTO energy_hour(bucket, wh, metered_s) VALUES(?,?,?) "
+                "ON CONFLICT(bucket) DO UPDATE SET wh = wh + excluded.wh, "
+                "metered_s = metered_s + excluded.metered_s",
+                [(b, v[0], v[1]) for b, v in pending.items()])
+            c.execute("DELETE FROM energy_hour WHERE bucket < ?", (now - KEEP_HOURS_DAYS * 86400.0,))
+    except Exception:  # noqa: BLE001 - put it back for the next try rather than lose it
+        with _lock:
+            for b, v in pending.items():
+                acc = _unflushed.setdefault(b, [0.0, 0.0])
+                acc[0] += v[0]
+                acc[1] += v[1]
+        return 0
+    return len(pending)
+
+
+def box_energy(since: float) -> tuple[float, float]:
+    """(Wh, metered seconds) the whole box drew from the hour holding `since` to now."""
+    start = int(since // 3600) * 3600.0
+    try:
+        with db._conn() as c:
+            _init_table(c)
+            r = c.execute("SELECT SUM(wh), SUM(metered_s) FROM energy_hour WHERE bucket >= ?",
+                          (start,)).fetchone()
+    except Exception:  # noqa: BLE001
+        r = None
+    with _lock:
+        extra = [v for b, v in _unflushed.items() if b >= start]
+    wh = (r[0] or 0.0) if r else 0.0
+    sec = (r[1] or 0.0) if r else 0.0
+    return wh + sum(v[0] for v in extra), sec + sum(v[1] for v in extra)
+
+
+def box_days(days: int = 30, now: float | None = None) -> list[dict]:
+    """Whole-box energy per 24 h ending now, oldest first: [{"start", "wh", "metered_s"}]."""
+    now = now or time.time()
+    out = []
+    try:
+        with db._conn() as c:
+            _init_table(c)
+            rows = c.execute("SELECT bucket, wh, metered_s FROM energy_hour WHERE bucket >= ?",
+                             (now - days * 86400.0 - 3600,)).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    for i in range(days, 0, -1):
+        lo, hi = now - i * 86400.0, now - (i - 1) * 86400.0
+        sel = [r for r in rows if lo <= r[0] + 1800 < hi]
+        out.append({"start": round(lo), "wh": round(sum(r[1] for r in sel), 2),
+                    "metered_s": round(sum(r[2] for r in sel))})
+    return out
+
+
+_summary_cache: tuple[float, dict] | None = None
+
+
+def summary(now: float | None = None, window_s: float = 86400.0) -> dict:
+    """The running totals the Overview and the API show: the last `window_s` of whole-box energy
+    and of routed requests' share of it, and the meter's newest reading. Cached 5 s: the
+    Overview's power cell polls every second."""
+    global _summary_cache
+    now = now or time.time()
+    if _summary_cache and window_s == 86400.0 and now - _summary_cache[0] < 5.0:
+        return _summary_cache[1]
+    from . import router_api
+    box_wh, metered = box_energy(now - window_s)
+    t = router_api.totals(now - window_s)
+    pts = samples()
+    out = {"window_s": window_s, "box_wh": round(box_wh, 3), "box_metered_s": round(metered),
+           "box_coverage": round(min(1.0, metered / window_s), 3) if window_s else 0.0,
+           "routed_wh": round(t.get("energy_wh") or 0.0, 3), "routed_n": t.get("energy_n") or 0,
+           "requests": t.get("requests") or 0,
+           "now_w": round(pts[-1][1], 1) if pts and now - pts[-1][0] < 30 else None}
+    if window_s == 86400.0:
+        _summary_cache = (now, out)
+    return out
 
 
 def samples() -> list[tuple[float, float]]:
@@ -158,6 +273,7 @@ def _loop() -> None:
                 attribute(now)
             except Exception:  # noqa: BLE001 - accounting must never take the meter down
                 pass
+            flush(now)
         time.sleep(SAMPLE_S)
 
 
@@ -167,6 +283,36 @@ def start() -> None:
         return
     _started = True
     threading.Thread(target=_loop, daemon=True, name="energy-meter").start()
+
+
+def by_model(since: float) -> list[dict]:
+    """Routed energy per engine and model from `since`, raw rows and rollups both, biggest first."""
+    acc: dict[tuple[str, str], dict] = {}
+    with db._conn() as c:
+        for raw, sql in (
+            (True, "SELECT engine, model, SUM(CASE WHEN energy_wh >= 0 THEN energy_wh ELSE 0 END), "
+                   "       SUM(energy_wh >= 0), SUM(CASE WHEN energy_wh >= 0 THEN completion_tokens ELSE 0 END) "
+                   "FROM router_request WHERE ts >= ? GROUP BY engine, model"),
+            (False, "SELECT engine, model, SUM(energy_wh_sum), SUM(energy_n), 0 "
+                    "FROM router_rollup WHERE bucket >= ? GROUP BY engine, model"),
+        ):
+            for e, m, wh, n, toks in c.execute(sql, (since,)):
+                d = acc.setdefault((e or "", m or ""), {"engine": e or "", "model": m or "",
+                                                        "wh": 0.0, "requests": 0, "output_tokens": 0,
+                                                        "_raw_wh": 0.0})
+                d["wh"] += wh or 0.0
+                d["requests"] += n or 0
+                d["output_tokens"] += toks or 0
+                if raw:
+                    d["_raw_wh"] += wh or 0.0
+    out = [d for d in acc.values() if d["requests"]]
+    for d in out:
+        d["wh"] = round(d["wh"], 3)
+        # Per 1k output tokens from the individually kept requests only: a rollup row has the
+        # energy of its measured requests but not their tokens, so mixing them in would skew it.
+        raw_wh = d.pop("_raw_wh")
+        d["wh_per_1k_output"] = round(raw_wh * 1000 / d["output_tokens"], 3) if d["output_tokens"] else None
+    return sorted(out, key=lambda d: -d["wh"])
 
 
 def fmt_wh(wh) -> str:
