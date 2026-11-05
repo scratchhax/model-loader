@@ -49,7 +49,7 @@
         <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(t.completion_tokens) }}</td>
         <td class="px-3 py-2 text-right tabular-nums">{% if t.ttft_ms %}{{ (t.ttft_ms / 1000) | round(2) }}s{% else %}—{% endif %}</td>
         <td class="px-3 py-2 text-right tabular-nums">{{ (t.total_ms / 1000) | round(1) }}s</td>
-        <td class="px-3 py-2 text-right tabular-nums">{% if t.energy_wh is none %}<span class="text-slate-400" title="Measured a few seconds after it finishes">…</span>{% elif t.energy_wh < 0 %}<span class="text-slate-400" title="The power meter was not running for most of it (a restart), so it is not guessed">—</span>{% else %}{{ t.energy_wh | wh }}{% endif %}</td>
+        <td class="px-3 py-2 text-right tabular-nums whitespace-nowrap">{% if t.energy_wh is none %}<span class="text-slate-400" title="Measured a few seconds after it finishes">…</span>{% elif t.energy_wh < 0 %}<span class="text-slate-400" title="The power meter was not running for most of it (a restart), so it is not guessed">—</span>{% else %}{{ t.energy_wh | wh }}{% endif %}</td>
         <td class="px-3 py-2 text-xs">
           {% if t.status >= 400 %}<span class="text-rose-700 dark:text-rose-400">{{ t.status }}</span>
             <span class="text-slate-500 dark:text-slate-400">{{ t.error[:70] }}</span>

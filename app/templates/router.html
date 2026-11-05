@@ -234,7 +234,7 @@
         <td class="px-3 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">{{ '{:,}'.format(c.cached_tokens or 0) }}</td>
         <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(c.completion_tokens or 0) }}</td>
         {# A run's bill: the sum of its turns, still growing while its newest turn is measured. #}
-        <td class="px-3 py-2 text-right tabular-nums">{{ c.energy_wh | wh }}{% if c.energy_pending %}<span class="text-slate-400" title="{{ c.energy_pending }} turn{{ 's' if c.energy_pending != 1 }} still being measured"> …</span>{% endif %}</td>
+        <td class="px-3 py-2 text-right tabular-nums whitespace-nowrap">{{ (c.energy_wh | wh) if c.energy_n else '—' }}{% if c.energy_pending %}<span class="text-slate-400" title="{{ c.energy_pending }} turn{{ 's' if c.energy_pending != 1 }} still being measured"> …</span>{% endif %}</td>
         <td class="px-3 py-2 text-right tabular-nums">{% if c.avg_ttft %}{{ (c.avg_ttft / 1000) | round(2) }}s{% else %}—{% endif %}</td>
         <td class="px-3 py-2 text-right tabular-nums">{{ (c.avg_total / 1000) | round(1) }}s</td>
         <td class="px-3 py-2 text-right text-xs text-slate-500 dark:text-slate-400">{{ c.last_ts | ts }}</td>
@@ -274,7 +274,7 @@
         <td class="px-3 py-2 text-right tabular-nums">{{ '{:,}'.format(r.completion_tokens) }}</td>
         <td class="px-3 py-2 text-right tabular-nums">{% if r.ttft_ms %}{{ (r.ttft_ms / 1000) | round(2) }}s{% else %}—{% endif %}</td>
         <td class="px-3 py-2 text-right tabular-nums">{{ (r.total_ms / 1000) | round(1) }}s</td>
-        <td class="px-3 py-2 text-right tabular-nums">{% if r.energy_wh is none %}<span class="text-slate-400" title="Measured a few seconds after it finishes">…</span>{% elif r.energy_wh < 0 %}<span class="text-slate-400" title="The power meter was not running for most of it (a restart), so it is not guessed">—</span>{% else %}{{ r.energy_wh | wh }}{% endif %}</td>
+        <td class="px-3 py-2 text-right tabular-nums whitespace-nowrap">{% if r.energy_wh is none %}<span class="text-slate-400" title="Measured a few seconds after it finishes">…</span>{% elif r.energy_wh < 0 %}<span class="text-slate-400" title="The power meter was not running for most of it (a restart), so it is not guessed">—</span>{% else %}{{ r.energy_wh | wh }}{% endif %}</td>
         <td class="px-3 py-2 text-xs">
           {% if r.status >= 400 %}
             {# The reason, not just the number: a refusal here is almost always "that engine is

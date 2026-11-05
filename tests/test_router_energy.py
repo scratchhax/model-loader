@@ -142,6 +142,18 @@ def test_router_tab_and_conversation_show_energy(web):  # noqa: F811
     assert "3.60 Wh at the wall" in conv and "1 of 2 turns measured" in conv
 
 
+def test_a_conversation_with_nothing_measured_says_so_not_zero(web):  # noqa: F811
+    import re
+    import time
+    ra._record(ts=time.time() - 500, conv="old-run", engine="llama", model="m", status=200,
+               completion_tokens=5, total_ms=1000)
+    with db._LOCK, db._conn() as c:
+        c.execute("UPDATE router_request SET energy_wh = -1")
+    page = web.get("/router").text
+    row = page.split("/router/conversation/old-run")[1].split("</tr>")[0]
+    assert "0.00 Wh" not in row and re.search(r"whitespace-nowrap\">—", row)
+
+
 def test_formatting():
     assert energy.fmt_wh(None) == "—" and energy.fmt_wh(-1) == "—"
     assert energy.fmt_wh(0.123) == "0.12 Wh" and energy.fmt_wh(12.34) == "12.3 Wh"
