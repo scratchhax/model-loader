@@ -441,9 +441,10 @@ def _discover_llama_containers() -> list[dict]:
 
 # The environment variables a backend reads its API key from. Strata 0.2 requires one on every
 # endpoint but /health (`strata launch --access lan`); upstream's image takes it as API_KEY, and
-# STRATA_API_KEY is the server's own name for it. llama.cpp and Maya set neither, so for them
-# auth_headers() is {} and their requests are exactly what they were.
-_KEY_ENV = ("API_KEY", "STRATA_API_KEY")
+# STRATA_API_KEY is the server's own name for it. Radiance reads RADIANCE_API_KEY (its
+# --api-key-env). llama.cpp and Maya set none, so for them auth_headers() is {} and their requests
+# are exactly what they were.
+_KEY_ENV = ("API_KEY", "STRATA_API_KEY", "RADIANCE_API_KEY")
 
 
 def api_key_of(attrs: dict | None) -> str:

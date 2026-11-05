@@ -311,7 +311,7 @@ second half a change needs a recreate and a plain restart silently keeps the old
 Clients bind to model ids, and on a box where engines take turns on the cards the ids are not
 stable: switching from llama.cpp to Strata changes every usable id at once. So Model Loader
 runs a second process, an OpenAI-compatible router on port `8086`, where **the engine name is a
-model id**. Ask for `strata`, `llama`, `maya` or `deepseek` and you get whatever that engine is
+model id**. Ask for `strata`, `llama`, `maya`, `deepseek` or `radiance` and you get whatever that engine is
 serving now; a saved Open WebUI workspace model or IDE config keeps working across a switch.
 Real ids are listed and served too, for when you mean one specific model.
 
@@ -324,8 +324,8 @@ Real ids are listed and served too, for when you mean one specific model.
   wrong.
 - **Which model.** Per engine, and it means different things. llama.cpp loads on demand, so its
   default is simply what the `llama` alias loads next. Strata cannot load on demand, so its
-  choice is one of the installed packs and applies at its next start. Maya and DeepSeek serve
-  the one model their container was set up with.
+  choice is one of the installed packs and applies at its next start. Maya, DeepSeek and
+  Radiance serve the one model their container was set up with.
 - **Auto-switch, off by default, per engine.** With it on, asking for an engine that is not
   holding the cards hands them over, through the same switch the Engine row uses. It refuses,
   and says which rule stopped it, while another engine has a request in flight, while a switch

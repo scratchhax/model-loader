@@ -34,7 +34,7 @@
             hx-post="/engines/{{ e.engine }}/activate"
             {% if strata_live %}hx-include="#engine-soft"{% endif %}
             hx-target="#engine-switch-toast" hx-swap="innerHTML"
-            hx-confirm="Hand the cards to {{ e.engine }}? Every other container holding a GPU is released - unloaded and kept warm where that is offered, stopped otherwise - then the driver is waited on and {{ e.names|join(', ') }} starts."
+            hx-confirm="Hand the cards to {{ e.engine }}? {% if e.engine in needs_ram %}It pins most of the RAM, so every other container holding a GPU is STOPPED (none is unloaded and kept warm){% else %}Every other container holding a GPU is released - unloaded and kept warm where that is offered, stopped otherwise -{% endif %} then the driver is waited on and {{ e.names|join(', ') }} starts."
             {% endif %}>
       <button class="inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-mono
                      {% if holding %}border-fuchsia-300 dark:border-fuchsia-700 bg-fuchsia-50 dark:bg-fuchsia-950/40 text-fuchsia-700 dark:text-fuchsia-300

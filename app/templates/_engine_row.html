@@ -38,6 +38,10 @@
           {# Its own container with one model in it, so the alias always means that model. #}
           DeepSeek runs the one model its container was set up with, on Strata's DeepSeek engine;
           asking for <span class="font-mono">deepseek</span> always gets that model.
+        {% elif e == 'radiance' %}
+          {# Same shape as DeepSeek: one .rad model, named by the radiance service's command. #}
+          Radiance runs the one model its compose command names (the radiance service in
+          docker-compose.yaml); asking for <span class="font-mono">radiance</span> always gets that model.
         {% else %}
           llama.cpp loads on demand, so this takes effect on the next request asking for
           <span class="font-mono">llama</span>.
@@ -66,9 +70,10 @@
     {% endif %}
     {# Maya starts the config its compose command names, so a choice here would be recorded and
        never read. It is shown, so the row matches the other engines, and not offered. #}
-    {% set fixed = e == 'maya' %}
+    {% set fixed = e in ('maya', 'radiance') %}
     <form hx-post="/router/default" hx-target="find .form-note" hx-swap="innerHTML" class="flex min-w-0 max-w-full items-center gap-2"
-          {% if fixed %}title="Maya starts the model its compose command names (--config {{ maya_run_config or '?' }}); it is not chosen here."{% endif %}>
+          {% if e == 'maya' %}title="Maya starts the model its compose command names (--config {{ maya_run_config or '?' }}); it is not chosen here."
+          {% elif fixed %}title="{{ e }} starts the model its compose command names; it is not chosen here."{% endif %}>
       <input type="hidden" name="engine" value="{{ e }}">
       <select name="model" {% if fixed %}disabled{% endif %} class="min-w-0 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs max-w-[22rem]">
         <option value="">(none)</option>

@@ -696,6 +696,138 @@ def _slots_strata(raw: list[dict], r: dict) -> list["SlotSpeed"]:
     return out
 
 
+# Radiance's own documents. GET /stats lists every running request with the slot it holds:
+#
+#   {"id": 2, "state": "decode", "prompt": 65, "computed": 180, "cached": 0, "output": 116,
+#    "ctx": 181, "slot": 0, "tps": 108.1, ...}
+#
+# "prefill" or "decode"; `computed` counts generated tokens too once decoding, so prefill progress
+# is (cached + computed) / prompt only while the state is prefill. `tps` is the request's mean
+# since it started, kept as the fallback; the live rate is the output count's own movement, as on
+# llama. Nothing it serves describes a FINISHED request, so the dimmed last-run figures come from
+# its log line instead:
+#
+#   I req chatcmpl-... done from 172.18.0.1:36364 finish=length prompt=65 (cache 0) gen=400
+#     reason=400 ttft=0.10s 89.5 tok/s 4.56s
+_RE_RAD_DONE = re.compile(r" done from \S+ .*?prompt=(\d+) \(cache (\d+)\) gen=(\d+)"
+                          r".*?ttft=([\d.]+)s ([\d.]+) tok/s")
+_rad_stats_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _radiance_last(name: str) -> dict:
+    """The newest finished request's figures from Radiance's log: last_gen_tps, last_gen_tokens,
+    last_pp_tps (the tokens it actually read, cache hits excluded, over time to first token)."""
+    out = {"last_gen_tps": 0.0, "last_gen_tokens": 0, "last_pp_tps": 0.0}
+    ok, text = container_logs(name, tail=300, current_run_only=True)
+    if not ok:
+        return out
+    for line in reversed(text.splitlines()):
+        m = _RE_RAD_DONE.search(line)
+        if not m:
+            continue
+        prompt, cache, gen = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        ttft, tps = float(m.group(4)), float(m.group(5))
+        out["last_gen_tps"], out["last_gen_tokens"] = tps, gen
+        read = prompt - cache
+        if read > 0 and ttft > 0:
+            out["last_pp_tps"] = round(read / ttft, 1)
+        break
+    return out
+
+
+async def _radiance_stats(container_name: str, internal_port: int) -> dict:
+    try:
+        r = await _http().get(f"http://{container_name}:{internal_port}/stats",
+                              timeout=httpx.Timeout(1.5, read=2.0),
+                              headers=auth_headers(container_name))
+        if r.status_code == 200 and isinstance(r.json(), dict):
+            return r.json()
+    except (httpx.HTTPError, ValueError):
+        pass
+    return {}
+
+
+def _slot_from_radiance(container_name: str, q: dict, n_ctx: int, now: float) -> SlotSpeed:
+    """One running request of /stats as its slot's SlotSpeed."""
+    index = int(q.get("slot") or 0)
+    key = _slot_key(container_name, index)
+    rid = q.get("id")
+    prompt = int(q.get("prompt") or 0)
+    cached = int(q.get("cached") or 0)
+    computed = int(q.get("computed") or 0)
+    output = int(q.get("output") or 0)
+    ctx_used = int(q.get("ctx") or (prompt + output))
+    if str(q.get("state") or "") == "prefill" or (not output and q.get("state") != "decode"):
+        _speed_prev.pop(key, None)
+        _gen_ema.pop(key, None)
+        done = min(prompt, cached + computed)
+        return SlotSpeed(index=index, state="prefill", ctx_used=ctx_used, ctx_total=n_ctx,
+                         ctx_cached=cached, prefill_done=done, prefill_total=prompt,
+                         prefill_pct=min(100, int(round(100.0 * done / prompt))) if prompt else 0,
+                         prompt_tokens=prompt, task_id=rid if isinstance(rid, int) else None)
+    gen_tps = 0.0
+    prev = _speed_prev.get(key)
+    if prev and prev[2] == rid and prev[3]:
+        dt, dn = now - prev[0], output - prev[1]
+        if 0.25 < dt < 10.0 and dn > 0:
+            last = _gen_ema.get(key)
+            raw = dn / dt
+            gen_tps = raw if last is None else _GEN_EMA_ALPHA * raw + (1 - _GEN_EMA_ALPHA) * last
+            _gen_ema[key] = gen_tps
+        else:
+            gen_tps = _gen_ema.get(key) or float(q.get("tps") or 0.0)
+    else:
+        gen_tps = float(q.get("tps") or 0.0)
+    _speed_prev[key] = (now, output, rid, True)
+    return SlotSpeed(index=index, state="generating", gen_tps=gen_tps, decoded=output,
+                     ctx_used=ctx_used, ctx_total=n_ctx, ctx_cached=cached,
+                     prompt_tokens=prompt, task_id=rid if isinstance(rid, int) else None)
+
+
+async def _slots_from_radiance(container_name: str, internal_port: int, model_id: str,
+                               ctx_key: str) -> tuple[dict, list[SlotSpeed]]:
+    """(rates, slots) from Radiance's /stats, one read a poll. /stats is a plain read of the
+    scheduler's state (no queue task, no idle clock to reset), so it is safe at any rate. Every
+    slot is drawn, the free ones holding what they last held, as on the other engines."""
+    now = time.time()
+    st = await _radiance_stats(container_name, internal_port)
+    cached_rates = _rates_cache.get(container_name)
+    if cached_rates and (now - cached_rates[0]) < _RATES_TTL:
+        last = cached_rates[1]
+    else:
+        last = await asyncio.to_thread(_radiance_last, container_name)
+        _rates_cache[container_name] = (now, last)
+    p = await _props_state(container_name, internal_port, model_id)
+    n_ctx = int(p.get("n_ctx") or 0)
+    count = max(1, int(p.get("total_slots") or 1))
+    running = [q for q in (st.get("requests") or []) if isinstance(q, dict)]
+    by_slot = {int(q.get("slot") or 0): q for q in running}
+    count = max(count, 1 + max(by_slot, default=-1))
+    remembered = dict(enumerate(_last_slots.get(ctx_key) or []))
+    slots: list[SlotSpeed] = []
+    for i in range(count):
+        if i in by_slot:
+            slots.append(_slot_from_radiance(container_name, by_slot[i], n_ctx, now))
+        else:
+            _speed_prev.pop(_slot_key(container_name, i), None)
+            _gen_ema.pop(_slot_key(container_name, i), None)
+            used, _total = remembered.get(i, (0, n_ctx))
+            slots.append(SlotSpeed(index=i, state="idle", ctx_used=used, ctx_total=n_ctx))
+    _evict_other_models(_last_slots, ctx_key)
+    _last_slots[ctx_key] = [(sl.ctx_used, sl.ctx_total) for sl in slots]
+    gen = [sl for sl in slots if sl.state == "generating"]
+    pre = [sl for sl in slots if sl.state == "prefill"]
+    r = {"cur_gen_tps": sum(sl.gen_tps for sl in gen), "cur_gen_tokens": sum(sl.decoded for sl in gen),
+         "cur_pp_tps": float(st.get("prefill_tps") or 0.0) if pre else 0.0,
+         "cur_pp_pct": max((sl.prefill_pct for sl in pre), default=0),
+         "cur_pp_done": sum(sl.prefill_done for sl in pre),
+         "cur_pp_total": sum(sl.prefill_total for sl in pre),
+         "newest": "generating" if gen else ("prefill" if pre else ""),
+         "open_task": None, "open_slot": None, "expert_hit_pct": None, "conv_cache": None,
+         **last}
+    return r, slots
+
+
 def _rates_from_log(name: str) -> dict:
     """Occupancy and throughput from the current run's log tail.
 
@@ -797,22 +929,11 @@ def _rates_from_log(name: str) -> dict:
     return out
 
 
-async def inference_speed(container_name: str, internal_port: int | None,
-                          loaded_model: str | None) -> "InferenceSpeed | None":
-    """Live throughput for a backend, or None when there is nothing to show.
-
-    Cheap parts first: no loaded model means no speedometer, and that is the common case on an
-    idle box. Both reads are skipped entirely in that state.
-    """
-    if not loaded_model or internal_port is None:
-        return None
-    cached = _speed_cache.get(container_name)
-    if cached and (time.time() - cached[0]) < _SPEED_TTL:
-        return cached[1]
-
-    model_id = loaded_model.split(",")[0].strip()
-    _engine = engine_for(container_name)
-
+async def _slots_from_server(container_name: str, internal_port: int, model_id: str,
+                             _engine: str, ctx_key: str) -> tuple[dict, list[SlotSpeed]]:
+    """(rates, slots) for llama and the engines that speak Strata's server: the log or /metrics
+    for the rates, /slots (only while something is in flight) for the slots. Radiance has its
+    own reader, _slots_from_radiance."""
     # The log read comes FIRST now, because it is what decides whether /slots may be touched.
     cached_rates = _rates_cache.get(container_name)
     if cached_rates and (time.time() - cached_rates[0]) < _RATES_TTL:
@@ -852,7 +973,6 @@ async def inference_speed(container_name: str, internal_port: int | None,
             raw_slots = []
 
     now = time.time()
-    ctx_key = f"{container_name}/{model_id}"
     slots: list[SlotSpeed] = []
 
     if raw_slots:
@@ -879,6 +999,31 @@ async def inference_speed(container_name: str, internal_port: int | None,
             slots = [SlotSpeed(index=i, state="idle", ctx_total=per_slot)
                      for i in range(count)]
         _prune_slot_state(container_name, set())
+    return r, slots
+
+
+async def inference_speed(container_name: str, internal_port: int | None,
+                          loaded_model: str | None) -> "InferenceSpeed | None":
+    """Live throughput for a backend, or None when there is nothing to show.
+
+    Cheap parts first: no loaded model means no speedometer, and that is the common case on an
+    idle box. Both reads are skipped entirely in that state.
+    """
+    if not loaded_model or internal_port is None:
+        return None
+    cached = _speed_cache.get(container_name)
+    if cached and (time.time() - cached[0]) < _SPEED_TTL:
+        return cached[1]
+
+    model_id = loaded_model.split(",")[0].strip()
+    _engine = engine_for(container_name)
+
+    ctx_key = f"{container_name}/{model_id}"
+    if engine_registry.speaks_radiance(_engine):
+        r, slots = await _slots_from_radiance(container_name, internal_port, model_id, ctx_key)
+    else:
+        r, slots = await _slots_from_server(container_name, internal_port, model_id, _engine, ctx_key)
+    now = time.time()
 
     generating = [sl for sl in slots if sl.state == "generating"]
     prefilling = [sl for sl in slots if sl.state == "prefill"]
