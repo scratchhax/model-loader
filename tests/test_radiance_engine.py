@@ -112,3 +112,13 @@ def test_idle_shows_the_last_request_from_the_log(monkeypatch):
 def test_the_router_row_says_what_radiance_runs(monkeypatch, web):  # noqa: F811
     r = web.post("/router/default", data={"engine": "radiance", "model": "x"})
     assert "Radiance starts the model its compose command names" in r.text
+
+
+def test_an_image_name_that_says_nothing_is_known_by_its_devices():
+    # stilldeadcode/radiance:1.17.0 names no GPU stack; /dev/kfd does. As "unknown" the Overview
+    # ranked it below the CPU voice model and led with that while Radiance held both cards.
+    amd = {"HostConfig": {"Devices": [{"PathOnHost": "/dev/kfd"}, {"PathOnHost": "/dev/dri"}]}}
+    nv = {"HostConfig": {"Devices": [], "DeviceRequests": [{"Driver": "nvidia"}]}}
+    assert backends._vendor_from_devices(amd) == "rocm"
+    assert backends._vendor_from_devices(nv) == "cuda"
+    assert backends._vendor_from_devices({"HostConfig": {}}) == "" and backends._vendor_from_devices(None) == ""

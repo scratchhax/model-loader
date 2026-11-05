@@ -419,6 +419,11 @@ def _discover_llama_containers() -> list[dict]:
             continue
         engine = engine or "llama"
         vendor = "rocm" if "rocm" in img else "cuda" if "cuda" in img else ("cpu" if "server" in img else "unknown")
+        if vendor == "unknown":
+            # An image whose name says nothing (stilldeadcode/radiance:1.17.0) is known by the
+            # devices it was given. Without this Radiance counted as a CPU-ish backend and the
+            # Overview led with the voice model on the CPU while Radiance held both cards.
+            vendor = _vendor_from_devices(c.attrs) or vendor
         # Router or single-model server? A router is given --models-preset/--models-dir and
         # serves whatever models.ini holds; a server given -m serves exactly one file and has
         # no relationship to models.ini at all. They are both llama.cpp:server images, so the
@@ -437,6 +442,18 @@ def _discover_llama_containers() -> list[dict]:
         out.append({"name": c.name, "image": img, "vendor": vendor,
                     "router": is_router, "engine": engine, "api_key": api_key_of(c.attrs)})
     return out
+
+
+def _vendor_from_devices(attrs: dict | None) -> str:
+    """"rocm" for a container given /dev/kfd, "cuda" for one given an NVIDIA device or GPU
+    request, "" otherwise."""
+    host = (attrs or {}).get("HostConfig") or {}
+    devices = [str((d or {}).get("PathOnHost") or "") for d in host.get("Devices") or []]
+    if any(d == "/dev/kfd" for d in devices):
+        return "rocm"
+    if any(d.startswith("/dev/nvidia") for d in devices) or host.get("DeviceRequests"):
+        return "cuda"
+    return ""
 
 
 # The environment variables a backend reads its API key from. Strata 0.2 requires one on every
