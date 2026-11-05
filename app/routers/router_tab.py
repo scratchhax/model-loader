@@ -9,6 +9,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
 from .. import db, engine_controls, engine_registry, router_api
+from .. import radiance as radiance_engine
 from ..config import settings
 from ..web import templates, _form_note, _toast
 from . import strata as strata_router
@@ -194,9 +195,19 @@ def _router_page_context(bs: list[dict], range: str, since: float) -> dict:
 def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLResponse:
     if engine not in router_api.ENGINES:
         return _form_note(False, f"unknown engine {engine!r}")
-    if engine in ("maya", "radiance"):
+    if engine == "maya":
         return _form_note(False, f"{engine_registry.get(engine).label} starts the model its compose "
                                  "command names; it is not set here")
+    if engine == "radiance":
+        # The value is a .rad file in models/rad. Written where the service's entry point reads it,
+        # which a read-only instance must not do (the Strata rule below).
+        if settings.router_readonly:
+            return _form_note(False, "this instance is read-only; choose Radiance's model on the live Model Loader")
+        ok, msg = radiance_engine.select(model.strip())
+        if not ok:
+            return _form_note(False, msg)
+        from .. import services
+        return _form_note(True, f"{msg}; {radiance_engine.restart_if_idle(services._docker_client())}")
     db.set_setting(f"router.default.{engine}", model.strip())
     if engine == "strata" and model.strip():
         # For Strata the value is an INSTALL TAG, because that is the unit you can choose - the

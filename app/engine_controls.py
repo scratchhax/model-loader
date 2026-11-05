@@ -8,6 +8,7 @@ Blocking (docker, Maya's configs, install configs on disk), so callers run it in
 from __future__ import annotations
 
 from . import maya as maya_engine
+from . import radiance as radiance_engine
 from . import router_api, services, strata_models
 
 
@@ -50,31 +51,6 @@ def strata_choices() -> list[tuple[str, str]]:
     return out
 
 
-def fixed_model(engine: str) -> str:
-    """The model a one-model engine's container is started with, from its own command line:
-    `--served-model-name`, else the stem of `--model`. "" when there is no such container.
-
-    For engines whose model is fixed by compose (Radiance): there is nothing to choose, so the
-    row shows this instead of a default that nothing would read.
-    """
-    client = services._docker_client()
-    if client is None:
-        return ""
-    for b in router_api._backends(include_stopped=True):
-        if b["engine"] != engine:
-            continue
-        try:
-            cmd = ((client.containers.get(b["name"]).attrs or {}).get("Config") or {}).get("Cmd") or []
-        except Exception:  # noqa: BLE001 - a vanished container is "nothing to show"
-            continue
-        args = [str(a) for a in cmd] if isinstance(cmd, list) else str(cmd).split()
-        for flag in ("--served-model-name", "--model"):
-            if flag in args and args.index(flag) + 1 < len(args):
-                val = args[args.index(flag) + 1]
-                return val if flag == "--served-model-name" else val.rsplit("/", 1)[-1].removesuffix(".rad")
-    return ""
-
-
 def rows_context(bs: list[dict]) -> dict:
     """What _engine_row.html needs, for every engine, given the router's live backends."""
     from .routers import strata as strata_router
@@ -112,13 +88,12 @@ def rows_context(bs: list[dict]) -> dict:
         defaults["maya"] = maya_runs
     elif len(per_engine.get("maya", [])) == 1:
         defaults["maya"] = per_engine["maya"][0][0]
-    # Radiance's row: the one model its compose command names, read from the container itself so
-    # it shows while the container is stopped (the engines take turns, so that is most of the time).
-    radiance_runs = fixed_model("radiance")
-    if radiance_runs:
-        if (radiance_runs, radiance_runs) not in per_engine.setdefault("radiance", []):
-            per_engine["radiance"].append((radiance_runs, radiance_runs))
-        defaults["radiance"] = radiance_runs
+    # Radiance's row: the .rad containers in models/rad, and the one its next start loads
+    # (models/rad/radiance.env, read by the service's entry point). Read from disk, so the row is
+    # complete while the container is stopped - the engines take turns, so that is most of the time.
+    per_engine["radiance"] = radiance_engine.choices()
+    if radiance_engine.selected():
+        defaults["radiance"] = radiance_engine.selected()
     # Strata's row, likewise: the install strata.env names (the Strata tab can change it), not a
     # stored router.default.strata.
     strata_next = strata_router._strata_selected_tag(strata_models.read_selection(strata_router.STRATA_ENV_FILE))
