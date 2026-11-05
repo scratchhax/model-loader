@@ -127,7 +127,7 @@ def _wait_ready(name: str, timeout: float | None = None, quiet: bool = False) ->
         _switch_state.update(phase="loading",
                              msg=f"{name} up {int(time.time() - _switch_state.get('t0', time.time()))}s, "
                                  + ("model not loaded yet" if strata
-                                    else "loading the model" if engine == "maya"
+                                    else "loading the model" if spec and spec.ready_status
                                     else "port not answering yet"))
         time.sleep(2.0)
     return False, f"{name} started but {url} did not answer within {int(timeout)}s"
@@ -186,6 +186,11 @@ def activate_engine(engine: str, soft: bool = False, share: bool = False) -> tup
     engines = {e["engine"]: e for e in gpu_engines()}
     if engine not in engines:
         return False, f"no GPU backend of engine '{engine}'"
+    # An engine that pins most of the RAM cannot start beside a parked one (a parked Strata keeps
+    # tens of GB resident), so a soft ask is answered hard: what it displaces is stopped.
+    spec = engine_registry.get(engine)
+    if soft and spec is not None and spec.needs_ram:
+        soft = False
     if not _switch_lock.acquire(blocking=False):
         cur = _switch_state.get("engine") or "another engine"
         return False, f"already switching to {cur}"

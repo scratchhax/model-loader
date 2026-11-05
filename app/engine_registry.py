@@ -38,6 +38,12 @@ class Engine:
     # slots. The "strata" engine name itself stays the Qwen install (tuning, pin file, pack
     # catalog, update check); this is only the wire protocol.
     protocol: str = ""
+    # What /health's "status" must say for the engine to be serving, for engines whose /health
+    # answers before the model is in or says something else while it is not taking requests.
+    ready_status: str = ""
+    # Pins most of the box's RAM while it runs, so an engine it displaces is STOPPED, never
+    # parked: a parked Strata keeps tens of GB resident, and the start would not fit beside it.
+    needs_ram: bool = False
 
 
 ENGINES: dict[str, Engine] = {e.name: e for e in (
@@ -59,7 +65,7 @@ ENGINES: dict[str, Engine] = {e.name: e for e in (
     Engine(
         name="maya", label="Maya", color=("fuchsia", "217,70,239"),
         single_model=True, ready_path="/health", ready_timeout_s=900.0,
-        strata_metrics=True,
+        strata_metrics=True, ready_status="ok",
         updates={"repo": "mw00/project-maya", "kind": "tags", "image": "ai-lab/maya",
                  "live_tag": "rocm7", "container": "maya"},
         runbook="~/ai-lab/maya/UPGRADING.md"),
@@ -74,6 +80,17 @@ ENGINES: dict[str, Engine] = {e.name: e for e in (
         single_model=True, ready_path="/health", ready_timeout_s=900.0,
         strata_metrics=True, parks=True, protocol="strata",
         runbook="~/ai-lab/strata/UPGRADING.md"),
+    # Radiance (codeberg.org/StillDeadcode/radiance): its own C++/HIP server, one .rad model per
+    # container. Its port opens once the model is in and /health then says "ok"; a start is ~1 min
+    # warm and a few from a cold page cache (it reads a 122 GB file). It serves its own JSON
+    # (/stats: every running request with its slot, state and progress), not Strata's /metrics,
+    # and it has no park. It pins ~90 GB of RAM (an n-gram table, a host expert pool, a prefix
+    # tier), hence needs_ram.
+    Engine(
+        name="radiance", label="Radiance", color=("rose", "244,63,94"),
+        single_model=True, ready_path="/health", ready_timeout_s=600.0,
+        protocol="radiance", ready_status="ok", needs_ram=True,
+        runbook="docker-compose.yaml's radiance service; trial scripts in ~/ai-lab/radiance"),
 )}
 
 NAMES: tuple[str, ...] = tuple(ENGINES)
@@ -104,6 +121,13 @@ def serving(engine: str, status_code: int, body) -> bool:
         return False
     if speaks_strata(engine):
         return isinstance(body, dict) and bool(body.get("loaded"))
-    if engine == "maya":
-        return isinstance(body, dict) and str(body.get("status") or "") == "ok"
+    spec = get(engine)
+    if spec and spec.ready_status:
+        return isinstance(body, dict) and str(body.get("status") or "") == spec.ready_status
     return True
+
+
+def speaks_radiance(engine: str | None) -> bool:
+    """Is this engine Radiance's server (its /stats document, its log lines)?"""
+    spec = get(engine)
+    return bool(spec and spec.protocol == "radiance")

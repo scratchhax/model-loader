@@ -9,11 +9,11 @@ from app.services import engines, speed
 
 
 def test_order_and_default_unchanged():
-    assert reg.NAMES == ("strata", "llama", "maya", "deepseek") == ra.ENGINES
+    assert reg.NAMES == ("strata", "llama", "maya", "deepseek", "radiance") == ra.ENGINES
 
 
 def test_derived_constants_match_what_they_were():
-    assert ra.SINGLE_MODEL == {"strata", "maya", "deepseek"}
+    assert ra.SINGLE_MODEL == {"strata", "maya", "deepseek", "radiance"}
     assert speed._METRICS_ENGINES == {"strata", "maya", "deepseek"}
     assert engines.READY_TIMEOUT_S["maya"] == 900.0
     assert engines.READY_TIMEOUT_S.get("llama", engines._READY_TIMEOUT_DEFAULT_S) == 420.0

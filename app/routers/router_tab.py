@@ -8,7 +8,7 @@ import time
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
-from .. import db, engine_controls, router_api
+from .. import db, engine_controls, engine_registry, router_api
 from ..config import settings
 from ..web import templates, _form_note, _toast
 from . import strata as strata_router
@@ -194,8 +194,9 @@ def _router_page_context(bs: list[dict], range: str, since: float) -> dict:
 def router_set_default(engine: str = Form(...), model: str = Form("")) -> HTMLResponse:
     if engine not in router_api.ENGINES:
         return _form_note(False, f"unknown engine {engine!r}")
-    if engine == "maya":
-        return _form_note(False, "Maya starts the model its compose command names; it is not set here")
+    if engine in ("maya", "radiance"):
+        return _form_note(False, f"{engine_registry.get(engine).label} starts the model its compose "
+                                 "command names; it is not set here")
     db.set_setting(f"router.default.{engine}", model.strip())
     if engine == "strata" and model.strip():
         # For Strata the value is an INSTALL TAG, because that is the unit you can choose - the
