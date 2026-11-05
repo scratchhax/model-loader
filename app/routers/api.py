@@ -28,7 +28,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
-from .. import bench, db, gpu_activity, hw, ini, router_api, services, updates
+from .. import bench, db, energy, gpu_activity, hw, ini, router_api, services, updates
 from ..config import settings
 from ..downloader import manager
 from . import containers as containers_page
@@ -158,7 +158,8 @@ def index() -> dict:
     """What is here, so a client can discover it without reading the source."""
     return {"version": API_VERSION, "endpoints": [
         "/api/v1/status", "/api/v1/hero", "/api/v1/cards", "/api/v1/strip", "/api/v1/box",
-        "/api/v1/series", "/api/v1/router?range=24h|7d|30d|90d|1y|all", "/api/v1/containers",
+        "/api/v1/series", "/api/v1/router?range=24h|7d|30d|90d|1y|all", "/api/v1/energy",
+        "/api/v1/containers",
         "/api/v1/downloads", "/api/v1/models", "/api/v1/benchmarks",
         "/api/v1/benchmarks/{run_id}", "/api/v1/updates", "/api/v1/maya",
         "/api/v1/engines/switch"]}
@@ -228,6 +229,40 @@ async def series() -> dict:
                 "power": {"watts": _pairs(watts), "temp_c": _pairs(temps)},
                 "host": {"load_pct": _pairs(load), "ram_avail_gb": _pairs(ram)}}
     return {"version": API_VERSION, "ts": time.time(), **await asyncio.to_thread(build)}
+
+
+@router.get("/energy")
+async def energy_stats() -> dict:
+    """Electricity: this box's wall energy and the routed requests' share of it.
+
+    windows         last 24 h / 7 d / 30 d: box_wh (whole box at the wall, from the meter's
+                    hourly record), box_metered_s (how much of the window the meter covered:
+                    restarts are gaps, not zeros), routed_wh / routed_n (energy of the requests
+                    the router served, each its share of the box while it ran), requests
+    days            box Wh per 24 h ending now, the last 30, oldest first
+    by_model_24h    routed Wh per engine and model, with Wh per 1k output tokens
+    by_model_7d     the same over 7 days
+    conversations   the 15 most recent conversations (agent runs) with their Wh
+    now_w           the meter's newest wall reading
+    """
+    def build() -> dict:
+        now = time.time()
+        wins = {}
+        for key, secs in (("24h", 86400.0), ("7d", 7 * 86400.0), ("30d", 30 * 86400.0)):
+            s = energy.summary(now, window_s=secs)
+            wins[key] = {k: s[k] for k in ("box_wh", "box_metered_s", "box_coverage",
+                                           "routed_wh", "routed_n", "requests")}
+        convs = router_tab._router_conversations(now - 86400.0, limit=15)
+        return {"now_w": energy.summary(now)["now_w"], "windows": wins,
+                "days": energy.box_days(30, now),
+                "by_model_24h": energy.by_model(now - 86400.0),
+                "by_model_7d": energy.by_model(now - 7 * 86400.0),
+                "conversations": [{"conv": c["conv"], "engine": c["engine"], "model": c["model"],
+                                   "turns": c["turns"], "last_ts": c["last_ts"],
+                                   "output_tokens": c["completion_tokens"] or 0,
+                                   "wh": round(c["energy_wh"] or 0.0, 4) if c.get("energy_n") else None,
+                                   "measuring": c.get("energy_pending") or 0} for c in convs]}
+    return {"version": API_VERSION, "ts": time.time(), **jsonable(await asyncio.to_thread(build))}
 
 
 # ------------------------------------------------------------------------------ other pages

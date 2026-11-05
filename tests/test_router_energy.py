@@ -158,3 +158,61 @@ def test_formatting():
     assert energy.fmt_wh(None) == "—" and energy.fmt_wh(-1) == "—"
     assert energy.fmt_wh(0.123) == "0.12 Wh" and energy.fmt_wh(12.34) == "12.3 Wh"
     assert energy.fmt_wh(456) == "456 Wh" and energy.fmt_wh(2500) == "2.50 kWh"
+
+
+# ---------------------------------------------------------------- the box's running total
+
+def test_the_box_meter_fills_hours_and_survives_a_flush(rdb, monkeypatch):
+    monkeypatch.setattr(energy, "_unflushed", {})
+    h = 1_800_003_600.0                          # an hour boundary
+    flat(360.0, h - 60, h + 60)                  # two minutes straddling it, 2 s apart
+    energy.flush(now=h + 60)
+    with db._conn() as c:
+        rows = dict(c.execute("SELECT bucket, wh FROM energy_hour").fetchall())
+    assert rows[h - 3600] == pytest.approx(360 * 60 / 3600, rel=0.05)
+    assert rows[h] == pytest.approx(360 * 60 / 3600, rel=0.05)
+    wh, metered = energy.box_energy(h - 3600)
+    assert wh == pytest.approx(12.0, rel=0.01) and metered == pytest.approx(120, abs=1)
+
+
+def test_a_long_gap_is_not_drawn_across(rdb, monkeypatch):
+    monkeypatch.setattr(energy, "_unflushed", {})
+    energy.add_sample(T0, 300.0)
+    energy.add_sample(T0 + 600, 300.0)           # ten minutes of nothing: a restart
+    energy.flush(now=T0 + 600)
+    assert energy.box_energy(T0 - 3600) == (0.0, 0.0)
+
+
+def test_summary_puts_routed_beside_the_box(rdb, monkeypatch):
+    import time
+    monkeypatch.setattr(energy, "_unflushed", {})
+    monkeypatch.setattr(energy, "_summary_cache", None)
+    now = time.time()
+    flat(360.0, now - 100, now - 2)
+    rec(now - 80, 36)
+    energy.attribute(now=now)
+    s = energy.summary(now)
+    assert s["box_wh"] == pytest.approx(360 * 98 / 3600, rel=0.05)
+    assert s["routed_wh"] == pytest.approx(3.6, rel=0.01) and s["routed_n"] == 1
+    assert s["now_w"] == 360.0
+
+
+def test_by_model_keeps_per_token_to_the_measured_rows(rdb):
+    flat(360.0, T0 - 10, T0 + 100)
+    rec(T0, 36, out=1000)
+    energy.attribute(now=T0 + 100)
+    (m,) = energy.by_model(0)
+    assert m["model"] == "m" and m["requests"] == 1
+    assert m["wh"] == pytest.approx(3.6, rel=1e-3) and m["wh_per_1k_output"] == pytest.approx(3.6, rel=1e-3)
+
+
+def test_overview_strip_and_api_carry_the_running_total(web, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(energy, "summary", lambda *a, **k: {
+        "window_s": 86400.0, "box_wh": 2140.0, "box_metered_s": 86400, "box_coverage": 1.0,
+        "routed_wh": 380.0, "routed_n": 12, "requests": 12, "now_w": 300.0})
+    strip = web.get("/boxbar").text
+    assert "24 h" in strip and "2.14 kWh" in strip and "380 Wh routed" in strip
+    api = web.get("/api/v1/energy").json()
+    assert api["windows"]["24h"]["box_wh"] == 2140.0 and len(api["days"]) == 30
+    assert "/api/v1/energy" in web.get("/api/v1").json()["endpoints"]
+    assert web.get("/api/v1/box").json()["energy"]["routed_wh"] == 380.0

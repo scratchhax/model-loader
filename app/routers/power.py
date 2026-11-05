@@ -5,7 +5,7 @@ import os
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-from .. import db, hw, power_cap
+from .. import db, energy, hw, power_cap
 from ..config import settings
 from ..gpu_activity import curve
 from ..web import templates
@@ -55,8 +55,15 @@ def _power_context() -> dict:
     watts_ts, temps_ts = hw.power_series()
     # Pinned to the configured ceilings, so the height of each line is the headroom. Scaled to
     # its own window instead, a quiet box and a box about to trip the UPS would look identical.
+    try:
+        # The running total beside the live figure: the last 24 h of whole-box energy and the
+        # routed requests' share of it (app.energy). Cached there, so the 1 s poll is cheap.
+        en = energy.summary()
+    except Exception:  # noqa: BLE001 - a missing total must never blank the power cell
+        en = {}
     return {
         "p": roll,
+        "energy": en,
         "power_warn_w": cfg["power_warn_w"], "power_crit_w": cfg["power_crit_w"],
         "temp_warn_c": cfg["temp_warn_c"], "temp_crit_c": cfg["temp_crit_c"],
         "power_spark": hw.sparkline(watts, cfg["power_crit_w"]) if len(watts) > 2 else "",
