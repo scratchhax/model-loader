@@ -284,6 +284,25 @@ class TestAnalyzeGolden:
         assert r.recommended_ctx == 131072
         assert r.values["split-mode"] == "tensor"
 
+    def test_no_split_while_a_cpu_router_would_load_it(self):
+        # Every llama router reads models.ini; llama-cpu (a CPU build) died loading Qwen3-ASR's
+        # `split-mode = tensor` and Open WebUI's speech-to-text was broken for weeks.
+        r = ac.analyze(
+            summary=dense_summary(), file_size=30 * GiB,
+            backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]),
+            split_blockers=["llama-cpu", "llama-voice"])
+        assert "split-mode" not in r.values
+        q = " ".join(r.quirks)
+        assert "No tensor split written" in q and "`llama-cpu`" in q and "--split-mode none" in q
+
+    def test_the_split_comes_back_once_cpu_routers_pin_none(self):
+        r = ac.analyze(
+            summary=dense_summary(), file_size=30 * GiB,
+            backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]),
+            split_blockers=[])
+        assert r.values["split-mode"] == "tensor"
+        assert not any("No tensor split" in x for x in r.quirks)
+
     def test_reasoning_effort_defaults_to_high(self):
         s = dense_summary()
         s["chat_template_features"] = {"accepts_reasoning_effort": True}
@@ -339,3 +358,21 @@ class TestAnalyzeGolden:
         r = ac.analyze(summary=dense_summary(context_length=8192),
                        file_size=4 * GiB, backends=backend(), n_sessions=99)
         assert r.n_sessions == 8
+
+
+def test_split_blockers_names_cpu_routers_without_a_pinned_none(monkeypatch):
+    from app import fit
+    found = [
+        {"name": "llama-9700x2", "engine": "llama", "router": True, "vendor": "rocm"},
+        {"name": "llama-cpu", "engine": "llama", "router": True, "vendor": "cpu"},
+        {"name": "llama-voice", "engine": "llama", "router": True, "vendor": "cpu"},
+        {"name": "orpheus", "engine": "llama", "router": False, "vendor": "cpu"},   # -m server: no models.ini
+        {"name": "strata", "engine": "strata", "router": False, "vendor": "rocm"},
+    ]
+    cmds = {"llama-cpu": ["--models-preset", "/models/models.ini", "--split-mode", "none"],
+            "llama-voice": ["--models-preset", "/models/models.ini"]}
+    monkeypatch.setattr(fit.services, "discover_llama_containers", lambda: found)
+    monkeypatch.setattr(fit, "_container_baseline", lambda name: cmds.get(name, []))
+    assert fit.split_blockers() == ["llama-voice"]
+    cmds["llama-voice"] += ["-sm", "none"]
+    assert fit.split_blockers() == []

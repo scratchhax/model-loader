@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, Response
 from .. import autoconfig, engine_controls, gguf_meta, ini, services, telemetry
 from ..config import settings
 from ..utils import shard_key
+from .. import fit
 from ..fit import _backend_list, _resolve_section_gguf
 from ..web import templates
 from .models import _section_caps
@@ -276,6 +277,8 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
     except Exception:  # noqa: BLE001
         tel, cfgh = telemetry.Stats(), []
 
+    # CPU-only routers that would load this section's split and die on it (fit.split_blockers).
+    blockers = await asyncio.to_thread(fit.split_blockers)
     rec = autoconfig.analyze(
         summary=summary,
         file_size=file_size,
@@ -289,6 +292,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
         model_subdir=model_subdir,
         spec_profile=spec,
         vision=vision,
+        split_blockers=blockers,
     )
 
     # Vision costs context, and the panel should say how much rather than leave it to be found
@@ -310,6 +314,7 @@ async def config_autoconfig(request: Request, name: str, preset: str = "",
                 models_dir=settings.models_dir, section_name=name,
                 model_subdir=model_subdir, spec_profile=spec,
                 vision=("off" if rec.vision else "on"),
+                split_blockers=blockers,
             )
             vision_cost = {("on" if rec.vision else "off"): _vision_state(rec),
                            ("off" if rec.vision else "on"): _vision_state(alt)}

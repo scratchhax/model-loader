@@ -1402,7 +1402,10 @@ def analyze(*,
             model_subdir: str = "",
             spec_profile: str = "",
             vision: str = "",
-            mmproj_gb_override: float | None = None) -> Recommendation:
+            mmproj_gb_override: float | None = None,
+            # CPU-only llama routers that read this models.ini without `--split-mode none` on
+            # their own command line (fit.split_blockers). None or [] means none known.
+            split_blockers: list[str] | None = None) -> Recommendation:
     # Clamp n_sessions to a sensible range for a homelab. Above 8 the per-slot ctx
     # shrinks below usability for real chat, and llama-server continuous batching
     # overhead starts dominating.
@@ -2196,12 +2199,19 @@ def analyze(*,
     # draft (27-30 tok/s at those depths). Wiping it also made a choice in the panel silently
     # not stick, which is how that section ended up at 25 tok/s.
     #
-    # Single-GPU and CPU backends never reach here, so they keep whatever the baseline gives
-    # them; SPLIT_MODE_TENSOR on a CPU-only build is a fatal load.
+    # The recommended backend is not the only one that reads this section, though: every llama
+    # router reads the whole of models.ini, and SPLIT_MODE_TENSOR on a CPU-only build is a fatal
+    # load. That is how Open WebUI's speech-to-text (Qwen3-ASR on llama-cpu) died for weeks. So
+    # the split is written only when no CPU-only router would load it: `split_blockers` names
+    # the ones that read this file without pinning `--split-mode none` on their own command
+    # line (fit.split_blockers), and while any exists the section gets no split and says why.
+    split_blocked_by: list[str] = []
     if recommended:
         _rb = next((b for b in backends if b["name"] == recommended.name), None)
         if int((_rb or {}).get("gpu_count", 1)) > 1:
-            values["split-mode"] = "tensor"
+            split_blocked_by = [n for n in (split_blockers or []) if n != recommended.name]
+            if not split_blocked_by:
+                values["split-mode"] = "tensor"
 
     # baseline-redundant: any key that matches the recommended backend's baseline
     baseline_redundant: dict[str, str] = {}
@@ -2227,6 +2237,13 @@ def analyze(*,
 
     # quirks
     quirks: list[str] = []
+    if split_blocked_by:
+        quirks.append(
+            "No tensor split written: " + ", ".join(f"`{n}`" for n in split_blocked_by)
+            + (" reads" if len(split_blocked_by) == 1 else " read") + " this models.ini on a CPU-only "
+            "build, where `split-mode = tensor` is a fatal load. Add `--split-mode none` to "
+            + ("its" if len(split_blocked_by) == 1 else "their") + " command line (it outranks "
+            "the section) and the GPU backend gets its split back.")
 
     # Baseline CONFLICTS — the container's own CLI args win over anything in models.ini,
     # so a preset value that disagrees with the compose command is silently discarded.

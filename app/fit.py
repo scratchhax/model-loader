@@ -126,6 +126,33 @@ def _gpu_image(name: str) -> bool:
     return any(v in t.lower() for t in tags for v in ("rocm", "cuda", "vulkan"))
 
 
+def split_blockers() -> list[str]:
+    """CPU-only llama routers that would load a GPU split from models.ini and die on it.
+
+    Every llama router reads the whole of models.ini, and a section's `split-mode = tensor` is
+    applied wherever that section is loaded. On a build with no GPU that is a fatal load
+    (`llama_params_fit is not implemented for SPLIT_MODE_TENSOR, abort`, then "failed to load
+    model"): Open WebUI's speech-to-text ran Qwen3-ASR on llama-cpu and was broken that way from
+    the day autoconfig started writing tensor split until 2026-11-06. A router's own command line
+    outranks the preset, so a CPU router started with `--split-mode none` is safe whatever the
+    sections say; one without it is a blocker, and autoconfig writes no split while one exists.
+    """
+    out: list[str] = []
+    try:
+        found = services.discover_llama_containers()
+    except Exception:  # noqa: BLE001 - unknown is "nothing known to block", not a broken panel
+        return []
+    for d in found:
+        if d.get("engine") != "llama" or not d.get("router"):
+            continue
+        if str(d.get("vendor") or "").lower() in ("rocm", "cuda", "vulkan", "sycl", "musa"):
+            continue
+        base = autoconfig.parse_baseline(_container_baseline(d["name"]))
+        if str(base.get("split-mode") or "").strip().lower() != "none":
+            out.append(d["name"])
+    return sorted(out)
+
+
 def _backend_list() -> list[dict]:
     """Backend descriptors for autoconfig, from the env whitelist or auto-discovery.
 
@@ -214,7 +241,8 @@ def _predicted_vram_gb(section: str) -> float | None:
         rec = autoconfig.analyze(
             summary=summary, file_size=gguf_path.stat().st_size, backends=backends,
             model_rel=model_rel, current_section=vals, models_dir=settings.models_dir,
-            section_name=section, model_subdir=subdir)
+            section_name=section, model_subdir=subdir,
+            split_blockers=split_blockers())
         if not rec.frontier:
             return None
         # Compare at the context the section is actually configured for, not at whatever
