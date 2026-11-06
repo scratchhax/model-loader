@@ -261,7 +261,10 @@
          free win, and the colour has meant "bet" since the caps chips. #}
       {% if hero_mtp %}
       {% set mtp_acc_txt = '' %}
-      {% if hero_mtp.n %}
+      {% if hero_mtp.basis %}
+        {# Radiance: a running total from the engine's own counters, worded as such. #}
+        {% set mtp_acc_txt = hero_mtp.basis %}
+      {% elif hero_mtp.n %}
         {% set mtp_acc_txt = '%.0f%% of the tokens the draft proposed were accepted by the target model, median of %d requests' % (hero_mtp.acc_pct, hero_mtp.n) %}
         {% if hero_mtp.age %}{% set mtp_acc_txt = mtp_acc_txt ~ ', ' ~ hero_mtp.age %}{% endif %}
         {% if hero_mtp.mean_len and hero_mtp.n_max %}

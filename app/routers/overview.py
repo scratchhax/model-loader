@@ -9,6 +9,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from .. import db, gpu_activity, gpu_procs, hf, hw, ini, services, telemetry, vram_live
 from .. import strata as strata_engine
 from .. import strata_models
+from .. import engine_registry
+from .. import radiance as radiance_engine
 from ..config import settings
 from ..downloader import manager
 from ..fit import _gpu_tenants, _solo_backend
@@ -246,6 +248,19 @@ async def _hero_context() -> dict:
                 shape = services.model_shape(path)
     except Exception:  # noqa: BLE001 - the hero degrades to fewer facts, it never 500s
         pass
+    # Radiance has no models.ini section and no GGUF header: its quant, size, context and
+    # speculation come from the server itself (radiance.server_facts).
+    rad_facts: dict | None = None
+    if engine_registry.speaks_radiance(services.engine_for(b.name)) and b.internal_port:
+        try:
+            rad_facts = await asyncio.to_thread(radiance_engine.server_facts, b.name, b.internal_port)
+        except Exception:  # noqa: BLE001
+            rad_facts = {}
+        quant = rad_facts.get("quant") or quant
+        if rad_facts.get("size_bytes"):
+            size_h = human_bytes(rad_facts["size_bytes"])
+        if rad_facts.get("ctx"):
+            ctx_cfg = f"{rad_facts['ctx'] // 1024}k"
 
     # Anything on the cards that is NOT one of ours and is actually running kernels right now.
     # This is the whole answer to "the panel says idle while the box is clearly working": our
@@ -288,7 +303,8 @@ async def _hero_context() -> dict:
     # What speculation costs, merged into the MTP box so the price sits beside the payoff.
     # Only meaningful once there is a GPU to measure against, which is why it is here and not
     # in _hero_mtp - that function sees telemetry and argv, never the cards.
-    hero_mtp = None if hero_loading else await _hero_mtp(b.name, model_id)
+    hero_mtp = (None if hero_loading else radiance_engine.hero_mtp(rad_facts) if rad_facts is not None
+                else await _hero_mtp(b.name, model_id))
     if hero_mtp is not None and st.ok and st.gpu and not hero_asleep:
         try:
             hero_mtp["cost"] = vram_live.draft_cost(

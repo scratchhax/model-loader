@@ -244,3 +244,29 @@ def test_a_serving_radiance_reports_its_own_version(monkeypatch):
     monkeypatch.setattr(deepseek_engine, "installed", lambda: [])
     (row,) = updates.check(_Docker(radiance=_Ctr("stilldeadcode/radiance:latest")), _hub(["1.17.0"]))["engines"]
     assert row["current"] == "1.17.0" and row["status"] == "current"
+
+
+def test_the_quant_comes_from_the_rad_file_name():
+    from app import radiance
+    assert radiance.quant_of("qwen3.8-next-flash-fp8-iq4r-moe.rad") == "fp8+iq4r"
+    assert radiance.quant_of("qwen3.8-27b-fp8.rad") == "fp8"
+    assert radiance.quant_of("gemma4-31b-w4a8.rad") == "w4a8"
+    assert radiance.quant_of("qwen3.8-27b-bf16.rad") == "bf16" and radiance.quant_of("odd.rad") == ""
+
+
+def test_speculation_reads_as_a_running_total_not_a_median():
+    from app import radiance
+    m = radiance.hero_mtp({"drafter": "mtp", "depth": 3, "accepted": 64745.0, "drafted": 101169.0})
+    assert m["label"] == "MTP" and m["acc_pct"] == 64.0 and m["n_max"] == 3
+    assert "since Radiance started" in m["basis"] and "101,169" in m["basis"]
+    assert radiance.hero_mtp({"drafter": "dflash", "depth": 7, "accepted": None, "drafted": None})["acc_pct"] is None
+    assert radiance.hero_mtp({"drafter": "", "depth": 0}) is None
+
+
+def test_while_generating_the_prompt_rate_is_the_last_completed_one(monkeypatch):
+    log = ("I req chatcmpl-1 done from 172.18.0.7:1 finish=stop prompt=45872 (cache 43008) gen=655 "
+           "reason=185 ttft=2.30s 134.5 tok/s 7.16s\n")
+    out = _run(monkeypatch, _stats(
+        {"id": 9, "state": "decode", "prompt": 46000, "computed": 46100, "cached": 45800, "output": 100,
+         "ctx": 46100, "slot": 0, "tps": 120.0}), log)
+    assert out.state == "generating" and round(out.prefill_tps) == 1245    # (45872 - 43008) / 2.30
