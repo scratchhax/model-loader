@@ -116,3 +116,90 @@ def choices() -> list[tuple[str, str]]:
     """[(file, label)] for the Router tab's Radiance row."""
     return [(m["file"], f"{m['served']}  ({m['gb']:.0f} GB)" + ("" if m["has_args"] else "  — no .args file"))
             for m in installed()]
+
+
+# ---------------------------------------------------------------- what the serving model is
+
+_QUANT_RE = re.compile(r"(?<![a-z0-9])(bf16|fp8|mxfp4|m2xfp4|nvfp4|w4a8|w4a16|w5|w8a8|i8g|iq\d+r|paro-int\d|paro)(?![a-z0-9])")
+_facts_cache: dict[str, tuple[float, dict]] = {}
+_FACTS_TTL_S = 10.0
+
+
+def quant_of(file: str) -> str:
+    """The weight formats a .rad file's name declares, joined: qwen3.8-next-flash-fp8-iq4r-moe.rad
+    -> "fp8+iq4r" (an fp8/int8 trunk with 4-bit IQR experts), qwen3.8-27b-fp8.rad -> "fp8"."""
+    seen: list[str] = []
+    for m in _QUANT_RE.finditer(file.lower().removesuffix(".rad")):
+        if m.group(1) not in seen:
+            seen.append(m.group(1))
+    return "+".join(seen)
+
+
+def _prom_sum(text: str, name: str) -> float | None:
+    vals = []
+    for line in text.splitlines():
+        if line.startswith(name + "{") or line.startswith(name + " "):
+            try:
+                vals.append(float(line.rsplit(" ", 1)[1]))
+            except (ValueError, IndexError):
+                pass
+    return sum(vals) if vals else None
+
+
+def server_facts(container: str, port: int) -> dict:
+    """What the Overview's hero shows for a serving Radiance, read from the server itself (cached
+    10 s): {file, quant, size_bytes, ctx, drafter, depth, accepted, drafted}. The model has no
+    models.ini section and no GGUF header, which is where these come from on llama. {} on failure.
+
+    `accepted`/`drafted` are Radiance's counters since it started (radiance:draft_*_total), so the
+    acceptance is a running figure for this run, not llama's per-request median.
+    """
+    import time
+
+    import httpx
+    from .services import auth_headers
+    now = time.time()
+    hit = _facts_cache.get(container)
+    if hit and now - hit[0] < _FACTS_TTL_S:
+        return hit[1]
+    out: dict = {}
+    base, hdr = f"http://{container}:{port}", auth_headers(container)
+    try:
+        with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
+            info = c.get(base + "/server_info", headers=hdr).json()
+            models = c.get(base + "/v1/models", headers=hdr).json().get("data") or [{}]
+            metrics = c.get(base + "/metrics", headers=hdr).text
+    except (httpx.HTTPError, ValueError, AttributeError):
+        _facts_cache[container] = (now, out)
+        return out
+    spec = ((info.get("engine") or {}).get("speculation") or {})
+    root = str(models[0].get("root") or "")
+    file = root.rsplit("/", 1)[-1]
+    out = {"file": file, "quant": quant_of(file),
+           "ctx": int(models[0].get("max_model_len") or (info.get("server") or {}).get("max_model_len") or 0),
+           "drafter": str(spec.get("drafter") or "") if spec.get("enabled") else "",
+           "depth": int(spec.get("depth") or 0),
+           "accepted": _prom_sum(metrics, "radiance:draft_accepted_total"),
+           "drafted": _prom_sum(metrics, "radiance:draft_tokens_total")}
+    try:
+        out["size_bytes"] = (rad_dir() / file).stat().st_size if file else 0
+    except OSError:
+        out["size_bytes"] = 0
+    _facts_cache[container] = (now, out)
+    return out
+
+
+def hero_mtp(facts: dict) -> dict | None:
+    """The Overview's speculation readout for Radiance, in the shape overview._hero_mtp returns.
+    None when it does not speculate."""
+    if not facts.get("drafter"):
+        return None
+    acc, drafted = facts.get("accepted"), facts.get("drafted")
+    pct = round(100.0 * acc / drafted, 1) if acc is not None and drafted else None
+    label = "MTP" if facts["drafter"] == "mtp" else facts["drafter"].upper()
+    basis = (f"{pct:.0f}% of the {int(drafted):,} tokens the draft proposed since Radiance started were "
+             f"accepted by the target model (its own counters; depth {facts.get('depth') or '?'})."
+             if pct is not None else "no drafted tokens yet: the figure appears after the first generation.")
+    return {"spec_type": facts["drafter"], "builtin": False, "label": label, "acc_pct": pct,
+            "mean_len": 0.0, "n": int(drafted or 0), "age": "", "n_max": int(facts.get("depth") or 0),
+            "basis": basis, "cost": None}

@@ -818,7 +818,9 @@ async def _slots_from_radiance(container_name: str, internal_port: int, model_id
     gen = [sl for sl in slots if sl.state == "generating"]
     pre = [sl for sl in slots if sl.state == "prefill"]
     r = {"cur_gen_tps": sum(sl.gen_tps for sl in gen), "cur_gen_tokens": sum(sl.decoded for sl in gen),
-         "cur_pp_tps": float(st.get("prefill_tps") or 0.0) if pre else 0.0,
+         # While generating, the last COMPLETED prompt's rate, as llama's reader gives: 0 there
+         # read as "the prompt took forever" mid-answer (seen on the dashboard, 2026-11-06).
+         "cur_pp_tps": float(st.get("prefill_tps") or 0.0) if pre else float(last.get("last_pp_tps") or 0.0),
          "cur_pp_pct": max((sl.prefill_pct for sl in pre), default=0),
          "cur_pp_done": sum(sl.prefill_done for sl in pre),
          "cur_pp_total": sum(sl.prefill_total for sl in pre),
