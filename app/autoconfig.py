@@ -43,7 +43,7 @@ _RESERVE_PER_GPU = 0.5   # CUDA runtime + driver context, per card.
 # declared here as a quirk rather than letting it escape silently.
 AUTOCONFIG_DOMAIN: frozenset[str] = frozenset({
     # placement / fit — the ones that decide whether the model loads
-    "ngl", "tensor-split", "split-mode", "cpu-moe", "n-cpu-moe", "fit",
+    "ngl", "tensor-split", "split-mode", "cpu-moe", "n-cpu-moe", "fit", "moe-cache-mib",
     # context and cache
     "ctx-size", "parallel", "batch-size", "ubatch-size", "keep", "cache-reuse", "cache-ram",
     "cache-type-k", "cache-type-v", "flash-attn", "cont-batching", "context-shift",
@@ -2049,6 +2049,20 @@ def analyze(*,
             values.pop("cpu-moe", None)
             values.pop("n-cpu-moe", None)
             values.pop("tensor-split", None)
+            # GPU cache for the experts that stay in host RAM (llama.cpp --moe-cache-mib, #30966).
+            # --fit counts it in its memory breakdown before placing layers, so it trades a few
+            # GPU-resident experts for a cache of the most-routed ones rather than OOMing.
+            # Measured 2026-11-11, Flash-Next UD-Q3_K_XL on 2x R9700 (b12282), 8125-token prompt:
+            #   fit, no cache         24.6-25.0 tok/s decode, ~930 tok/s prefill
+            #   fit + 8192 MiB cache  27.4-28.7 tok/s decode, ~620 tok/s prefill
+            #   -cmoe + 22784 MiB     23.5-24.4 tok/s decode, ~330 tok/s prefill (upstream tuner's pick)
+            # So a modest cache beside --fit's own placement, never everything-in-RAM plus a big
+            # one: an eighth of the VRAM, capped at the 8192 MiB that was measured. The user
+            # chose the decode win over the prefill cost.
+            _v = str((rec_backend or {}).get("vendor") or "").lower()
+            _vram_mib = int(float((rec_backend or {}).get("vram_gb") or 0) * 1024)
+            if _v in ("rocm", "cuda") and _vram_mib >= 16384:
+                values["moe-cache-mib"] = str(min(8192, _vram_mib // 8 // 256 * 256))
             # ctx-size stays pinned: --fit adjusts placement around the context the user asked
             # for rather than silently shrinking it. If it genuinely cannot fit, it falls back
             # to more layers on CPU, which is slower but still runs.

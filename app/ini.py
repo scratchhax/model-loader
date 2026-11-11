@@ -159,6 +159,10 @@ MOE_FIELDS: tuple[Field, ...] = (
           help="For Mixture-of-Experts models: keep every expert on CPU. Big VRAM saver at the cost of PCIe/RAM bandwidth per token."),
     Field("n-cpu-moe", "Keep first N layers' MoE on CPU", "int", placeholder="e.g. 20",
           help="Partial variant: only push the first N layers' experts to CPU. Tune to fit exactly in VRAM."),
+    Field("moe-cache-mib", "MoE expert cache on GPU (MiB)", "int", placeholder="0 = off  ·  e.g. 8192",
+          help="VRAM cache for the experts kept in host RAM, refilled from the most-used ones. --fit counts it "
+               "before placing layers. Faster decode, slower prefill: on Flash-Next Q3 an 8192 MiB cache gave "
+               "+13% decode and -33% prefill. Needs a GPU build and split-mode=layer."),
 )
 
 MULTIMODAL_FIELDS: tuple[Field, ...] = (
