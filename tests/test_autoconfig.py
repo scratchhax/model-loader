@@ -284,6 +284,20 @@ class TestAnalyzeGolden:
         assert r.recommended_ctx == 131072
         assert r.values["split-mode"] == "tensor"
 
+    def test_expert_offload_on_two_gpus_gets_layer_split(self):
+        # llama.cpp has no fitter for tensor split ("llama_params_fit is not implemented for
+        # SPLIT_MODE_TENSOR, abort"), so fit=on with tensor put all of Flash-Next Q3 (85 GB)
+        # on 64 GB of VRAM and OOMed on every build. Layer split, even with a CPU router about.
+        for blockers in ([], ["llama-cpu"]):
+            r = ac.analyze(
+                summary=dense_summary(block_count=48, context_length=262144, expert_count=64),
+                file_size=60 * GiB,
+                backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]),
+                split_blockers=blockers)
+            assert r.values["fit"] == "on"
+            assert r.values["split-mode"] == "layer"
+            assert not any("No tensor split" in x for x in r.quirks)
+
     def test_no_split_while_a_cpu_router_would_load_it(self):
         # Every llama router reads models.ini; llama-cpu (a CPU build) died loading Qwen3-ASR's
         # `split-mode = tensor` and Open WebUI's speech-to-text was broken for weeks.

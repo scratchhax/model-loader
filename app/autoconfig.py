@@ -2205,12 +2205,22 @@ def analyze(*,
     # the split is written only when no CPU-only router would load it: `split_blockers` names
     # the ones that read this file without pinning `--split-mode none` on their own command
     # line (fit.split_blockers), and while any exists the section gets no split and says why.
+    #
+    # Tensor split also needs the whole model on the cards. When experts spill to host RAM the
+    # placement goes to `--fit` (above), and llama.cpp has no fitter for tensor split:
+    # `llama_params_fit is not implemented for SPLIT_MODE_TENSOR, abort`, after which it tries
+    # to put every weight on the GPUs and OOMs. Qwen3.8-Flash-Next-UD-Q3_K_XL (85 GB against
+    # 64 GB of VRAM) could not load at all that way on b12169 or b12282 (2026-11-11). Those
+    # sections get layer split, written out so an older `tensor` in the section cannot survive.
     split_blocked_by: list[str] = []
     if recommended:
         _rb = next((b for b in backends if b["name"] == recommended.name), None)
         if int((_rb or {}).get("gpu_count", 1)) > 1:
-            split_blocked_by = [n for n in (split_blockers or []) if n != recommended.name]
-            if not split_blocked_by:
+            if values.get("fit") == "on":
+                values["split-mode"] = "layer"
+            else:
+                split_blocked_by = [n for n in (split_blockers or []) if n != recommended.name]
+            if values.get("fit") != "on" and not split_blocked_by:
                 values["split-mode"] = "tensor"
 
     # baseline-redundant: any key that matches the recommended backend's baseline
