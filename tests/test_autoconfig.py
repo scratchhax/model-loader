@@ -298,6 +298,23 @@ class TestAnalyzeGolden:
             assert r.values["split-mode"] == "layer"
             assert not any("No tensor split" in x for x in r.quirks)
 
+    def test_expert_offload_gets_a_moe_cache_sized_to_vram(self):
+        moe = dense_summary(block_count=48, context_length=262144, expert_count=64)
+        two = ac.analyze(summary=moe, file_size=60 * GiB,
+                         backends=backend(vram=48.0, gpu_count=2, card_vram_gb=[24.0, 24.0]))
+        assert two.values["moe-cache-mib"] == "6144"            # an eighth of 48 GB
+        big = ac.analyze(summary=moe, file_size=100 * GiB,
+                         backends=backend(vram=64.0, gpu_count=2, card_vram_gb=[32.0, 32.0]))
+        assert big.values["moe-cache-mib"] == "8192"            # capped at the measured size
+        # A model that fits on the cards has nothing in RAM to cache; Fill must clear an old one.
+        dense = ac.analyze(summary=dense_summary(), file_size=4 * GiB, backends=backend())
+        assert "moe-cache-mib" not in dense.values and "moe-cache-mib" in dense.displaced
+
+    def test_no_moe_cache_without_a_gpu_vendor_that_has_it(self):
+        r = ac.analyze(summary=dense_summary(block_count=48, context_length=262144, expert_count=64),
+                       file_size=60 * GiB, backends=backend(vendor="vulkan"))
+        assert r.values["fit"] == "on" and "moe-cache-mib" not in r.values
+
     def test_no_split_while_a_cpu_router_would_load_it(self):
         # Every llama router reads models.ini; llama-cpu (a CPU build) died loading Qwen3-ASR's
         # `split-mode = tensor` and Open WebUI's speech-to-text was broken for weeks.
