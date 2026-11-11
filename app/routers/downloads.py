@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 
 import httpx
@@ -31,6 +32,62 @@ def _dest_for_main(main_filename: str) -> tuple[str, str]:
 def _dest_for_companion(main_stem: str, companion_filename: str) -> str:
     """Place a companion file (mmproj, tokenizer.model, chat_template) inside the main model's subdir."""
     return f"{main_stem}/{Path(companion_filename).name}"
+
+
+# A draft head is cheap by construction: running it beside the target has to be nearly free.
+# The heads seen in practice are 60 MB to 1.4 GB and at most ~8% of their target (Qwen3.8-27B's
+# Q4_0 head beside its 16.5 GB UD-Q4_K_M). A file over either bound is a model, not a head.
+_HEAD_MAX_BYTES = 2 * 1024 ** 3
+_HEAD_MAX_FRACTION = 0.20
+
+
+def _quantless_tokens(stem: str) -> list[str]:
+    """Lowercased name tokens with every quant tag removed (Q4_K_M, IQ1_M, BF16 ...)."""
+    bare = hf._QUANT_RE.sub(" ", stem)
+    return [t for t in re.split(r"[-_.\s]+", bare.lower()) if t]
+
+
+def _is_sibling_quant(head_name: str, main_name: str) -> bool:
+    """True when `head_name` is another quant of the main model with the MTP layers kept in.
+
+    SyndicateLabs/GLM-5.3-Flash-CYBERSECURITY-GGUF ships `...-IQ1_M-MTP.gguf` (101 GB) beside
+    `...-IQ3_M.gguf`: the main model's name, a quant tag and an MTP token. A real head names the
+    head itself, with MTP leading (`mtp-Qwen3.8-27B-Q4_0.gguf`), and is not matched here.
+    """
+    head_stem, main_stem = _model_stem(head_name), _model_stem(main_name)
+    if not hf._QUANT_RE.search(head_stem):
+        return False
+    head = _quantless_tokens(head_stem)
+    if not head or head[0] in ("mtp", "draft"):
+        return False
+    head = [t for t in head if t not in ("mtp", "draft")]
+    return head == _quantless_tokens(main_stem)
+
+
+def _draft_head(files: list, main_path: str, main_size: int):
+    """The smallest file in the repo that is plausibly a draft head for `main_path`, or None.
+
+    The name is not enough: some repos use `-MTP` for full quants that carry the MTP layers. A
+    head must have a known size, stay under _HEAD_MAX_BYTES and under _HEAD_MAX_FRACTION of the
+    main file, and must not be another quant of the main model.
+    """
+    main_name = Path(main_path).name
+    heads = []
+    for f in files:
+        name = Path(f.path).name
+        if (f.path == main_path or not name.lower().endswith(".gguf")
+                or "mmproj" in name.lower() or not f.size):
+            continue
+        if not autoconfig._looks_like_draft(name, f.size):
+            continue
+        if f.size >= _HEAD_MAX_BYTES:
+            continue
+        if main_size and f.size >= main_size * _HEAD_MAX_FRACTION:
+            continue
+        if _is_sibling_quant(name, main_name):
+            continue
+        heads.append(f)
+    return min(heads, key=lambda f: f.size) if heads else None
 
 
 async def _foreign_repo(repo_id: str, main_path: str) -> str:
@@ -81,12 +138,9 @@ async def download_single(repo_id: str = Form(...), path: str = Form(...), size:
         # A head from the model's own repo is trained against it, and llama.cpp drives it
         # through draft-mtp; a generic community draft paired with an unrelated model is what
         # segfaults llama-server. Autoconfig still only PROPOSES enabling it.
-        heads = [f for f in detail.files
-                 if f.path.lower().endswith(".gguf")
-                 and "mmproj" not in Path(f.path).name.lower()
-                 and autoconfig._looks_like_draft(Path(f.path).name)]
-        if heads:
-            head = min(heads, key=lambda f: f.size or 0)
+        main_size = size or next((f.size for f in detail.files if f.path == path), 0)
+        head = _draft_head(detail.files, path, main_size)
+        if head:
             manager.enqueue(
                 repo_id=repo_id,
                 hf_path=head.path,
