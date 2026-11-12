@@ -163,8 +163,10 @@ async def search_repo(request: Request, repo_id: str) -> HTMLResponse:
         # The chips come AFTER the header probe, because the header is what tells an MoE
         # from a dense model — and for Strata that is the whole question: an MoE over VRAM
         # streams its routed experts from host RAM and runs at full speed, so a size-only
-        # chip calling it oom contradicts the engine running it right now. Without a
-        # header (gated repo, fetch failure) the chips fall back to size-only, as before.
+        # chip calling it oom contradicts the engine running it right now. The header's
+        # architecture matters as much: only an MoE Strata actually runs streams there; any
+        # other (a GLM, say) gets the llama.cpp verdict. Without a header (gated repo, fetch
+        # failure) the chips fall back to size-only, as before.
         for g in groups:
             g["fit_chips"] = services.vram_fit_chips(g["total_size"], summary)
     except httpx.HTTPStatusError as e:

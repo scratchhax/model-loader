@@ -35,3 +35,13 @@ def test_oom_chip_is_unchanged():
     assert "✗" in out
     assert "needs CPU offload" in out
     assert "llama-9700x2 (63.7G)" in out
+
+
+def test_oom_chip_note_lands_in_the_tooltip_without_a_streams_claim():
+    note = "Strata runs only qwen4exp (Qwen3.8-Flash-Next) and cannot load this architecture (glm5-next)"
+    out = render([{"name": "strata", "vram_gb": 63.7, "verdict": "oom",
+                   "ratio_pct": 237, "note": note}])
+    assert "✗" in out
+    assert note in out
+    assert "⇄" not in out
+    assert "streams the routed experts" not in out
