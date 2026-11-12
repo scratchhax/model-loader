@@ -17,14 +17,19 @@
   {% else %}bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300{% endif %}">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div>{{ flash.msg }}</div>
-    {% if flash.ok and llama_backends %}
-    <div class="flex items-center gap-2 text-xs">
+    {% if flash.ok and (llama_backends or llama_stopped) %}
+    <div class="flex flex-wrap items-center gap-2 text-xs">
+      {% if llama_backends %}
       <span class="opacity-70">Apply now:</span>
       {% for name in llama_backends %}
       <button hx-post="/containers/{{ name }}/restart" hx-swap="outerHTML"
               hx-confirm="Restart {{ name }} now? Model reload can take 30–60s."
               class="rounded-md border border-current px-2.5 py-1 font-mono">restart {{ name }}</button>
       {% endfor %}
+      {% endif %}
+      {% if llama_stopped %}
+      <span class="opacity-70">{{ llama_stopped | join(', ') }} {{ 'is' if llama_stopped | length == 1 else 'are' }} stopped and will pick this up at the next start</span>
+      {% endif %}
       <a href="/containers" class="opacity-70 hover:opacity-100 underline">view</a>
     </div>
     {% endif %}
