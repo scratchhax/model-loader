@@ -56,6 +56,17 @@ from dataclasses import dataclass, field
 # a Qwen3.8-Flash-Next mirror, whatever its repo id claims.
 ARCH_MARKER = "qwen3.8-flash-next"
 
+# The same fact as the GGUF header states it (`general.architecture`). Read off every Flash-Next
+# file on wheatley, GSQ-RCO and Unsloth alike (2026-11-12). The header's general.name is no
+# substitute: it reads "Qwen3.8 Flash Next" in some quants and "Qwen3.8-Flash-Next GSQ-RCO" in
+# others, so ARCH_MARKER cannot be matched against it.
+GGUF_ARCH = "qwen4exp"
+
+
+def runs_gguf_arch(arch: str | None) -> bool:
+    """True when Strata serves GGUFs of this architecture (the header's general.architecture)."""
+    return (arch or "").strip().lower() == GGUF_ARCH
+
 # The quantization format marker the three ISTA-DASLab-style families use. Strata's pack tool
 # reads GSQ-RCO tensors; a file without this marker is some other quantizer's output even when
 # its tier token (IQ3_S) matches one of ours.

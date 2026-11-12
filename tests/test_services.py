@@ -444,7 +444,10 @@ class TestFitChips:
     """
     VRAM = 63.7
     RAM = 120.0
-    MOE = {"model": {"expert_count": 128, "expert_used_count": 8}}
+    MOE = {"arch": "qwen4exp", "model": {"expert_count": 128, "expert_used_count": 8}}
+    # SyndicateLabs/GLM-5.3-Flash-CYBERSECURITY-GGUF's header: 288 experts, an architecture
+    # Strata cannot load. The chip said it would stream there and it was downloaded on that.
+    GLM = {"arch": "glm5-next", "model": {"expert_count": 288, "expert_used_count": 8}}
     DENSE = {"model": {"expert_count": None}}
 
     def _stub(self, monkeypatch, ram=None, arena=0.0):
@@ -505,6 +508,47 @@ class TestFitChips:
         assert c["host_ram_gb"] == 93.6
         assert c["ratio_pct"] == round(78.1 / (self.VRAM + 93.6) * 100)
         assert self._chip(chips, "llama-9700x2")["verdict"] == "oom"
+
+    def test_oversized_qwen_family_moe_still_streams(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        c = self._chip(sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.MOE), "strata")
+        assert c["verdict"] == "streams"
+        assert "note" not in c
+
+    def test_oversized_glm_moe_does_not_stream_on_strata(self, monkeypatch):
+        # 151 GB IQ3_M: over VRAM, under VRAM + RAM, so the llama.cpp oom (CPU offload) verdict.
+        sc = self._stub(monkeypatch)
+        chips = sc.vram_fit_chips(int(151 * 1024 ** 3), self.GLM)
+        assert [c["verdict"] for c in chips] == ["oom", "oom"]
+        c = self._chip(chips, "strata")
+        assert "host_ram_gb" not in c
+        assert c["ratio_pct"] == round(151 / self.VRAM * 100)
+        assert "qwen4exp" in c["note"] and "glm5-next" in c["note"]
+        # Maya is named as the family's engine, never as somewhere this file will run.
+        assert "Maya is the engine for the GLM family" in c["note"]
+        assert "not this file" in c["note"]
+        assert "note" not in self._chip(chips, "llama-9700x2")
+
+    def test_unknown_arch_moe_gets_no_maya_hint(self, monkeypatch):
+        sc = self._stub(monkeypatch)
+        other = {"arch": "deepseek2", "model": {"expert_count": 256}}
+        c = self._chip(sc.vram_fit_chips(int(78.1 * 1024 ** 3), other), "strata")
+        assert c["verdict"] == "oom"
+        assert "deepseek2" in c["note"] and "Maya" not in c["note"]
+
+    def test_moe_without_arch_does_not_stream(self, monkeypatch):
+        # expert_count with no architecture cannot be shown to be Strata's: no streams.
+        sc = self._stub(monkeypatch)
+        bare = {"model": {"expert_count": 128}}
+        c = self._chip(sc.vram_fit_chips(int(78.1 * 1024 ** 3), bare), "strata")
+        assert c["verdict"] == "oom"
+
+    def test_glm_moe_cannot_count_on_the_strata_arena(self, monkeypatch):
+        # The arena is reclaimable only by a model Strata runs; a GLM file is not one.
+        sc = self._stub(monkeypatch, ram=6.4, arena=87.2)
+        chips = sc.vram_fit_chips(int(78.1 * 1024 ** 3), self.GLM)
+        assert chips[0]["verdict"] == "impossible"
+        assert chips[0]["host_ram_gb"] == 6.4
 
     def test_dense_cannot_reclaim_the_arena(self, monkeypatch):
         # Same numbers, dense model: no streaming anywhere, and the machine-level

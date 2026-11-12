@@ -396,18 +396,26 @@ def vram_fit_chips(size_bytes: int, summary: dict | None = None) -> list[dict]:
     an offload candidate (an IQ3_S Flash-Next well over VRAM runs at full speed there). Dense
     models keep the VRAM-only verdicts on every engine, because for them there is nothing to
     stream.
+
+    Streaming is also gated on the header's ARCHITECTURE: Strata runs one (strata_models.
+    GGUF_ARCH), and an MoE of any other is a file it cannot load at all. Without that gate the
+    chip told the user a 151 GB GLM-5.3-Flash (glm5-next) would stream on Strata, and they
+    downloaded it (2026-11-12). Such a model gets the llama.cpp verdict on every backend, and
+    the Strata chip carries a `note` saying why it is not streaming.
     """
-    from .. import hw
+    from .. import hw, maya, strata_models
     gb = size_bytes / (1024 ** 3)
     moe = bool(((summary or {}).get("model") or {}).get("expert_count"))
+    arch = ((summary or {}).get("arch") or "").strip().lower()
+    strata_moe = moe and strata_models.runs_gguf_arch(arch)
 
     # usable, not total: the OS reserve is already spoken for (see hw.usable_ram_gb).
     ram = hw.usable_ram_gb()
     # Strata's own pinned arena is streaming budget, not competition: loading a different
-    # model on strata reclaims it, so for an MoE the machine's real ceiling includes it.
-    # Other engines must not count on it — pinned anonymous memory does not give itself
-    # back to a llama-server process.
-    arena = hw.strata_arena_gb() if moe else 0.0
+    # model on strata reclaims it, so for an MoE Strata runs the machine's real ceiling
+    # includes it. Other engines must not count on it — pinned anonymous memory does not
+    # give itself back to a llama-server process.
+    arena = hw.strata_arena_gb() if strata_moe else 0.0
     ceiling = ram + arena
     pooled = max((v for v in _fit_backends().values() if v > 0), default=0.0)
     if ram > 0 and pooled > 0 and gb > (pooled + ceiling):
@@ -430,7 +438,7 @@ def vram_fit_chips(size_bytes: int, summary: dict | None = None) -> list[dict]:
             verdict = "fits"
         elif ratio < 0.9:
             verdict = "tight"
-        elif moe and ceiling > 0 and engine_for(name) == "strata":
+        elif strata_moe and ceiling > 0 and engine_for(name) == "strata":
             verdict = "streams"
         else:
             verdict = "oom"
@@ -440,6 +448,15 @@ def vram_fit_chips(size_bytes: int, summary: dict | None = None) -> list[dict]:
             "verdict": verdict,
             "ratio_pct": round(ratio * 100),
         }
+        if verdict == "oom" and moe and not strata_moe and engine_for(name) == "strata":
+            # An oversized MoE is exactly where the user expects Strata to stream it, so say
+            # why it does not rather than leave a bare oom next to the Strata name.
+            note = (f"Strata runs only {strata_models.GGUF_ARCH} (Qwen3.8-Flash-Next) and cannot "
+                    f"load this architecture ({arch or 'unknown'}), so it does not stream it.")
+            if arch == maya.GLM_GGUF_ARCH:
+                note += (" Maya is the engine for the GLM family, but it runs packs its own setup "
+                         "builds, not this file, and a GLM pack this size may not fit in RAM.")
+            chip["note"] = note
         if verdict == "streams":
             # The honest denominator for a streaming verdict is the combined pool the
             # model actually spans; the VRAM-only ratio would read >100% and re-look

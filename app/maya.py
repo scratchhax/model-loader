@@ -34,6 +34,11 @@ CONTAINER = os.environ.get("MAYA_CONTAINER", "maya")
 ENGINE_CONF_DIR = "/data/conf"
 CONF_DIR = Path(os.environ.get("MAYA_CONF_DIR") or "/maya/conf")
 
+# GLM-5.3-Flash's GGUF architecture (`general.architecture`). Maya is the engine for that family,
+# but it runs packs its own setup builds, not an arbitrary Hub GGUF of it, so this answers "which
+# engine family is this" and never "will this file run on Maya".
+GLM_GGUF_ARCH = "glm5-next"
+
 _TTL_S = 30.0
 _cache: dict[str, tuple[float, list[dict]]] = {}
 _lock = threading.Lock()
