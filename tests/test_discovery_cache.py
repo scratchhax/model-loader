@@ -4,6 +4,8 @@ a 1 s poll: five discoveries, each listing and inspecting every container, plus 
 inspect per container for its tag."""
 from __future__ import annotations
 
+import threading
+
 from app.services import backends
 
 
@@ -40,8 +42,15 @@ class FakeClient:
 
 
 def _with(monkeypatch, cs):
+    """The fake docker, visible to this test's thread only. The cache is process-wide, and any
+    earlier test that started the app leaves its hw-sampler thread calling discovery every
+    second. Seeing the fake, that thread wrote its own result into the cache (an empty list,
+    when it had listed the real socket a moment earlier) and the test read it back. Every other
+    thread sees no docker, and with no client discovery never caches."""
     cli = FakeClient(cs)
-    monkeypatch.setattr(backends, "_docker_client", lambda: cli)
+    me = threading.current_thread()
+    monkeypatch.setattr(backends, "_docker_client",
+                        lambda: cli if threading.current_thread() is me else None)
     return cli
 
 
@@ -58,8 +67,11 @@ def test_a_bare_image_id_falls_back_to_the_tags(monkeypatch):
 
 
 def test_reused_within_the_ttl_and_copies_are_handed_out(monkeypatch):
-    monkeypatch.setattr(backends, "_DISCOVER_TTL_S", 60.0)
+    # The fake first, then the TTL, then an empty cache: in that order no other thread can
+    # have cached anything this test will read.
     cli = _with(monkeypatch, [FakeContainer("llama-cpu", "ghcr.io/ggml-org/llama.cpp:server")])
+    monkeypatch.setattr(backends, "_DISCOVER_TTL_S", 60.0)
+    backends.invalidate_discovery()
     a = backends.discover_llama_containers()
     a[0]["name"] = "changed by a caller"
     b = backends.discover_llama_containers()
