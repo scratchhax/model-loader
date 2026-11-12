@@ -405,17 +405,80 @@ def pinned_backend(engine: str) -> str:
 # --------------------------------------------------------------------------- routing
 
 class Unresolved(Exception):
-    """No backend can serve this request, with a reason meant for a human."""
+    """No backend can serve this request, with a reason meant for a human.
+
+    `engine` names the engine that WOULD serve it once it held the cards, when that is known,
+    so the auto-switch can hand them over. Without it only an engine alias could ever trigger a
+    switch, and a request for a real model id (what Open WebUI sends) got a bare 503.
+    """
+
+    def __init__(self, msg: str, engine: str = "") -> None:
+        super().__init__(msg)
+        self.engine = engine
+
+
+def _cards_divided(a: dict, b: dict) -> bool:
+    """Are `a` and `b` legitimately sharing the cards (the Share button's arrangement)?
+
+    Only when one of them is a Strata pinned to a strict subset of the cards, the one split the
+    switch offers. Anything else on the same cards at once is a collision.
+    """
+    from . import hw, strata as strata_engine
+    if strata_engine.ENGINE not in (a.get("engine"), b.get("engine")):
+        return False
+    held, n = services.strata_held_cards(), len(hw.sysfs_card_vram_gb())
+    return bool(held) and n > 1 and len(held) < n and all(0 <= h < n for h in held)
+
+
+async def _card_holders_against(b: dict, bs: list[dict]) -> list[str]:
+    """Backends of OTHER engines serving from the cards `b` needs. [] when they are b's.
+
+    "Serving" (ready) is the honest test of holding: a parked Strata answers loaded:false and
+    has given its VRAM back, a stopped container is not in `bs` at all, and a CPU-only router
+    holds no card. The incident this exists for (2026-11-12): llama-9700x2 was started by hand
+    while Strata held all 64 GB, both answered as ready, the router forwarded a CyberStrike
+    request to llama because llama was "up", and llama died allocating its first 0.9 GB.
+    """
+    if b.get("cpu_only"):
+        return []
+    others = [o for o in bs if o is not b and o.get("ready") and not o.get("cpu_only")
+              and o.get("engine") != b.get("engine")]
+    if not others:
+        return []
+    clash = []
+    for o in others:
+        if not await asyncio.to_thread(_cards_divided, b, o):
+            clash.append(o["name"])
+    return clash
 
 
 async def resolve(asked: str) -> tuple[dict, str]:
+    """(backend, model to ask it for) for a requested name, or raise Unresolved.
+
+    A backend is only an answer while its engine holds the cards. Being up is not enough: two
+    exclusive engines can both be running (a hand start, a restart from a container card), and
+    forwarding to the one without the VRAM fails inside the model load.
+    """
+    b, model = await _resolve_live(asked)
+    bs, _ = await _live_map()
+    clash = await _card_holders_against(b, bs)
+    if clash:
+        raise Unresolved(
+            f"{model} is on {b['name']}, but {', '.join(clash)} holds the cards right now. "
+            f"The engines here are exclusive; {b['engine']} needs the cards handed over first.",
+            engine=b["engine"])
+    return b, model
+
+
+async def _resolve_live(asked: str) -> tuple[dict, str]:
     """(backend, model to ask it for) for a requested name, or raise Unresolved.
 
     `asked` is either an engine alias - the stable thing - or a real model id.
     """
     bs, by_model = await _live_map()
     if not bs:
-        raise Unresolved("no inference backend is running")
+        raise Unresolved("no inference backend is running",
+                         engine="llama" if asked not in ENGINES and asked in ini.gpu_sections() else "")
     if asked in ENGINES:
         live = [b for b in bs if b["engine"] == asked and b.get("ready")]
         if not live:
@@ -478,10 +541,13 @@ async def resolve(asked: str) -> tuple[dict, str]:
 
     if asked in by_model:
         return by_model[asked], asked
+    # A models.ini section set up for the cards is a llama model whatever is running now, so
+    # the switch that would serve it is known: hand the cards to llama.
+    gpu_model = asked in ini.gpu_sections()
     cpu = [b["name"] for b in bs if b.get("ready") and asked in b.get("gpu_only", ())]
     if cpu:
-        raise Unresolved(_cpu_refusal(asked, cpu[0]))
-    raise Unresolved(f"no running backend serves {asked!r}")
+        raise Unresolved(_cpu_refusal(asked, cpu[0]), engine="llama" if gpu_model else "")
+    raise Unresolved(f"no running backend serves {asked!r}", engine="llama" if gpu_model else "")
 
 
 def _cpu_refusal(model: str, backend: str) -> str:
@@ -734,15 +800,18 @@ async def _forward(request: Request, path: str, shape: str) -> JSONResponse:
         # says why no switch happened.
         narratable = streaming and shape == "openai"
         detail = str(e)
+        # The engine to hand the cards to: the one resolve() named (a real model id, or a
+        # backend that is up beside the engine actually holding the cards), else the alias.
+        target = e.engine or want
 
-        if narratable and await swap_in_flight_for(want):
+        if narratable and await swap_in_flight_for(target):
             # A switch is ALREADY running toward this engine, whoever started it. Describe it.
             return narrated_response(body, path, shape, conv, client_id, want, t0)
 
         if narratable:
-            ok, why = await may_autoswitch(want)
+            ok, why = await may_autoswitch(target)
             if ok:
-                started, msg = await request_switch(want)
+                started, msg = await request_switch(target)
                 if started:
                     # The switch is running. narrated_response describes it from here and
                     # relays the answer into the same response when the engine is up.

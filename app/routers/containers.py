@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, Response
 
-from .. import db, engine_registry, gpu_procs, hw, ini, services, vram_live
+from .. import db, engine_registry, fit, gpu_procs, hw, ini, services, vram_live
 from ..config import settings
 from .. import strata as strata_engine
 from ..downloader import manager
@@ -466,6 +466,17 @@ def containers_power(name: str, action: str = Form(...)) -> HTMLResponse:
 
 @router.post("/containers/{name}/restart", response_class=HTMLResponse)
 def containers_restart(name: str) -> HTMLResponse:
+    # Restart means "apply what changed to the thing that is running", so it never starts
+    # anything. On a STOPPED backend it used to be a start in disguise: after a models.ini save,
+    # "Apply now: restart llama-9700x2" brought llama up beside a Strata holding all 64 GB
+    # (2026-11-12) and its first load OOMed. A stopped router reads models.ini when it next
+    # starts, so there is nothing to apply. The buttons only offer Restart while running; this
+    # covers the command palette and stale pages.
+    if fit._container_status(name) not in ("running", "restarting", ""):
+        return HTMLResponse(
+            f'<span class="inline-flex items-center rounded-md bg-slate-100 dark:bg-slate-800 '
+            f'text-slate-700 dark:text-slate-300 px-2.5 py-1 text-xs font-mono">'
+            f'{html.escape(name)} is stopped; it picks up changes when it next starts</span>')
     services.restart_llama_backend(name)
     # small chip: replaces the button when hx-swap=outerHTML; ignored when hx-swap=none
     return HTMLResponse(

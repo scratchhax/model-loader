@@ -37,9 +37,23 @@ def _config_context(request: Request, flash: dict | None = None) -> dict:
         "raw": ini.raw_text(),
         "backups": ini.list_backups(),
         "ini_path": str(settings.models_ini_path),
-        "llama_backends": services._effective_container_names(),
+        # "Apply now" restarts only routers that are RUNNING. A stopped one reads models.ini when it
+        # next starts, so there is nothing to apply; and restarting a stopped GPU router is a start
+        # beside whichever engine holds the cards (2026-11-12: Strata held all 64 GB, llama came
+        # up next to it, and its first load OOMed). Saving a section for later must never move
+        # the cards.
+        **_llama_restart_split(),
         "flash": flash,
     }
+
+
+def _llama_restart_split() -> dict[str, list[str]]:
+    running, stopped = [], []
+    for n in services._effective_container_names():
+        if services.engine_for(n) != "llama":
+            continue
+        (running if fit._container_status(n) == "running" else stopped).append(n)
+    return {"llama_backends": running, "llama_stopped": stopped}
 
 
 @router.get("/config", response_class=HTMLResponse)

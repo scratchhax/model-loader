@@ -56,12 +56,16 @@
     </button>
   </form>
   {% endif %}
+  {# Restart only while running. On a stopped container it is a start in disguise, and for a GPU
+     engine a start beside whichever engine holds the cards. Start is the button beside this. #}
+  {% if b.status == 'running' %}
   <button hx-post="/containers/{{ b.name }}/restart"
           hx-swap="none"
           hx-confirm="Restart {{ b.name }}? Any in-flight completions will drop; model reload can take 30–60s."
           class="inline-flex items-center gap-1.5 shrink-0 rounded-md border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-50 dark:hover:bg-slate-800">
     {{ icon('rotate-cw', 13) }} Restart
   </button>
+  {% endif %}
   </div>
   {% endif %}
 </div>
