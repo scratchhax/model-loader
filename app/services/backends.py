@@ -420,9 +420,9 @@ def _discover_llama_containers() -> list[dict]:
         engine = engine or "llama"
         vendor = "rocm" if "rocm" in img else "cuda" if "cuda" in img else ("cpu" if "server" in img else "unknown")
         if vendor == "unknown":
-            # An image whose name says nothing (stilldeadcode/radiance:1.17.0) is known by the
-            # devices it was given. Without this Radiance counted as a CPU-ish backend and the
-            # Overview led with the voice model on the CPU while Radiance held both cards.
+            # An image whose name says nothing about its GPU stack is known by the devices it was
+            # given. Without this such an engine counted as a CPU-ish backend and the Overview
+            # led with the voice model on the CPU while it held both cards.
             vendor = _vendor_from_devices(c.attrs) or vendor
         # Router or single-model server? A router is given --models-preset/--models-dir and
         # serves whatever models.ini holds; a server given -m serves exactly one file and has
@@ -458,10 +458,9 @@ def _vendor_from_devices(attrs: dict | None) -> str:
 
 # The environment variables a backend reads its API key from. Strata 0.2 requires one on every
 # endpoint but /health (`strata launch --access lan`); upstream's image takes it as API_KEY, and
-# STRATA_API_KEY is the server's own name for it. Radiance reads RADIANCE_API_KEY (its
-# --api-key-env). llama.cpp and Maya set none, so for them auth_headers() is {} and their requests
-# are exactly what they were.
-_KEY_ENV = ("API_KEY", "STRATA_API_KEY", "RADIANCE_API_KEY")
+# STRATA_API_KEY is the server's own name for it. llama.cpp and Maya set none, so for them
+# auth_headers() is {} and their requests are exactly what they were.
+_KEY_ENV = ("API_KEY", "STRATA_API_KEY")
 
 
 def api_key_of(attrs: dict | None) -> str:

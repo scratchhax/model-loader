@@ -9,16 +9,16 @@ from app.services import engines, speed
 
 
 def test_order_and_default_unchanged():
-    assert reg.NAMES == ("strata", "llama", "maya", "deepseek", "radiance") == ra.ENGINES
+    assert reg.NAMES == ("strata", "llama", "maya", "deepseek") == ra.ENGINES
 
 
 def test_derived_constants_match_what_they_were():
-    assert ra.SINGLE_MODEL == {"strata", "maya", "deepseek", "radiance"}
+    assert ra.SINGLE_MODEL == {"strata", "maya", "deepseek"}
     assert speed._METRICS_ENGINES == {"strata", "maya", "deepseek"}
     assert engines.READY_TIMEOUT_S["maya"] == 900.0
     assert engines.READY_TIMEOUT_S.get("llama", engines._READY_TIMEOUT_DEFAULT_S) == 420.0
     assert ENGINE_COLORS["strata"] == ("indigo", "99,102,241")
-    assert [e["engine"] for e in updates.ENGINES] == ["strata", "maya", "llama", "radiance"]
+    assert [e["engine"] for e in updates.ENGINES] == ["strata", "maya", "llama"]
     assert updates.ENGINES[0]["runbook"] == "~/ai-lab/strata/UPGRADING.md"
 
 

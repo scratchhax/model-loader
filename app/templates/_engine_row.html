@@ -38,11 +38,6 @@
           {# Its own container with one model in it, so the alias always means that model. #}
           DeepSeek runs the one model its container was set up with, on Strata's DeepSeek engine;
           asking for <span class="font-mono">deepseek</span> always gets that model.
-        {% elif e == 'radiance' %}
-          {# Strata's shape: one model per process, read at startup. #}
-          Radiance serves one model at a time and reads it when it starts, so the choice is one of
-          the <strong>.rad containers</strong> in models/rad. Set applies it at the next start, at
-          once when Radiance holds the cards and is idle.
         {% else %}
           llama.cpp loads on demand, so this takes effect on the next request asking for
           <span class="font-mono">llama</span>.
