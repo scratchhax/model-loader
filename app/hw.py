@@ -144,11 +144,10 @@ def _detect_vendor(container) -> str:
         # rather than falling into "unknown" and reporting no GPU at all.
         vendor = "vulkan"
     else:
-        # An image whose name says nothing (stilldeadcode/radiance:1.17.0) is known by the
-        # devices it was given: /dev/kfd is AMD, an NVIDIA device or a GPU request is NVIDIA.
-        # Without this, Radiance holding both cards drew no card panels and "GPUs 0 W" at the
-        # wall while it generated (the same trap backends._vendor_from_devices fixed for the
-        # backend list in #164).
+        # An image whose name says nothing about its GPU stack is known by the devices it was
+        # given: /dev/kfd is AMD, an NVIDIA device or a GPU request is NVIDIA. Without this, an
+        # engine like that holding both cards drew no card panels and "GPUs 0 W" at the wall
+        # while it generated (the same trap backends._vendor_from_devices fixed in #164).
         host = (getattr(container, "attrs", None) or {}).get("HostConfig") or {}
         devices = [str((d or {}).get("PathOnHost") or "") for d in host.get("Devices") or []]
         if "/dev/kfd" in devices:

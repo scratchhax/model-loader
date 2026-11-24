@@ -80,21 +80,6 @@ ENGINES: dict[str, Engine] = {e.name: e for e in (
         single_model=True, ready_path="/health", ready_timeout_s=900.0,
         strata_metrics=True, parks=True, protocol="strata",
         runbook="~/ai-lab/strata/UPGRADING.md"),
-    # Radiance (codeberg.org/StillDeadcode/radiance): its own C++/HIP server, one .rad model per
-    # container. Its port opens once the model is in and /health then says "ok"; a start is ~1 min
-    # warm and a few from a cold page cache (it reads a 122 GB file). It serves its own JSON
-    # (/stats: every running request with its slot, state and progress), not Strata's /metrics,
-    # and it has no park. It pins ~90 GB of RAM (an n-gram table, a host expert pool, a prefix
-    # tier), hence needs_ram.
-    Engine(
-        name="radiance", label="Radiance", color=("rose", "244,63,94"),
-        single_model=True, ready_path="/health", ready_timeout_s=600.0,
-        protocol="radiance", ready_status="ok", needs_ram=True,
-        # Its releases are its Docker Hub tags (the source is on Codeberg); see updates.latest_hub_tag.
-        updates={"repo": "StillDeadcode/radiance", "kind": "dockerhub", "image": "stilldeadcode/radiance",
-                 "container": "radiance", "web": "https://codeberg.org/StillDeadcode/radiance"},
-        runbook="change the radiance service's image tag in docker-compose.yaml, then recreate it "
-                "(the old image stays for rollback); trial scripts in ~/ai-lab/radiance"),
 )}
 
 NAMES: tuple[str, ...] = tuple(ENGINES)
@@ -129,9 +114,3 @@ def serving(engine: str, status_code: int, body) -> bool:
     if spec and spec.ready_status:
         return isinstance(body, dict) and str(body.get("status") or "") == spec.ready_status
     return True
-
-
-def speaks_radiance(engine: str | None) -> bool:
-    """Is this engine Radiance's server (its /stats document, its log lines)?"""
-    spec = get(engine)
-    return bool(spec and spec.protocol == "radiance")

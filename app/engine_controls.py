@@ -8,7 +8,6 @@ Blocking (docker, Maya's configs, install configs on disk), so callers run it in
 from __future__ import annotations
 
 from . import maya as maya_engine
-from . import radiance as radiance_engine
 from . import router_api, services, strata_models
 
 
@@ -88,12 +87,6 @@ def rows_context(bs: list[dict]) -> dict:
         defaults["maya"] = maya_runs
     elif len(per_engine.get("maya", [])) == 1:
         defaults["maya"] = per_engine["maya"][0][0]
-    # Radiance's row: the .rad containers in models/rad, and the one its next start loads
-    # (models/rad/radiance.env, read by the service's entry point). Read from disk, so the row is
-    # complete while the container is stopped - the engines take turns, so that is most of the time.
-    per_engine["radiance"] = radiance_engine.choices()
-    if radiance_engine.selected():
-        defaults["radiance"] = radiance_engine.selected()
     # Strata's row, likewise: the install strata.env names (the Strata tab can change it), not a
     # stored router.default.strata.
     strata_next = strata_router._strata_selected_tag(strata_models.read_selection(strata_router.STRATA_ENV_FILE))

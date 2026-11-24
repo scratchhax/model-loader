@@ -28,12 +28,12 @@ class TestDetectVendor:
         assert hw._detect_vendor(card("plain-cpu:1")) == "unknown"
 
     def test_an_image_name_that_says_nothing_is_known_by_its_devices(self):
-        # Radiance's image names no GPU stack; as "unknown" it got no GPU reading at all: no
+        # An image that names no GPU stack; as "unknown" it got no GPU reading at all: no
         # card panels and "GPUs 0 W" at the wall while it held both R9700s and generated.
         def ctr(name, **host):
-            return NS(name=name, image=NS(tags=["stilldeadcode/radiance:1.17.0"]), attrs={"HostConfig": host})
-        assert hw._detect_vendor(ctr("radiance", Devices=[{"PathOnHost": "/dev/kfd"},
-                                                          {"PathOnHost": "/dev/dri"}])) == "amd"
+            return NS(name=name, image=NS(tags=["someone/engine:1.0.0"]), attrs={"HostConfig": host})
+        assert hw._detect_vendor(ctr("engine", Devices=[{"PathOnHost": "/dev/kfd"},
+                                                        {"PathOnHost": "/dev/dri"}])) == "amd"
         assert hw._detect_vendor(ctr("nv", Devices=[], DeviceRequests=[{"Driver": "nvidia"}])) == "nvidia"
         assert hw._detect_vendor(ctr("cpu-thing", Devices=[])) == "unknown"
         assert hw._detect_vendor(card("plain-cpu:2")) == "unknown"     # no attrs at all
